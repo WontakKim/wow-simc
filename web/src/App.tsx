@@ -9,10 +9,8 @@ import {
   ReplayValidationError,
   RecordedDuration,
 } from "./replay";
-import { GenuineModelScene } from "./GenuineModelScene";
+import { GenuineModelScene, ILLUSTRATIVE_MOTION_WINDOW_SECONDS, type ReplaySpeed } from "./GenuineModelScene";
 import "./styles.css";
-
-const SPEEDS = [0.5, 1, 2] as const;
 
 function formatNumber(value: number | null, maximumFractionDigits = 0) {
   return value === null
@@ -260,7 +258,7 @@ export function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
+  const [speed, setSpeed] = useState<ReplaySpeed>(1);
   const [message, setMessage] = useState("Loading bundled reference…");
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
@@ -269,7 +267,11 @@ export function App() {
 
   const actor = report?.actors.find((candidate) => candidate.id === selectedActorId) ?? null;
   const selectedEvent = actor?.events[selectedIndex] ?? null;
-  const maxTime = actor ? Math.max(0, ...actor.events.filter((event) => event.phase === "combat").map((event) => event.time)) : 0;
+  const combatEvents = actor?.events.filter((event) => event.phase === "combat") ?? [];
+  const lastCombatTime = combatEvents.length > 0 ? Math.max(...combatEvents.map((event) => event.time)) : 0;
+  const playbackEndTime = combatEvents.length > 0
+    ? Math.round((lastCombatTime + ILLUSTRATIVE_MOTION_WINDOW_SECONDS) * 1000) / 1000
+    : 0;
 
   const dpsSampleLabel = useMemo(() => {
     if (!actor || actor.aggregateDpsSamples === null) return "DPS sample count not recorded";
@@ -289,11 +291,11 @@ export function App() {
     let frameId = 0;
     const advance = (now: number) => {
       const previous = lastFrameRef.current ?? now;
-      const nextCursor = Math.min(maxTime, cursor + ((now - previous) / 1000) * speed);
+      const nextCursor = Math.min(playbackEndTime, cursor + ((now - previous) / 1000) * speed);
       lastFrameRef.current = now;
       setCursor(nextCursor);
       setSelectedIndex(findEventAtOrBefore(actor.events, nextCursor));
-      if (nextCursor >= maxTime) {
+      if (nextCursor >= playbackEndTime) {
         setIsPlaying(false);
         return;
       }
@@ -301,7 +303,7 @@ export function App() {
     };
     frameId = requestAnimationFrame(advance);
     return () => cancelAnimationFrame(frameId);
-  }, [actor, cursor, isPlaying, maxTime, speed]);
+  }, [actor, cursor, isPlaying, playbackEndTime, speed]);
 
   const resetSelection = (nextActor: ReplayActor | null) => {
     setIsPlaying(false);
@@ -373,6 +375,17 @@ export function App() {
     setSelectedIndex(findEventAtOrBefore(actor.events, time));
   };
 
+  const toggleReplayPlayback = () => {
+    if (!actor || playbackEndTime === 0) return;
+    if (cursor >= playbackEndTime) {
+      setCursor(0);
+      setSelectedIndex(findEventAtOrBefore(actor.events, 0));
+      setIsPlaying(true);
+      return;
+    }
+    setIsPlaying((current) => !current);
+  };
+
   useEffect(() => {
     const navigateWithArrowKeys = (event: KeyboardEvent) => {
       if (!actor || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
@@ -408,13 +421,27 @@ export function App() {
           </dl>
         </section>
 
-        <GenuineModelScene />
+        <GenuineModelScene
+          replay={actor && selectedEvent ? {
+            events: actor.events,
+            selectedIndex,
+            cursor,
+            isPlaying,
+            speed,
+            maxTime: playbackEndTime,
+            onSelectEvent: selectEvent,
+            onSeek: seek,
+            onTogglePlayback: toggleReplayPlayback,
+            onReset: () => selectEvent(0),
+            onSpeedChange: setSpeed,
+          } : null}
+        />
 
         <section className="intro replay-intro" aria-labelledby="trace-inspector-title">
           <div>
             <p className="eyebrow">Secondary sampled trace inspector</p>
             <h2 id="trace-inspector-title">Inspect what SimC recorded.</h2>
-            <p>The bundled reference opens automatically for recorded-state inspection. The trace is independent of the manual animation preview above; this tool does not simulate, optimize, infer damage, or explain why an action was chosen.</p>
+            <p>The bundled reference opens automatically and drives the primary scene through one replay clock. Exported motions are illustrative; this tool does not simulate, optimize, infer damage or hit timing, or explain why an action was chosen.</p>
           </div>
           <div className="reference-note">
             <strong>Built-in reference</strong>
@@ -466,18 +493,6 @@ export function App() {
               <article className="metric-card"><span>Mean fight length</span><strong>{actor.fightLength === null ? "—" : formatSeconds(actor.fightLength)}</strong><small>Aggregate report metric</small></article>
               <article className="metric-card"><span>Trace entries</span><strong>{formatNumber(actor.events.length)}</strong><small>Precombat + combat sample</small></article>
               <article className="metric-card"><span>Selected snapshot</span><strong>{formatSeconds(selectedEvent.time)}</strong><small>Playback cursor {formatSeconds(cursor)}</small></article>
-            </section>
-
-            <section className="transport card" aria-label="Replay controls">
-              <button type="button" onClick={() => selectEvent(selectedIndex - 1)} disabled={selectedIndex === 0} aria-label="Previous event">Previous</button>
-              <button className="play-button" type="button" onClick={() => {
-                if (cursor >= maxTime) seek(0);
-                setIsPlaying(!isPlaying);
-              }} disabled={maxTime === 0}>{isPlaying ? "Pause" : "Play"}</button>
-              <button type="button" onClick={() => selectEvent(selectedIndex + 1)} disabled={selectedIndex === actor.events.length - 1} aria-label="Next event">Next</button>
-              <button type="button" onClick={() => selectEvent(0)}>Reset</button>
-              <label className="speed-control">Speed<select value={speed} onChange={(event) => setSpeed(Number(event.target.value) as (typeof SPEEDS)[number])}>{SPEEDS.map((value) => <option value={value} key={value}>{value}×</option>)}</select></label>
-              <label className="seek-control"><span>Seek</span><input aria-label="Seek playback" type="range" min="0" max={Math.max(maxTime, 0.001)} step="0.01" value={cursor} onChange={(event) => seek(Number(event.target.value))} /><output>{formatSeconds(cursor)}</output></label>
             </section>
 
             <Timeline actor={actor} selectedIndex={selectedIndex} cursor={cursor} onSelect={selectEvent} />

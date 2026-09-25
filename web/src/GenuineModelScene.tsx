@@ -23,6 +23,7 @@ import {
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
+import type { ReplayEvent } from "./replay";
 
 const MODEL_ASSETS = {
   vulpera: {
@@ -39,8 +40,51 @@ const MODEL_ASSETS = {
 
 const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
+const STAND_CLIP_NAME = "Stand (ID 0 variation 0)";
+export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
+
+const ELEMENTAL_SHAMAN_CLIPS = new Map<number, { actionName: string; clipName: string }>([
+  [318038, { actionName: "flametongue_weapon", clipName: "SpellCastOmni (ID 54 variation 0)" }],
+  [192106, { actionName: "lightning_shield", clipName: "ShaSpellPrecastBothChannel (ID 862 variation 0)" }],
+  [191634, { actionName: "stormkeeper", clipName: "ShaSpellPrecastBoth (ID 828 variation 0)" }],
+  [443454, { actionName: "ancestral_swiftness", clipName: "SpellCastOmni (ID 54 variation 0)" }],
+  [1219480, { actionName: "ascendance", clipName: "ChannelCastOmniUp (ID 1448 variation 0)" }],
+  [51505, { actionName: "lava_burst", clipName: "CastStrongUpRight (ID 1148 variation 0)" }],
+  [188196, { actionName: "lightning_bolt", clipName: "ShaSpellCastBothFront (ID 830 variation 0)" }],
+  [117014, { actionName: "elemental_blast", clipName: "CastOutStrong (ID 1122 variation 0)" }],
+  [188389, { actionName: "flame_shock", clipName: "SpellCastDirected (ID 53 variation 0)" }],
+]);
 
 type SceneStatus = "loading" | "ready" | "error";
+type AnimationMode = "replay" | "manual";
+export type ReplaySpeed = 0.5 | 1 | 2;
+export type ReplayAnimationKind = "motion" | "settled" | "before" | "wait" | "failed" | "unmapped" | "unavailable";
+
+export interface ReplayAnimationResolution {
+  kind: ReplayAnimationKind;
+  eventLabel: string;
+  clipName: string;
+  clipTime: number;
+  status: string;
+}
+
+export interface SceneReplayState {
+  events: ReplayEvent[];
+  selectedIndex: number;
+  cursor: number;
+  isPlaying: boolean;
+  speed: ReplaySpeed;
+  maxTime: number;
+  onSelectEvent: (index: number) => void;
+  onSeek: (time: number) => void;
+  onTogglePlayback: () => void;
+  onReset: () => void;
+  onSpeedChange: (speed: ReplaySpeed) => void;
+}
+
+export interface GenuineModelSceneProps {
+  replay: SceneReplayState | null;
+}
 
 interface CameraView {
   position: Vector3;
@@ -48,9 +92,98 @@ interface CameraView {
 }
 
 interface AnimationController {
-  playClip: (index: number, shouldPlay: boolean) => void;
-  setPlaying: (shouldPlay: boolean) => void;
+  applyReplayAnimation: (resolution: ReplayAnimationResolution) => void;
+  playManualClip: (index: number, shouldPlay: boolean) => void;
+  setManualPlaying: (shouldPlay: boolean) => void;
   resetCamera: () => void;
+}
+
+function getEventLabel(event: ReplayEvent) {
+  if (event.kind === "wait") return `Wait ${(event.wait ?? 0).toFixed(2)}s`;
+  return event.spellName ?? event.name;
+}
+
+export function resolveReplayAnimation(
+  events: ReplayEvent[],
+  selectedIndex: number,
+  cursor: number,
+): ReplayAnimationResolution {
+  const event = events[selectedIndex];
+  if (!event) {
+    return {
+      kind: "unavailable",
+      eventLabel: "No replay event",
+      clipName: STAND_CLIP_NAME,
+      clipTime: 0,
+      status: "Replay sync is unavailable — idle.",
+    };
+  }
+
+  const eventLabel = getEventLabel(event);
+  if (cursor < event.time) {
+    return {
+      kind: "before",
+      eventLabel,
+      clipName: STAND_CLIP_NAME,
+      clipTime: 0,
+      status: "The cursor is before this recorded action — idle.",
+    };
+  }
+  if (event.kind === "wait") {
+    return {
+      kind: "wait",
+      eventLabel,
+      clipName: STAND_CLIP_NAME,
+      clipTime: 0,
+      status: "Recorded wait — idle; no cast motion.",
+    };
+  }
+  if (event.queueFailed) {
+    return {
+      kind: "failed",
+      eventLabel,
+      clipName: STAND_CLIP_NAME,
+      clipTime: 0,
+      status: "Recorded queue failure — idle; no successful cast motion.",
+    };
+  }
+
+  const mappedClip = event.id === null ? undefined : ELEMENTAL_SHAMAN_CLIPS.get(event.id);
+  if (!mappedClip || mappedClip.actionName !== event.name) {
+    return {
+      kind: "unmapped",
+      eventLabel,
+      clipName: STAND_CLIP_NAME,
+      clipTime: 0,
+      status: "No supported exported motion mapping — idle.",
+    };
+  }
+
+  const elapsed = cursor - event.time;
+  if (elapsed >= ILLUSTRATIVE_MOTION_WINDOW_SECONDS - 0.000001) {
+    return {
+      kind: "settled",
+      eventLabel,
+      clipName: STAND_CLIP_NAME,
+      clipTime: 0,
+      status: "Illustrative motion window complete — idle.",
+    };
+  }
+
+  return {
+    kind: "motion",
+    eventLabel,
+    clipName: mappedClip.clipName,
+    clipTime: elapsed,
+    status: "Illustrative exported motion — not cast duration or hit timing.",
+  };
+}
+
+export function isReplayClipMissing(
+  resolution: ReplayAnimationResolution,
+  animationNames: string[],
+) {
+  return resolution.kind === "motion" && !animationNames.includes(resolution.clipName);
 }
 
 export function configureVulperaMaterials(root: Object3D) {
@@ -82,8 +215,8 @@ function disposeObject(root: Object3D) {
   for (const texture of textures) texture.dispose();
 }
 
-function placeModel(root: Group, x: number, scale = 1) {
-  root.rotation.y = -Math.PI / 2;
+function placeModel(root: Group, x: number, rotationY: number, scale = 1) {
+  root.rotation.y = rotationY;
   root.scale.setScalar(scale);
   root.updateWorldMatrix(true, true);
   const bounds = new Box3().setFromObject(root);
@@ -134,15 +267,30 @@ async function loadModel(loader: GLTFLoader, asset: (typeof MODEL_ASSETS)[keyof 
   }
 }
 
-export function GenuineModelScene() {
+export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<AnimationController | null>(null);
+  const animationModeRef = useRef<AnimationMode>("replay");
+  const replayAnimationRef = useRef(resolveReplayAnimation(
+    replay?.events ?? [],
+    replay?.selectedIndex ?? -1,
+    replay?.cursor ?? 0,
+  ));
   const [status, setStatus] = useState<SceneStatus>("loading");
   const [loadedModelCount, setLoadedModelCount] = useState(0);
   const [animationNames, setAnimationNames] = useState<string[]>([]);
   const [selectedAnimationIndex, setSelectedAnimationIndex] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [animationMode, setAnimationMode] = useState<AnimationMode>("replay");
+  const [isManualPlaying, setIsManualPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const replayAnimation = resolveReplayAnimation(
+    replay?.events ?? [],
+    replay?.selectedIndex ?? -1,
+    replay?.cursor ?? 0,
+  );
+  replayAnimationRef.current = replayAnimation;
+  const hasMissingReplayClip = status === "ready" && isReplayClipMissing(replayAnimation, animationNames);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -235,7 +383,7 @@ export function GenuineModelScene() {
       if (isStopped) return;
       animationFrame = requestAnimationFrame(renderFrame);
       const delta = Math.min(clock.getDelta(), 0.1);
-      mixer?.update(delta);
+      if (animationModeRef.current === "manual") mixer?.update(delta);
       controls.update();
       renderer.render(scene, camera);
     };
@@ -287,8 +435,9 @@ export function GenuineModelScene() {
       if (isStopped) return;
 
       configureVulperaMaterials(vulpera.scene);
-      placeModel(vulpera.scene, -0.95);
-      placeModel(trainingDummy.scene, 0.95, 0.7);
+      // Facial bones extend along native +X, so these rotations face both exports toward each other.
+      placeModel(vulpera.scene, -0.95, 0);
+      placeModel(trainingDummy.scene, 0.95, Math.PI, 0.7);
       scene.add(vulpera.scene, trainingDummy.scene);
 
       modelBounds = new Box3()
@@ -296,16 +445,45 @@ export function GenuineModelScene() {
         .union(new Box3().setFromObject(trainingDummy.scene));
       defaultView = frameModels(camera, controls, modelBounds);
       const clips = vulpera.animations;
-      const defaultClipIndex = Math.max(0, clips.findIndex((clip) => clip.name === "Stand (ID 0 variation 0)"));
+      const animationClipNames = clips.map((clip) => clip.name);
+      const defaultClipIndex = Math.max(0, animationClipNames.indexOf(STAND_CLIP_NAME));
       mixer = new AnimationMixer(vulpera.scene);
+      let activeClipIndex = -1;
 
-      const playClip = (index: number, shouldPlay: boolean) => {
+      const activateClip = (index: number, shouldRestart: boolean) => {
         const clip = clips[index];
-        if (!clip || !mixer) return;
-        activeAction?.stop();
-        activeAction = mixer.clipAction(clip);
-        activeAction.reset().play();
-        activeAction.paused = !shouldPlay;
+        if (!clip || !mixer) return null;
+        if (activeClipIndex !== index) {
+          activeAction?.stop();
+          activeAction = mixer.clipAction(clip);
+          activeClipIndex = index;
+          shouldRestart = true;
+        }
+        const action = activeAction;
+        if (!action) return null;
+        if (shouldRestart) action.reset().play();
+        return action;
+      };
+      const applyReplayAnimation = (resolution: ReplayAnimationResolution) => {
+        if (!mixer) return;
+        const requestedIndex = resolution.kind === "motion"
+          ? animationClipNames.indexOf(resolution.clipName)
+          : defaultClipIndex;
+        const clipIndex = requestedIndex >= 0 ? requestedIndex : defaultClipIndex;
+        const action = activateClip(clipIndex, false);
+        if (!action) return;
+        action.paused = true;
+        const clipDuration = clips[clipIndex]?.duration ?? 0;
+        const finalClipSample = Math.max(0, clipDuration - 0.0001);
+        action.time = resolution.kind === "motion" && requestedIndex >= 0
+          ? Math.min(resolution.clipTime, finalClipSample)
+          : 0;
+        mixer.update(0);
+      };
+      const playManualClip = (index: number, shouldPlay: boolean) => {
+        const action = activateClip(index, true);
+        if (!action || !mixer) return;
+        action.paused = !shouldPlay;
         mixer.update(0);
       };
       const resetCamera = () => {
@@ -316,15 +494,20 @@ export function GenuineModelScene() {
       };
 
       controllerRef.current = {
-        playClip,
-        setPlaying: (shouldPlay) => {
+        applyReplayAnimation,
+        playManualClip,
+        setManualPlaying: (shouldPlay) => {
           if (activeAction) activeAction.paused = !shouldPlay;
         },
         resetCamera,
       };
-      setAnimationNames(clips.map((clip) => clip.name));
+      setAnimationNames(animationClipNames);
       setSelectedAnimationIndex(defaultClipIndex);
-      playClip(defaultClipIndex, false);
+      if (animationModeRef.current === "replay") {
+        applyReplayAnimation(replayAnimationRef.current);
+      } else {
+        playManualClip(defaultClipIndex, false);
+      }
       setStatus("ready");
     };
 
@@ -336,15 +519,35 @@ export function GenuineModelScene() {
     };
   }, []);
 
+  useEffect(() => {
+    animationModeRef.current = animationMode;
+    if (animationMode === "manual") {
+      controllerRef.current?.playManualClip(selectedAnimationIndex, false);
+      return;
+    }
+    setIsManualPlaying(false);
+  }, [animationMode]);
+
+  useEffect(() => {
+    if (animationMode !== "replay") return;
+    controllerRef.current?.applyReplayAnimation(replayAnimation);
+  }, [animationMode, replayAnimation.kind, replayAnimation.clipName, replayAnimation.clipTime]);
+
   const onAnimationChange = (index: number) => {
     setSelectedAnimationIndex(index);
-    controllerRef.current?.playClip(index, isPlaying);
+    controllerRef.current?.playManualClip(index, isManualPlaying);
   };
 
-  const onPlaybackToggle = () => {
-    const nextIsPlaying = !isPlaying;
-    setIsPlaying(nextIsPlaying);
-    controllerRef.current?.setPlaying(nextIsPlaying);
+  const onManualPlaybackToggle = () => {
+    const nextIsPlaying = !isManualPlaying;
+    setIsManualPlaying(nextIsPlaying);
+    controllerRef.current?.setManualPlaying(nextIsPlaying);
+  };
+
+  const selectAnimationMode = (nextMode: AnimationMode) => {
+    if (nextMode === "manual" && replay?.isPlaying) replay.onTogglePlayback();
+    setAnimationMode(nextMode);
+    if (nextMode === "replay") setIsManualPlaying(false);
   };
 
   return (
@@ -383,38 +586,87 @@ export function GenuineModelScene() {
         </div>
       )}
 
-      <div className="model-controls">
-        <label>
-          <span>Exported character animation</span>
-          <select
-            aria-label="Exported character animation"
-            value={selectedAnimationIndex}
-            onChange={(event) => onAnimationChange(Number(event.target.value))}
+      <div className="animation-mode-tabs" aria-label="Character animation mode">
+        <button
+          type="button"
+          aria-pressed={animationMode === "replay"}
+          onClick={() => selectAnimationMode("replay")}
+        >
+          Replay sync
+        </button>
+        <button
+          type="button"
+          aria-pressed={animationMode === "manual"}
+          onClick={() => selectAnimationMode("manual")}
+        >
+          Manual preview
+        </button>
+      </div>
+
+      {animationMode === "replay" ? (
+        <>
+          <div className="replay-motion-status" data-animation-kind={hasMissingReplayClip ? "missing" : replayAnimation.kind} aria-live="polite">
+            <span>Selected recorded action</span>
+            <strong>{replayAnimation.eventLabel}</strong>
+            <small>
+              {hasMissingReplayClip
+                ? `Required exported clip missing (${replayAnimation.clipName}) — idle.`
+                : replayAnimation.status}
+            </small>
+          </div>
+          {replay ? (
+            <div className="transport model-replay-controls" aria-label="Replay controls">
+              <button type="button" onClick={() => replay.onSelectEvent(replay.selectedIndex - 1)} disabled={replay.selectedIndex === 0} aria-label="Previous event">Previous</button>
+              <button className="play-button" type="button" onClick={replay.onTogglePlayback} disabled={replay.maxTime === 0}>{replay.isPlaying ? "Pause" : "Play"}</button>
+              <button type="button" onClick={() => replay.onSelectEvent(replay.selectedIndex + 1)} disabled={replay.selectedIndex === replay.events.length - 1} aria-label="Next event">Next</button>
+              <button type="button" onClick={replay.onReset}>Reset</button>
+              <label className="speed-control">Speed<select value={replay.speed} onChange={(event) => replay.onSpeedChange(Number(event.target.value) as ReplaySpeed)}>{[0.5, 1, 2].map((value) => <option value={value} key={value}>{value}×</option>)}</select></label>
+              <label className="seek-control"><span>Seek</span><input aria-label="Seek playback" type="range" min="0" max={Math.max(replay.maxTime, 0.001)} step="any" value={replay.cursor} onChange={(event) => replay.onSeek(Number(event.target.value))} /><span className="seek-output">{replay.cursor.toFixed(replay.cursor < 10 ? 2 : 1)}s</span></label>
+              <button type="button" onClick={() => controllerRef.current?.resetCamera()} disabled={status !== "ready"}>Reset camera</button>
+            </div>
+          ) : (
+            <div className="replay-unavailable">
+              Replay sync is unavailable. The genuine scene and separate manual preview remain usable.
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="model-controls">
+          <label>
+            <span>Exported character animation</span>
+            <select
+              aria-label="Exported character animation"
+              value={selectedAnimationIndex}
+              onChange={(event) => onAnimationChange(Number(event.target.value))}
+              disabled={status !== "ready" || animationNames.length === 0}
+            >
+              {animationNames.length === 0 ? (
+                <option>Animations load with the Vulpera model</option>
+              ) : animationNames.map((name, index) => (
+                <option value={index} key={`${name}-${index}`}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="model-play-button"
+            type="button"
+            onClick={onManualPlaybackToggle}
             disabled={status !== "ready" || animationNames.length === 0}
+            aria-label={isManualPlaying ? "Pause animation" : "Play animation"}
           >
-            {animationNames.length === 0 ? (
-              <option>Animations load with the Vulpera model</option>
-            ) : animationNames.map((name, index) => (
-              <option value={index} key={`${name}-${index}`}>{name}</option>
-            ))}
-          </select>
-        </label>
-        <button
-          className="model-play-button"
-          type="button"
-          onClick={onPlaybackToggle}
-          disabled={status !== "ready" || animationNames.length === 0}
-          aria-label={isPlaying ? "Pause animation" : "Play animation"}
-        >
-          {isPlaying ? "Pause" : "Play"}
-        </button>
-        <button
-          type="button"
-          onClick={() => controllerRef.current?.resetCamera()}
-          disabled={status !== "ready"}
-        >
-          Reset camera
-        </button>
+            {isManualPlaying ? "Pause" : "Play"}
+          </button>
+          <button
+            type="button"
+            onClick={() => controllerRef.current?.resetCamera()}
+            disabled={status !== "ready"}
+          >
+            Reset camera
+          </button>
+        </div>
+      )}
+
+      <div className="model-ready-status">
         {status === "loading" && (
           <p role="status">Loading genuine models ({loadedModelCount} of 2)…</p>
         )}
@@ -424,7 +676,9 @@ export function GenuineModelScene() {
       </div>
 
       <p className="model-disclaimer">
-        Manual exported animation preview — not synchronized to the sampled SimC trace. It does not show spell impact timing, damage, VFX, or optimal play.
+        {animationMode === "replay"
+          ? "Replay sync samples illustrative exported motion from recorded action timestamps. The 1.20s viewer motion window and clip duration are not cast duration or hit timing; no damage, VFX, or hit reaction is inferred."
+          : "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."}
       </p>
     </section>
   );

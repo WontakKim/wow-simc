@@ -98,6 +98,9 @@ test("keeps the genuine scene usable through reference failure and retry", async
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await expect(scene.locator("canvas")).toBeVisible();
+  await expect(scene.locator(".replay-unavailable")).toBeVisible();
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
 
   await alert.getByRole("button", { name: "Retry loading reference" }).click();
 
@@ -122,6 +125,8 @@ test("preserves missing-state semantics for a legacy partial reference", async (
 
   await page.getByRole("button", { name: "Next event" }).click();
   await expect(page.getByTestId("selected-event")).toContainText("Wait 0.50s");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.locator(".replay-motion-status")).toContainText("Recorded wait — idle; no cast motion.");
 });
 
 test("keeps the replay usable at mobile width", async ({ page }) => {
@@ -137,7 +142,7 @@ test("keeps the replay usable at mobile width", async ({ page }) => {
   await expect(page.getByTestId("selected-event")).toBeVisible();
 });
 
-test("loads both genuine local models and previews exported animation manually", async ({ page }) => {
+test("loads both genuine local models with separate replay and manual modes", async ({ page }) => {
   const runtimeRequests: string[] = [];
   page.on("request", (request) => runtimeRequests.push(request.url()));
 
@@ -146,20 +151,105 @@ test("loads both genuine local models and previews exported animation manually",
   await expect(scene).toBeVisible();
   await expect(scene.getByText("Default Vulpera", { exact: true })).toBeVisible();
   await expect(scene.getByText("Training Dummy", { exact: true })).toBeVisible();
-  await expect(scene.getByText(/not synchronized to the sampled SimC trace/i)).toBeVisible();
+  await expect(scene.getByRole("button", { name: "Replay sync" })).toHaveAttribute("aria-pressed", "true");
+  await expect(scene.getByText(/illustrative exported motion/i)).toBeVisible();
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await expect(scene.locator("canvas")).toBeVisible();
 
+  await scene.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(scene.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(scene.getByRole("button", { name: "Manual preview" })).toHaveAttribute("aria-pressed", "true");
   const animationSelect = scene.getByRole("combobox", { name: "Exported character animation" });
   expect(await animationSelect.locator("option").count()).toBeGreaterThan(100);
   await animationSelect.selectOption({ label: "Run (ID 5 variation 0)" });
   await scene.getByRole("button", { name: "Play animation" }).click();
   await expect(scene.getByRole("button", { name: "Pause animation" })).toBeVisible();
-  await scene.getByRole("button", { name: "Pause animation" }).click();
+  await animationSelect.selectOption({ label: "Walk (ID 4 variation 0)" });
+  const manualPose = await scene.locator("canvas").screenshot();
+  await page.waitForTimeout(180);
+  expect((await scene.locator("canvas").screenshot()).equals(manualPose)).toBe(false);
+
+  await scene.getByRole("button", { name: "Replay sync" }).click();
+  await expect(scene.getByRole("button", { name: "Play", exact: true })).toBeVisible();
 
   expect(runtimeRequests.some((url) => url.endsWith("/model/vulpera.glb"))).toBe(true);
   expect(runtimeRequests.some((url) => url.endsWith("/model/training-dummy.glb"))).toBe(true);
   expect(runtimeRequests.every((url) => new URL(url).origin === "http://127.0.0.1:4173")).toBe(true);
+});
+
+test("synchronizes real exported poses to replay controls deterministically", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  const canvas = scene.locator("canvas");
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const motionStatus = scene.locator(".replay-motion-status");
+
+  await seek.fill("20.44");
+  await expect(motionStatus).toContainText("Lightning Bolt");
+  await expect(motionStatus).toHaveAttribute("data-animation-kind", "motion");
+  const startPose = await canvas.screenshot();
+
+  await seek.fill("20.9");
+  await expect(motionStatus).toContainText("Lightning Bolt");
+  const laterPose = await canvas.screenshot();
+  expect(laterPose.equals(startPose)).toBe(false);
+
+  await seek.fill("20.7");
+  const firstSample = await canvas.screenshot();
+  await seek.fill("18.5");
+  await expect(motionStatus).toContainText("Lava Burst");
+  const lavaBurstPose = await canvas.screenshot();
+  await seek.fill("19.6");
+  await expect(motionStatus).toContainText("Elemental Blast");
+  expect((await canvas.screenshot()).equals(lavaBurstPose)).toBe(false);
+  await seek.fill("30.2");
+  await expect(motionStatus).toContainText("Lightning Bolt");
+  await seek.fill("20.7");
+  await expect(motionStatus).toContainText("Lightning Bolt");
+  const repeatedSample = await canvas.screenshot();
+  expect(repeatedSample.equals(firstSample)).toBe(true);
+
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await scene.getByRole("combobox", { name: "Exported character animation" }).selectOption({ label: "Run (ID 5 variation 0)" });
+  await scene.getByRole("button", { name: "Replay sync" }).click();
+  await expect(motionStatus).toContainText("Lightning Bolt");
+  expect((await canvas.screenshot()).equals(firstSample)).toBe(true);
+
+  await scene.getByLabel("Speed").selectOption("2");
+  await scene.getByRole("button", { name: "Play", exact: true }).click();
+  await page.waitForTimeout(150);
+  await scene.getByRole("button", { name: "Pause", exact: true }).click();
+  const pausedCursor = await seek.inputValue();
+  const pausedPose = await canvas.screenshot();
+  await page.waitForTimeout(150);
+  expect(await seek.inputValue()).toBe(pausedCursor);
+  expect((await canvas.screenshot()).equals(pausedPose)).toBe(true);
+
+  await seek.fill("44.213");
+  await expect(motionStatus).toContainText("Stormkeeper");
+  await scene.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(motionStatus).toContainText("snapshot_stats");
+  await expect(motionStatus).toHaveAttribute("data-animation-kind", "unmapped");
+});
+
+test("applies the latest replay pose when the Vulpera finishes loading late", async ({ page }) => {
+  await page.route("**/model/vulpera.glb", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.continue();
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  await seek.fill("20.7");
+  await expect(scene.locator(".replay-motion-status")).toContainText("Lightning Bolt");
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  const replayPose = await scene.locator("canvas").screenshot();
+
+  await seek.fill("20.44");
+  const earlierPose = await scene.locator("canvas").screenshot();
+  expect(earlierPose.equals(replayPose)).toBe(false);
 });
 
 test("orbits, zooms, and resets the genuine model camera", async ({ page }) => {
@@ -170,20 +260,24 @@ test("orbits, zooms, and resets the genuine model camera", async ({ page }) => {
   const bounds = await canvas.boundingBox();
   if (!bounds) throw new Error("The WebGL canvas has no visible bounds.");
 
+  await page.waitForTimeout(250);
   const initial = await canvas.screenshot();
-  await page.mouse.move(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
+  await page.mouse.move(bounds.x + bounds.width * 0.4, bounds.y + bounds.height * 0.55);
   await page.mouse.down();
-  await page.mouse.move(bounds.x + bounds.width * 0.7, bounds.y + bounds.height * 0.4, { steps: 8 });
+  await page.mouse.move(bounds.x + bounds.width * 0.8, bounds.y + bounds.height * 0.35, { steps: 12 });
   await page.mouse.up();
+  await page.waitForTimeout(150);
   const orbited = await canvas.screenshot();
   expect(orbited.equals(initial)).toBe(false);
 
   await canvas.hover();
   await page.mouse.wheel(0, -500);
+  await page.waitForTimeout(150);
   const zoomed = await canvas.screenshot();
   expect(zoomed.equals(orbited)).toBe(false);
 
   await scene.getByRole("button", { name: "Reset camera" }).click();
+  await page.waitForTimeout(50);
   const reset = await canvas.screenshot();
   expect(reset.equals(zoomed)).toBe(false);
 });

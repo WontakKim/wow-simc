@@ -4,11 +4,41 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./GenuineModelScene", () => ({
-  GenuineModelScene: () => (
+  ILLUSTRATIVE_MOTION_WINDOW_SECONDS: 1.2,
+  GenuineModelScene: ({ replay }: {
+    replay?: {
+      selectedIndex: number;
+      cursor: number;
+      isPlaying: boolean;
+      speed: number;
+      maxTime: number;
+      events: Array<{ spellName: string | null; name: string }>;
+      onSelectEvent: (index: number) => void;
+      onSeek: (time: number) => void;
+      onTogglePlayback: () => void;
+      onReset: () => void;
+      onSpeedChange: (speed: number) => void;
+    } | null;
+  }) => (
     <section aria-label="Genuine WoW model scene">
       <span>Default Vulpera</span>
       <span>Training Dummy</span>
-      <p>Manual exported animation preview — not synchronized to the sampled SimC trace.</p>
+      <button type="button" aria-pressed="true">Replay sync</button>
+      <button type="button" aria-pressed="false">Manual preview</button>
+      {replay ? (
+        <>
+          <p data-testid="scene-replay-state">
+            {replay.events[replay.selectedIndex]?.spellName ?? replay.events[replay.selectedIndex]?.name}
+            {` · ${replay.cursor.toFixed(2)}s · ${replay.speed}×`}
+          </p>
+          <button type="button" aria-label="Previous event" onClick={() => replay.onSelectEvent(replay.selectedIndex - 1)}>Previous</button>
+          <button type="button" onClick={replay.onTogglePlayback}>{replay.isPlaying ? "Pause" : "Play"}</button>
+          <button type="button" aria-label="Next event" onClick={() => replay.onSelectEvent(replay.selectedIndex + 1)}>Next</button>
+          <button type="button" onClick={replay.onReset}>Reset</button>
+          <label>Speed<select value={replay.speed} onChange={(event) => replay.onSpeedChange(Number(event.target.value))}><option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option></select></label>
+          <label>Seek<input aria-label="Seek playback" type="range" value={replay.cursor} min="0" max={replay.maxTime} onChange={(event) => replay.onSeek(Number(event.target.value))} /></label>
+        </>
+      ) : <p>Replay sync unavailable.</p>}
       <select aria-label="Exported character animation"><option>Stand</option></select>
       <button type="button" aria-label="Play animation">Play</button>
       <button type="button">Reset camera</button>
@@ -244,8 +274,52 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Play" }));
     await act(async () => { nextFrame?.(2000); });
     await act(async () => { nextFrame?.(4000); });
+    await act(async () => { nextFrame?.(5000); });
     expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     expect(within(screen.getByTestId("selected-event")).getByText("Last Combat")).toBeInTheDocument();
+  });
+
+
+
+  it("applies speed to the replay clock and handles endpoint restart and reset", async () => {
+    let nextFrame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    stubFixture(statefulReportFixture());
+    const user = userEvent.setup();
+    render(<App />);
+
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    await within(scene).findByTestId("scene-replay-state");
+    await user.selectOptions(within(scene).getByRole("combobox", { name: /speed/i }), "2");
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    await act(async () => { nextFrame?.(1000); });
+    await act(async () => { nextFrame?.(1500); });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 1.00s · 2×");
+
+    await act(async () => { nextFrame?.(2600); });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Last Combat · 3.20s · 2×");
+    expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
+
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.00s · 2×");
+    expect(within(scene).getByRole("button", { name: /^Pause$/ })).toBeInTheDocument();
+
+    await user.click(within(scene).getByRole("button", { name: "Reset" }));
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Setup · 0.00s · 2×");
+    expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
+  });
+
+  it("extends playback by one illustrative motion window after the final record", async () => {
+    stubFixture(statefulReportFixture());
+    render(<App />);
+
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    const seek = await within(scene).findByRole("slider", { name: /seek playback/i });
+    expect(seek).toHaveAttribute("max", "3.2");
   });
 
   it.each([
@@ -281,17 +355,36 @@ describe("App", () => {
     expect(screen.queryByText(unexpectedIteration)).not.toBeInTheDocument();
   });
 
-  it("makes the genuine-model scene primary and labels animation as a manual preview", async () => {
+  it("makes replay sync the primary scene mode and keeps manual preview separate", async () => {
     stubFixture(statefulReportFixture());
     render(<App />);
 
     const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
     expect(within(scene).getByText(/default vulpera/i)).toBeInTheDocument();
     expect(within(scene).getByText(/training dummy/i)).toBeInTheDocument();
-    expect(within(scene).getByText(/not synchronized to the sampled simc trace/i)).toBeInTheDocument();
+    expect(within(scene).getByRole("button", { name: "Replay sync" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(scene).getByRole("button", { name: "Manual preview" })).toHaveAttribute("aria-pressed", "false");
     expect(within(scene).getByRole("combobox", { name: /exported character animation/i })).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: /play animation/i })).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: /reset camera/i })).toBeInTheDocument();
     expect(await screen.findByTestId("selected-event")).toBeInTheDocument();
+  });
+
+  it("drives the primary scene from the authoritative replay controls", async () => {
+    stubFixture(statefulReportFixture());
+    const user = userEvent.setup();
+    render(<App />);
+
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    expect(await within(scene).findByTestId("scene-replay-state")).toHaveTextContent("First Setup · 0.00s · 1×");
+
+    await user.click(within(scene).getByRole("button", { name: /next event/i }));
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Second Setup · 0.00s · 1×");
+
+    await user.selectOptions(within(scene).getByRole("combobox", { name: /speed/i }), "2");
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("2×");
+
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    expect(within(scene).getByRole("button", { name: /^Pause$/ })).toBeInTheDocument();
   });
 });

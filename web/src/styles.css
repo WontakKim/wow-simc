@@ -480,7 +480,8 @@ figcaption {
   width: 100%;
 }
 
-.seek-control output {
+.seek-control output,
+.seek-control .seek-output {
   color: var(--text);
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -1529,5 +1530,133 @@ td button {
 @media (prefers-reduced-motion: reduce) {
   .model-loading span {
     animation: none;
+  }
+}
+
+.animation-mode-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 14px 20px 0;
+}
+
+.animation-mode-tabs button {
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid var(--axis);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 780;
+}
+
+.animation-mode-tabs button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.replay-motion-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, auto) 1fr;
+  gap: 8px 14px;
+  align-items: baseline;
+  padding: 14px 20px 4px;
+}
+
+.replay-motion-status > span {
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.replay-motion-status > strong {
+  overflow-wrap: anywhere;
+  font-size: 0.92rem;
+}
+
+.replay-motion-status > small {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.replay-motion-status[data-animation-kind="failed"],
+.replay-motion-status[data-animation-kind="missing"] {
+  color: var(--failed);
+}
+
+.model-replay-controls {
+  margin: 0;
+  padding: 12px 20px 16px;
+}
+
+.model-replay-controls .seek-control {
+  min-width: 200px;
+}
+
+.replay-unavailable {
+  margin: 12px 20px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.model-ready-status {
+  padding: 0 20px 12px;
+}
+
+.model-ready-status p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+@media (max-width: 900px) {
+  .replay-motion-status {
+    grid-template-columns: auto 1fr;
+  }
+
+  .replay-motion-status > small {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .animation-mode-tabs {
+    padding-inline: 16px;
+  }
+
+  .replay-motion-status {
+    grid-template-columns: 1fr;
+    padding-inline: 16px;
+  }
+
+  .replay-motion-status > small {
+    grid-column: auto;
+  }
+
+  .model-replay-controls {
+    padding-inline: 16px;
+  }
+
+  .model-replay-controls > button {
+    flex: 1 1 calc(25% - 8px);
+    padding-inline: 8px;
+  }
+
+  .model-replay-controls .speed-control {
+    margin-left: 0;
+  }
+
+  .model-ready-status {
+    padding-inline: 16px;
   }
 }
