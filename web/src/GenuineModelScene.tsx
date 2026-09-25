@@ -29,7 +29,7 @@ import {
   type NativeParticleEffect,
   type NativeParticleRenderInstance,
 } from "./NativeParticleEffect";
-import { NATIVE_EFFECT_ASSETS, NATIVE_REPLAY_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
+import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
 
 const MODEL_ASSETS = {
   vulpera: {
@@ -57,6 +57,34 @@ const REPLAY_EFFECT_DURATION_SECONDS = REPLAY_EFFECT_RELEASE_SECONDS
   + REPLAY_EFFECT_TRAVEL_SECONDS
   + REPLAY_EFFECT_DECAY_SECONDS;
 const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
+const OTHER_REPLAY_EFFECT_DURATION_SECONDS = 1.7;
+const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
+type ReplayEffectAnchor = "caster" | "target" | "projectile";
+type ReplayComponent = { fileDataId: number; anchor: ReplayEffectAnchor };
+interface ReplaySpellEffect {
+  actionName: string;
+  components: ReplayComponent[];
+}
+
+// Bounds are from overlapping 1.7s fixture windows (Elemental Blast keeps its accepted 16-instance bound).
+const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
+  [318038, { actionName: "flametongue_weapon", components: [{ fileDataId: 4006618, anchor: "caster" }] }],
+  [192106, { actionName: "lightning_shield", components: [{ fileDataId: 1598036, anchor: "caster" }] }],
+  [191634, { actionName: "stormkeeper", components: [{ fileDataId: 1355634, anchor: "caster" }, { fileDataId: 1284864, anchor: "caster" }] }],
+  [1219480, { actionName: "ascendance", components: [{ fileDataId: 1109885, anchor: "caster" }] }],
+  [51505, { actionName: "lava_burst", components: [{ fileDataId: 4006621, anchor: "caster" }, { fileDataId: 4006618, anchor: "target" }, { fileDataId: 3980244, anchor: "target" }] }],
+  [188196, { actionName: "lightning_bolt", components: [{ fileDataId: 6211618, anchor: "caster" }, { fileDataId: 1571475, anchor: "target" }] }],
+  [188389, { actionName: "flame_shock", components: [{ fileDataId: 4006618, anchor: "target" }, { fileDataId: 3980244, anchor: "target" }, { fileDataId: 4392095, anchor: "target" }, { fileDataId: 4050773, anchor: "target" }] }],
+  [117014, { actionName: "elemental_blast", components: [{ fileDataId: 794788, anchor: "projectile" }, { fileDataId: 613807, anchor: "projectile" }] }],
+  [443454, { actionName: "ancestral_swiftness", components: [] }],
+]);
+
+// Shared component capacities include overlapping occurrences from more than one spell in the public fixture.
+const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
+  [794788, 16], [613807, 16], [4006618, 2], [1598036, 1],
+  [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 2],
+  [3980244, 2], [6211618, 3], [1571475, 3], [4392095, 1], [4050773, 1],
+]);
 const NATIVE_REPLAY_BASE_SCALE = 0.38;
 
 const ELEMENTAL_SHAMAN_CLIPS = new Map<number, { actionName: string; clipName: string }>([
@@ -81,6 +109,8 @@ export interface ReplayEffectOccurrence {
   eventTime: number;
   elapsedSeconds: number;
   componentTimeSeconds: number;
+  spellId: number;
+  components: ReplayComponent[];
 }
 
 export interface ReplayAnimationResolution {
@@ -130,12 +160,11 @@ function getEventLabel(event: ReplayEvent) {
   return event.spellName ?? event.name;
 }
 
-function isSupportedElementalBlast(event: ReplayEvent) {
-  return event.phase === "combat"
-    && event.kind === "action"
-    && event.id === 117014
-    && event.name === "elemental_blast"
-    && event.queueFailed === false;
+function getSupportedReplaySpell(event: ReplayEvent) {
+  if (event.kind !== "action" || event.queueFailed !== false || event.id === null) return null;
+  const spell = REPLAY_SPELL_EFFECTS.get(event.id);
+  if (!spell || spell.actionName !== event.name || (event.id === 117014 && event.phase !== "combat")) return null;
+  return spell;
 }
 
 function roundReplayTime(value: number) {
@@ -149,31 +178,38 @@ export function resolveReplayEffectOccurrences(
 ): ReplayEffectOccurrence[] {
   if (selectedIndex < 0 || selectedIndex >= events.length) return [];
   return events.slice(0, selectedIndex + 1).flatMap((event) => {
-    if (!isSupportedElementalBlast(event)) return [];
+    const spell = getSupportedReplaySpell(event);
+    if (!spell || spell.components.length === 0) return [];
+    const isProjectile = event.id === 117014;
+    const release = isProjectile ? REPLAY_EFFECT_RELEASE_SECONDS : 0;
+    const duration = isProjectile ? REPLAY_EFFECT_DURATION_SECONDS : OTHER_REPLAY_EFFECT_DURATION_SECONDS;
     const elapsedSeconds = roundReplayTime(cursor - event.time);
-    if (elapsedSeconds < REPLAY_EFFECT_RELEASE_SECONDS
-      || elapsedSeconds > REPLAY_EFFECT_DURATION_SECONDS) return [];
+    if (elapsedSeconds < release || elapsedSeconds > duration) return [];
     return [{
       eventKey: event.key,
       eventTime: event.time,
       elapsedSeconds,
-      componentTimeSeconds: roundReplayTime(elapsedSeconds - REPLAY_EFFECT_RELEASE_SECONDS),
+      componentTimeSeconds: roundReplayTime(elapsedSeconds - release),
+      spellId: event.id!,
+      components: spell.components,
     }];
   });
 }
 
 export function getReplayPlaybackEndTime(events: ReplayEvent[]) {
   const combatEvents = events.filter((event) => event.phase === "combat");
-  if (combatEvents.length === 0) return 0;
-  const lastCombatTime = Math.max(...combatEvents.map((event) => event.time));
+  const lastCombatTime = Math.max(0, ...combatEvents.map((event) => event.time));
   const lastEffectEnd = Math.max(
     0,
-    ...combatEvents
-      .filter(isSupportedElementalBlast)
-      .map((event) => event.time + REPLAY_EFFECT_DURATION_SECONDS),
+    ...events.map((event) => {
+      const spell = getSupportedReplaySpell(event);
+      if (!spell || spell.components.length === 0) return 0;
+      return event.time + (event.id === 117014
+        ? REPLAY_EFFECT_DURATION_SECONDS : OTHER_REPLAY_EFFECT_DURATION_SECONDS);
+    }),
   );
   return roundReplayTime(Math.max(
-    lastCombatTime + ILLUSTRATIVE_MOTION_WINDOW_SECONDS,
+    combatEvents.length > 0 ? lastCombatTime + ILLUSTRATIVE_MOTION_WINDOW_SECONDS : 0,
     lastEffectEnd,
   ));
 }
@@ -380,6 +416,34 @@ async function loadModel(loader: GLTFLoader, asset: (typeof MODEL_ASSETS)[keyof 
   }
 }
 
+function describeNativeEffectLimitations(effect: NativeParticleEffect) {
+  const blendSevenEmitters = effect.model.emitters
+    .filter((emitter) => emitter.blendingType === 7)
+    .map((emitter) => emitter.index);
+  return [
+    ...effect.unsupportedEmitters,
+    ...(effect.primaryOnlyEmitters.length > 0
+      ? [`secondary original textures not combined for emitters ${effect.primaryOnlyEmitters.join(", ")}`]
+      : []),
+    ...effect.model.textureControlEntries.flatMap(([first, second], index) =>
+      first || second ? [`TXAC emitter ${index} (${first},${second}) texture controls not implemented`] : []),
+    ...effect.model.emitters.flatMap((emitter) =>
+      (emitter.flags & 0x40) !== 0 ? [`emitter ${emitter.index} parent-particle velocity inheritance not modeled`] : []),
+    ...effect.model.emitters.flatMap((emitter) => {
+      const colorFlags = [
+        (emitter.flags & 0x20000000) !== 0 ? "Modx4" : null,
+        (emitter.flags & 0x40000000) !== 0 ? "three-color" : null,
+      ].filter(Boolean);
+      return colorFlags.length > 0
+        ? [`emitter ${emitter.index}: ${colorFlags.join(" + ")} flags not reproduced (${(emitter.flags & 0x10000000) !== 0 ? "MultiTexture on" : "MultiTexture off; meaning unknown"})`]
+        : [];
+    }),
+    ...(blendSevenEmitters.length > 0
+      ? [`blend 7 uses unverified EGxBlend factors for emitters ${blendSevenEmitters.join(", ")}`]
+      : []),
+  ].join(" · ");
+}
+
 export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<AnimationController | null>(null);
@@ -405,10 +469,12 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [replayEffectStatus, setReplayEffectStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [replayEffectError, setReplayEffectError] = useState<string | null>(null);
+  const [replayEffectLimitations, setReplayEffectLimitations] = useState<Record<number, { renderedEmitters: number; expectedEmitters: number; unsupportedEmitters: string[]; details: string }>>({});
   const [error, setError] = useState<string | null>(null);
   const nativePreviewTimeRef = useRef(0);
   const nativeLoadRequestRef = useRef(0);
   const replayEffectLoadRequestRef = useRef(0);
+  const loadedReplayEventsRef = useRef<ReplayEvent[] | null>(null);
   const loadedNativeFileDataIdRef = useRef<number | null>(null);
   const replayStateRef = useRef(replay);
 
@@ -422,6 +488,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   nativePreviewTimeRef.current = nativePreviewTime;
   const selectedNativeAsset = NATIVE_EFFECT_ASSETS.find((asset) => asset.fileDataId === selectedNativeFileDataId) ?? NATIVE_EFFECT_ASSETS[0];
   const hasMissingReplayClip = status === "ready" && isReplayClipMissing(replayAnimation, animationNames);
+  const selectedReplayEvent = replay?.events[replay.selectedIndex];
+  const selectedReplaySpell = selectedReplayEvent ? getSupportedReplaySpell(selectedReplayEvent) : null;
+  const replayAssetIds = new Set((replay?.events ?? []).flatMap((event) =>
+    getSupportedReplaySpell(event)?.components.map((component) => component.fileDataId) ?? []));
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -527,6 +597,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       canvas.dataset.replayNativeComponents = "0";
       canvas.dataset.replayNativeParticles = "0";
       canvas.dataset.replayNativeLatestSourceX = "";
+      canvas.dataset.replayNativeFileDataIds = "";
     };
 
     const clearReplayEffects = () => {
@@ -536,10 +607,13 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
     const updateReplayEffects = () => {
       const replayState = replayStateRef.current;
+      const requiredIds = new Set((replayState?.events ?? []).flatMap((event) =>
+        getSupportedReplaySpell(event)?.components.map((component) => component.fileDataId) ?? []));
       if (animationModeRef.current !== "replay"
-        || replayEffects.length !== NATIVE_REPLAY_EFFECT_ASSETS.length
         || !replayState
-        || !replayAnchors) {
+        || !replayAnchors
+        || replayEffects.length !== requiredIds.size
+        || replayEffects.some(({ asset }) => !requiredIds.has(asset.fileDataId))) {
         clearReplayEffects();
         return true;
       }
@@ -551,19 +625,24 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         replayState.cursor,
       );
       let particleCount = 0;
+      const activeFileDataIds: number[] = [];
+      let componentCount = 0;
       try {
         for (const { asset, effect } of replayEffects) {
-          const instances: NativeParticleRenderInstance[] = occurrences.map((occurrence) => ({
+          const matching = occurrences.flatMap((occurrence) => occurrence.components
+            .filter((component) => component.fileDataId === asset.fileDataId)
+            .map((component) => ({ occurrence, component })));
+          const instances: NativeParticleRenderInstance[] = matching.map(({ occurrence, component }) => ({
             timeSeconds: occurrence.componentTimeSeconds,
-            emissionEndSeconds: REPLAY_EFFECT_TRAVEL_SECONDS,
+            emissionEndSeconds: component.anchor === "projectile"
+              ? REPLAY_EFFECT_TRAVEL_SECONDS : OTHER_REPLAY_EMISSION_SECONDS,
             modelScale: NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
-            sourceTranslationAtTime: (timeSeconds) => threeToNative(sampleReplayEffectPath(
-              anchors.caster,
-              anchors.target,
-              timeSeconds,
-            )),
+            sourceTranslationAtTime: (timeSeconds) => threeToNative(component.anchor === "projectile"
+              ? sampleReplayEffectPath(anchors.caster, anchors.target, timeSeconds)
+              : anchors[component.anchor]),
           }));
           particleCount += effect.setReplayInstances(instances, camera);
+          componentCount += matching.length;
         }
       } catch (caught) {
         const reason = caught instanceof Error ? caught.message : "Native replay rendering failed.";
@@ -575,14 +654,18 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         return false;
       }
 
-      canvas.dataset.replayNativeComponents = String(occurrences.length * replayEffects.length);
+      for (const occurrence of occurrences) {
+        for (const component of occurrence.components) activeFileDataIds.push(component.fileDataId);
+      }
+      canvas.dataset.replayNativeComponents = String(componentCount);
       canvas.dataset.replayNativeParticles = String(particleCount);
-      const latestOccurrence = occurrences.at(-1);
-      canvas.dataset.replayNativeLatestSourceX = latestOccurrence
+      canvas.dataset.replayNativeFileDataIds = activeFileDataIds.join(",");
+      const latestProjectile = occurrences.filter((occurrence) => occurrence.spellId === 117014).at(-1);
+      canvas.dataset.replayNativeLatestSourceX = latestProjectile
         ? sampleReplayEffectPath(
             anchors.caster,
             anchors.target,
-            latestOccurrence.componentTimeSeconds,
+            latestProjectile.componentTimeSeconds,
           ).x.toFixed(6)
         : "";
       return true;
@@ -746,10 +829,16 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           const generation = ++replayEffectGeneration;
           for (const { effect } of replayEffects) effect.dispose();
           replayEffects = [];
-          const results = await Promise.allSettled(NATIVE_REPLAY_EFFECT_ASSETS.map(async (asset) => ({
-            asset,
-            effect: await loadNativeParticleEffect(asset, NATIVE_REPLAY_INSTANCE_LIMIT),
-          })));
+          const requiredIds = new Set((replayStateRef.current?.events ?? []).flatMap((event) =>
+            getSupportedReplaySpell(event)?.components.map((component) => component.fileDataId) ?? []));
+          const assets = NATIVE_EFFECT_ASSETS.filter((asset) => requiredIds.has(asset.fileDataId));
+          const missing = [...requiredIds].filter((fileDataId) => !assets.some((asset) => asset.fileDataId === fileDataId));
+          if (missing.length > 0) throw new Error(`Missing pinned replay FileDataID ${missing.join(", ")}. No substitute effect was rendered.`);
+          const results = await Promise.allSettled(assets.map(async (asset) => {
+            const instanceLimit = REPLAY_COMPONENT_INSTANCE_LIMITS.get(asset.fileDataId);
+            if (!instanceLimit) throw new Error(`FileDataID ${asset.fileDataId}: no measured replay instance bound. No substitute effect was rendered.`);
+            return { asset, effect: await loadNativeParticleEffect(asset, instanceLimit) };
+          }));
           const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
           if (isStopped || generation !== replayEffectGeneration) {
             for (const { effect } of loaded) effect.dispose();
@@ -762,6 +851,12 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             throw new Error(reason);
           }
           replayEffects = loaded;
+          setReplayEffectLimitations(Object.fromEntries(loaded.map(({ asset, effect }) => [asset.fileDataId, {
+            renderedEmitters: effect.renderedEmitterCount,
+            expectedEmitters: asset.expectedEmitterCount,
+            unsupportedEmitters: effect.unsupportedEmitters,
+            details: describeNativeEffectLimitations(effect),
+          }])));
           for (const { effect } of replayEffects) {
             effect.group.visible = animationModeRef.current === "replay";
             scene.add(effect.group);
@@ -797,11 +892,13 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   }, []);
 
   useEffect(() => {
-    if (status !== "ready" || replayEffectStatus !== "idle") return;
+    if (status !== "ready" || loadedReplayEventsRef.current === replay?.events) return;
+    loadedReplayEventsRef.current = replay?.events ?? null;
     const requestId = ++replayEffectLoadRequestRef.current;
     let isCurrent = true;
     setReplayEffectStatus("loading");
     setReplayEffectError(null);
+    setReplayEffectLimitations({});
     void controllerRef.current?.loadReplayEffects().then((isReady) => {
       if (!isCurrent || requestId !== replayEffectLoadRequestRef.current || !isReady) return;
       setReplayEffectStatus("ready");
@@ -814,7 +911,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     return () => {
       isCurrent = false;
     };
-  }, [status]);
+  }, [status, replay?.events]);
 
   useEffect(() => {
     animationModeRef.current = animationMode;
@@ -849,31 +946,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       if (!isCurrent || requestId !== nativeLoadRequestRef.current || !effect) return;
       loadedNativeFileDataIdRef.current = selectedNativeAsset.fileDataId;
       setNativeEmitterCount(effect.renderedEmitterCount);
-      const blendSevenEmitters = effect.model.emitters
-        .filter((emitter) => emitter.blendingType === 7)
-        .map((emitter) => emitter.index);
-      setNativeLimitations([
-        ...effect.unsupportedEmitters,
-        ...(effect.primaryOnlyEmitters.length > 0
-          ? [`secondary original textures not combined for emitters ${effect.primaryOnlyEmitters.join(", ")}`]
-          : []),
-        ...effect.model.textureControlEntries.flatMap(([first, second], index) =>
-          first || second ? [`TXAC emitter ${index} (${first},${second}) texture controls not implemented`] : []),
-        ...effect.model.emitters.flatMap((emitter) =>
-          (emitter.flags & 0x40) !== 0 ? [`emitter ${emitter.index} parent-particle velocity inheritance not modeled`] : []),
-        ...effect.model.emitters.flatMap((emitter) => {
-          const colorFlags = [
-            (emitter.flags & 0x20000000) !== 0 ? "Modx4" : null,
-            (emitter.flags & 0x40000000) !== 0 ? "three-color" : null,
-          ].filter(Boolean);
-          return colorFlags.length > 0
-            ? [`emitter ${emitter.index}: ${colorFlags.join(" + ")} flags not reproduced (${(emitter.flags & 0x10000000) !== 0 ? "MultiTexture on" : "MultiTexture off; meaning unknown"})`]
-            : [];
-        }),
-        ...(blendSevenEmitters.length > 0
-          ? [`blend 7 uses unverified EGxBlend factors for emitters ${blendSevenEmitters.join(", ")}`]
-          : []),
-      ].join(" · "));
+      setNativeLimitations(describeNativeEffectLimitations(effect));
       setNativeTextureCount(effect.model.textureFileDataIds.length);
       setNativeStatus("ready");
     }).catch((caught) => {
@@ -1018,15 +1091,42 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           </div>
           {replayEffectStatus === "loading" && (
             <p data-testid="replay-effect-status">
-              Loading both source-linked original Elemental Blast components…
+              Loading the selected trace's source-linked original components…
             </p>
           )}
           {replayEffectStatus === "ready" && (
             <p data-testid="replay-effect-status">
-              <strong>12 of 12 authored emitters ready</strong>
-              <span> · 9 original BLP textures · FileDataID 794788 + 613807</span>
-              <small> · Partial original Elemental Blast components, not the complete spell.</small>
+              <strong>{replayAssetIds.size > 0 ? "Original components ready" : "No original components required for this trace"}</strong>
+              {replayAssetIds.has(794788) && <span> · Elemental Blast: 12 of 12 authored emitters ready · 9 original BLP textures · FileDataID 794788 + 613807</span>}
+              <span> · Trace FileDataIDs: {[...replayAssetIds].join(", ") || "none"}</span>
+              <small> · {replayAssetIds.has(794788) ? "Partial original Elemental Blast components and partial other spell components" : "Partial source-linked components only"}, not complete spells or verified native timing.</small>
             </p>
+          )}
+          {selectedReplaySpell && (
+            <p data-testid="replay-spell-components">
+              {replayAnimation.eventLabel} ({selectedReplayEvent?.id}): {selectedReplaySpell.components.length > 0
+                ? `mapped original FileDataIDs ${selectedReplaySpell.components.map((component) => component.fileDataId).join(", ")} · partial components when loaded, not complete spell visuals`
+                : "no verified component; no substitute rendered"}.
+            </p>
+          )}
+          {selectedReplayEvent?.phase === "precombat" && (
+            <p data-testid="replay-precombat-status">
+              Precombat record: public-fixture precombat actions share timestamp zero. Mapped original components begin simultaneously at cursor zero; this is not a recorded setup timeline.
+            </p>
+          )}
+          {replayEffectStatus === "ready" && selectedReplaySpell && selectedReplaySpell.components.length > 0 && (
+            <details data-testid="replay-effect-limitations">
+              <summary>
+                Selected source limitations: {selectedReplaySpell.components.map((component) => {
+                  const limitation = replayEffectLimitations[component.fileDataId];
+                  if (!limitation) return `FileDataID ${component.fileDataId}: unavailable`;
+                  return `FileDataID ${component.fileDataId}: ${limitation.renderedEmitters} of ${limitation.expectedEmitters} authored emitters; ${limitation.unsupportedEmitters.join(", ") || "no omitted emitters"}`;
+                }).join(" · ")} · when authored, secondary textures, TXAC, color flags and blend 7 have renderer limitations (expand for per-emitter details).
+              </summary>
+              {selectedReplaySpell.components.map((component) => (
+                <p key={component.fileDataId}>FileDataID {component.fileDataId}: {replayEffectLimitations[component.fileDataId]?.details || "No additional renderer limitations recorded."}</p>
+              ))}
+            </details>
           )}
           {replayEffectError && (
             <div className="model-error replay-effect-error" role="alert">
@@ -1172,7 +1272,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion and both source-linked original M2 components for successful Spell 117014 elemental_blast records. The 0.20s release and 0.80s linear flight use neutral model-bounds anchors and are viewer-only, not game cast, missile, hit, or attachment data. Particles decay after visual arrival; no impact, damage, sound, or hit reaction is inferred, and two components are not the complete four-component spell."
+          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with viewer-only caster/target anchors and a 0.20s emission window plus decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Only Elemental Blast uses the accepted 0.20s release and 0.80s linear flight; other spells have no simulated missile travel. Lava Burst and Lightning Bolt show cast/impact kits without unsupported missile bodies (4329984, 3980281, 6211617). Ancestral Swiftness has no verified particle component. No complete spell, native cast/impact timing, attachment, sound, damage, hit reaction, or VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component and its original BLP textures; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}
