@@ -5,6 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./GenuineModelScene", () => ({
   ILLUSTRATIVE_MOTION_WINDOW_SECONDS: 1.2,
+  getReplayPlaybackEndTime: (events: Array<{ phase: string; time: number; kind: string; id: number | null; name: string; queueFailed: boolean | null }>) => {
+    const combatEvents = events.filter((event) => event.phase === "combat");
+    if (combatEvents.length === 0) return 0;
+    const lastCombatTime = Math.max(...combatEvents.map((event) => event.time));
+    const lastEffectEnd = Math.max(0, ...combatEvents
+      .filter((event) => event.kind === "action" && event.id === 117014 && event.name === "elemental_blast" && event.queueFailed === false)
+      .map((event) => event.time + 2.5));
+    return Math.round(Math.max(lastCombatTime + 1.2, lastEffectEnd) * 1_000_000) / 1_000_000;
+  },
   GenuineModelScene: ({ replay }: {
     replay?: {
       selectedIndex: number;

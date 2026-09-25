@@ -9,6 +9,7 @@ export interface NativeEffectAsset {
   filename: string;
   sha256: string;
   expectedEmitterCount: 6;
+  effectNameScale: 1 | 2;
   textures: NativeTextureAsset[];
 }
 
@@ -19,6 +20,7 @@ export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
     filename: "spells/leishen_lightning_burst_missile.m2",
     sha256: "d74e632a23699e81ca90907baf6f6a74a005e22642567094134bf41ac4393ea4",
     expectedEmitterCount: 6,
+    effectNameScale: 2,
     textures: [
       { fileDataId: 397894, sha256: "882871dc36baf215cb4166385e16be327c10f84b0f66f6937d84f7a7ea63c202" },
       { fileDataId: 796153, sha256: "8d9f1fadfe4422ffd3bb040ec550fdcb81de0f9a003b2c2c71b2d15abf9e56bf" },
@@ -32,6 +34,7 @@ export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
     filename: "spells/shaman_frost_missile.m2",
     sha256: "0ac91aa529011cd808b5d2880d685f5bf6714813dba898824797c345333376b9",
     expectedEmitterCount: 6,
+    effectNameScale: 1,
     textures: [
       { fileDataId: 613804, sha256: "3890881a5441048e10de3a474a110cb64ed22bcf11e8dd215f60f36de360adce" },
       { fileDataId: 613805, sha256: "4b5a9d337499d317f5c465d655278be49db9e30f86df4b9b7b80e29c14cffb06" },

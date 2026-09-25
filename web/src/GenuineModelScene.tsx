@@ -24,7 +24,11 @@ import {
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import type { ReplayEvent } from "./replay";
-import { loadNativeParticleEffect, type NativeParticleEffect } from "./NativeParticleEffect";
+import {
+  loadNativeParticleEffect,
+  type NativeParticleEffect,
+  type NativeParticleRenderInstance,
+} from "./NativeParticleEffect";
 import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
 
 const MODEL_ASSETS = {
@@ -45,6 +49,15 @@ const WEBGL_ERROR =
 const STAND_CLIP_NAME = "Stand (ID 0 variation 0)";
 const CAMERA_FOV = 36;
 export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
+export const REPLAY_EFFECT_RELEASE_SECONDS = 0.2;
+export const REPLAY_EFFECT_TRAVEL_SECONDS = 0.8;
+export const REPLAY_EFFECT_DECAY_SECONDS = 1.5;
+
+const REPLAY_EFFECT_DURATION_SECONDS = REPLAY_EFFECT_RELEASE_SECONDS
+  + REPLAY_EFFECT_TRAVEL_SECONDS
+  + REPLAY_EFFECT_DECAY_SECONDS;
+const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
+const NATIVE_REPLAY_BASE_SCALE = 0.38;
 
 const ELEMENTAL_SHAMAN_CLIPS = new Map<number, { actionName: string; clipName: string }>([
   [318038, { actionName: "flametongue_weapon", clipName: "SpellCastOmni (ID 54 variation 0)" }],
@@ -62,6 +75,13 @@ type SceneStatus = "loading" | "ready" | "error";
 type AnimationMode = "replay" | "manual" | "native";
 export type ReplaySpeed = 0.5 | 1 | 2;
 export type ReplayAnimationKind = "motion" | "settled" | "before" | "wait" | "failed" | "unmapped" | "unavailable";
+
+export interface ReplayEffectOccurrence {
+  eventKey: string;
+  eventTime: number;
+  elapsedSeconds: number;
+  componentTimeSeconds: number;
+}
 
 export interface ReplayAnimationResolution {
   kind: ReplayAnimationKind;
@@ -99,13 +119,82 @@ interface AnimationController {
   playManualClip: (index: number, shouldPlay: boolean) => void;
   setManualPlaying: (shouldPlay: boolean) => void;
   loadNativeEffect: (asset: NativeEffectAsset) => Promise<NativeParticleEffect | null>;
+  loadReplayEffects: () => Promise<boolean>;
   setNativeVisible: (isVisible: boolean) => void;
+  setReplayVisible: (isVisible: boolean) => void;
   resetCamera: () => void;
 }
 
 function getEventLabel(event: ReplayEvent) {
   if (event.kind === "wait") return `Wait ${(event.wait ?? 0).toFixed(2)}s`;
   return event.spellName ?? event.name;
+}
+
+function isSupportedElementalBlast(event: ReplayEvent) {
+  return event.phase === "combat"
+    && event.kind === "action"
+    && event.id === 117014
+    && event.name === "elemental_blast"
+    && event.queueFailed === false;
+}
+
+function roundReplayTime(value: number) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+export function resolveReplayEffectOccurrences(
+  events: ReplayEvent[],
+  selectedIndex: number,
+  cursor: number,
+): ReplayEffectOccurrence[] {
+  if (selectedIndex < 0 || selectedIndex >= events.length) return [];
+  return events.slice(0, selectedIndex + 1).flatMap((event) => {
+    if (!isSupportedElementalBlast(event)) return [];
+    const elapsedSeconds = roundReplayTime(cursor - event.time);
+    if (elapsedSeconds < REPLAY_EFFECT_RELEASE_SECONDS
+      || elapsedSeconds > REPLAY_EFFECT_DURATION_SECONDS) return [];
+    return [{
+      eventKey: event.key,
+      eventTime: event.time,
+      elapsedSeconds,
+      componentTimeSeconds: roundReplayTime(elapsedSeconds - REPLAY_EFFECT_RELEASE_SECONDS),
+    }];
+  });
+}
+
+export function getReplayPlaybackEndTime(events: ReplayEvent[]) {
+  const combatEvents = events.filter((event) => event.phase === "combat");
+  if (combatEvents.length === 0) return 0;
+  const lastCombatTime = Math.max(...combatEvents.map((event) => event.time));
+  const lastEffectEnd = Math.max(
+    0,
+    ...combatEvents
+      .filter(isSupportedElementalBlast)
+      .map((event) => event.time + REPLAY_EFFECT_DURATION_SECONDS),
+  );
+  return roundReplayTime(Math.max(
+    lastCombatTime + ILLUSTRATIVE_MOTION_WINDOW_SECONDS,
+    lastEffectEnd,
+  ));
+}
+
+export function getReplayEffectAnchors(caster: Group, target: Group) {
+  const anchorFromBounds = (root: Group) => {
+    const bounds = new Box3().setFromObject(root);
+    const center = bounds.getCenter(new Vector3());
+    const height = bounds.getSize(new Vector3()).y;
+    return new Vector3(center.x, bounds.min.y + height * 0.6, center.z);
+  };
+  return { caster: anchorFromBounds(caster), target: anchorFromBounds(target) };
+}
+
+function sampleReplayEffectPath(caster: Vector3, target: Vector3, componentTimeSeconds: number) {
+  const progress = Math.max(0, Math.min(1, componentTimeSeconds / REPLAY_EFFECT_TRAVEL_SECONDS));
+  return caster.clone().lerp(target, progress);
+}
+
+function threeToNative(value: Vector3): [number, number, number] {
+  return [value.x, value.z, -value.y];
 }
 
 export function resolveReplayAnimation(
@@ -313,10 +402,14 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const [nativeEmitterCount, setNativeEmitterCount] = useState(0);
   const [nativeTextureCount, setNativeTextureCount] = useState(0);
   const [nativeError, setNativeError] = useState<string | null>(null);
+  const [replayEffectStatus, setReplayEffectStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [replayEffectError, setReplayEffectError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const nativePreviewTimeRef = useRef(0);
   const nativeLoadRequestRef = useRef(0);
+  const replayEffectLoadRequestRef = useRef(0);
   const loadedNativeFileDataIdRef = useRef<number | null>(null);
+  const replayStateRef = useRef(replay);
 
   const replayAnimation = resolveReplayAnimation(
     replay?.events ?? [],
@@ -324,6 +417,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     replay?.cursor ?? 0,
   );
   replayAnimationRef.current = replayAnimation;
+  replayStateRef.current = replay;
   nativePreviewTimeRef.current = nativePreviewTime;
   const selectedNativeAsset = NATIVE_EFFECT_ASSETS.find((asset) => asset.fileDataId === selectedNativeFileDataId) ?? NATIVE_EFFECT_ASSETS[0];
   const hasMissingReplayClip = status === "ready" && isReplayClipMissing(replayAnimation, animationNames);
@@ -364,11 +458,17 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let activeAction: AnimationAction | null = null;
     let nativeEffect: NativeParticleEffect | null = null;
     let nativeEffectGeneration = 0;
+    let replayEffectGeneration = 0;
+    let replayEffects: Array<{ asset: NativeEffectAsset; effect: NativeParticleEffect }> = [];
+    let replayAnchors: ReturnType<typeof getReplayEffectAnchors> | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let modelBounds: Box3 | null = null;
     let defaultView: CameraView | null = null;
     const loadedRoots: Object3D[] = [];
     const scene = new Scene();
+    canvas.dataset.replayNativeComponents = "0";
+    canvas.dataset.replayNativeParticles = "0";
+    canvas.dataset.replayNativeLatestSourceX = "";
     const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 100);
     const controls = new OrbitControls(camera, canvas);
     const clock = new Clock();
@@ -422,12 +522,78 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     resizeObserver.observe(canvas);
     resize();
 
+    const clearReplayEffectEvidence = () => {
+      canvas.dataset.replayNativeComponents = "0";
+      canvas.dataset.replayNativeParticles = "0";
+      canvas.dataset.replayNativeLatestSourceX = "";
+    };
+
+    const clearReplayEffects = () => {
+      for (const { effect } of replayEffects) effect.clearInstances();
+      clearReplayEffectEvidence();
+    };
+
+    const updateReplayEffects = () => {
+      const replayState = replayStateRef.current;
+      if (animationModeRef.current !== "replay"
+        || replayEffects.length !== NATIVE_EFFECT_ASSETS.length
+        || !replayState
+        || !replayAnchors) {
+        clearReplayEffects();
+        return true;
+      }
+
+      const anchors = replayAnchors;
+      const occurrences = resolveReplayEffectOccurrences(
+        replayState.events,
+        replayState.selectedIndex,
+        replayState.cursor,
+      );
+      let particleCount = 0;
+      try {
+        for (const { asset, effect } of replayEffects) {
+          const instances: NativeParticleRenderInstance[] = occurrences.map((occurrence) => ({
+            timeSeconds: occurrence.componentTimeSeconds,
+            emissionEndSeconds: REPLAY_EFFECT_TRAVEL_SECONDS,
+            modelScale: NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
+            sourceTranslationAtTime: (timeSeconds) => threeToNative(sampleReplayEffectPath(
+              anchors.caster,
+              anchors.target,
+              timeSeconds,
+            )),
+          }));
+          particleCount += effect.setReplayInstances(instances, camera);
+        }
+      } catch (caught) {
+        const reason = caught instanceof Error ? caught.message : "Native replay rendering failed.";
+        for (const { effect } of replayEffects) effect.dispose();
+        replayEffects = [];
+        clearReplayEffectEvidence();
+        setReplayEffectStatus("error");
+        setReplayEffectError(`${reason} No substitute effect was rendered.`);
+        return false;
+      }
+
+      canvas.dataset.replayNativeComponents = String(occurrences.length * replayEffects.length);
+      canvas.dataset.replayNativeParticles = String(particleCount);
+      const latestOccurrence = occurrences.at(-1);
+      canvas.dataset.replayNativeLatestSourceX = latestOccurrence
+        ? sampleReplayEffectPath(
+            anchors.caster,
+            anchors.target,
+            latestOccurrence.componentTimeSeconds,
+          ).x.toFixed(6)
+        : "";
+      return true;
+    };
+
     const renderFrame = () => {
       if (isStopped) return;
       animationFrame = requestAnimationFrame(renderFrame);
       const delta = Math.min(clock.getDelta(), 0.1);
       if (animationModeRef.current === "manual") mixer?.update(delta);
       controls.update();
+      if (animationModeRef.current === "replay") updateReplayEffects();
       if (animationModeRef.current === "native" && nativeEffect) {
         try {
           nativeEffect.setTime(nativePreviewTimeRef.current, camera);
@@ -452,8 +618,12 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       controls.dispose();
       mixer?.stopAllAction();
       nativeEffectGeneration += 1;
+      replayEffectGeneration += 1;
       nativeEffect?.dispose();
       nativeEffect = null;
+      for (const { effect } of replayEffects) effect.dispose();
+      replayEffects = [];
+      clearReplayEffectEvidence();
       for (const root of loadedRoots) disposeObject(root);
       floor.geometry.dispose();
       floor.material.dispose();
@@ -494,6 +664,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       configureVulperaMaterials(vulpera.scene);
       // Facial bones extend along native +X, so these rotations face both exports toward each other.
       arrangeCombatants(vulpera.scene, trainingDummy.scene);
+      replayAnchors = getReplayEffectAnchors(vulpera.scene, trainingDummy.scene);
       scene.add(vulpera.scene, trainingDummy.scene);
 
       modelBounds = new Box3()
@@ -570,8 +741,39 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           nativeEffect.setTime(nativePreviewTimeRef.current, camera);
           return nativeEffect;
         },
+        loadReplayEffects: async () => {
+          const generation = ++replayEffectGeneration;
+          for (const { effect } of replayEffects) effect.dispose();
+          replayEffects = [];
+          const results = await Promise.allSettled(NATIVE_EFFECT_ASSETS.map(async (asset) => ({
+            asset,
+            effect: await loadNativeParticleEffect(asset, NATIVE_REPLAY_INSTANCE_LIMIT),
+          })));
+          const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+          if (isStopped || generation !== replayEffectGeneration) {
+            for (const { effect } of loaded) effect.dispose();
+            return false;
+          }
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") {
+            for (const { effect } of loaded) effect.dispose();
+            const reason = failure.reason instanceof Error ? failure.reason.message : "Unknown native asset failure.";
+            throw new Error(reason);
+          }
+          replayEffects = loaded;
+          for (const { effect } of replayEffects) {
+            effect.group.visible = animationModeRef.current === "replay";
+            scene.add(effect.group);
+          }
+          return updateReplayEffects();
+        },
         setNativeVisible: (isVisible) => {
           if (nativeEffect) nativeEffect.group.visible = isVisible;
+        },
+        setReplayVisible: (isVisible) => {
+          for (const { effect } of replayEffects) effect.group.visible = isVisible;
+          if (isVisible) updateReplayEffects();
+          else clearReplayEffects();
         },
         resetCamera,
       };
@@ -594,8 +796,29 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   }, []);
 
   useEffect(() => {
+    if (status !== "ready" || replayEffectStatus !== "idle") return;
+    const requestId = ++replayEffectLoadRequestRef.current;
+    let isCurrent = true;
+    setReplayEffectStatus("loading");
+    setReplayEffectError(null);
+    void controllerRef.current?.loadReplayEffects().then((isReady) => {
+      if (!isCurrent || requestId !== replayEffectLoadRequestRef.current || !isReady) return;
+      setReplayEffectStatus("ready");
+    }).catch((caught) => {
+      if (!isCurrent || requestId !== replayEffectLoadRequestRef.current) return;
+      const reason = caught instanceof Error ? caught.message : "The original replay components could not be loaded.";
+      setReplayEffectStatus("error");
+      setReplayEffectError(reason);
+    });
+    return () => {
+      isCurrent = false;
+    };
+  }, [status]);
+
+  useEffect(() => {
     animationModeRef.current = animationMode;
     controllerRef.current?.setNativeVisible(animationMode === "native");
+    controllerRef.current?.setReplayVisible(animationMode === "replay");
     if (animationMode === "manual") {
       controllerRef.current?.playManualClip(selectedAnimationIndex, false);
       return;
@@ -766,6 +989,24 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
                 : replayAnimation.status}
             </small>
           </div>
+          {replayEffectStatus === "loading" && (
+            <p data-testid="replay-effect-status">
+              Loading both source-linked original Elemental Blast components…
+            </p>
+          )}
+          {replayEffectStatus === "ready" && (
+            <p data-testid="replay-effect-status">
+              <strong>12 of 12 authored emitters ready</strong>
+              <span> · 9 original BLP textures · FileDataID 794788 + 613807</span>
+              <small> · Partial original Elemental Blast components, not the complete spell.</small>
+            </p>
+          )}
+          {replayEffectError && (
+            <div className="model-error replay-effect-error" role="alert">
+              <strong>Original replay components unavailable.</strong>
+              <span>{replayEffectError}</span>
+            </div>
+          )}
           {replay ? (
             <div className="transport model-replay-controls" aria-label="Replay controls">
               <button type="button" onClick={() => replay.onSelectEvent(replay.selectedIndex - 1)} disabled={replay.selectedIndex === 0} aria-label="Previous event">Previous</button>
@@ -902,7 +1143,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion from recorded action timestamps. The 1.20s viewer motion window and clip duration are not cast duration or hit timing; no damage, VFX, or hit reaction is inferred."
+          ? "Replay sync samples illustrative exported motion and both source-linked original M2 components for successful Spell 117014 elemental_blast records. The 0.20s release and 0.80s linear flight use neutral model-bounds anchors and are viewer-only, not game cast, missile, hit, or attachment data. Particles decay after visual arrival; no impact, damage, sound, or hit reaction is inferred, and two components are not the complete four-component spell."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : "Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component and its original BLP textures; it is not the complete Elemental Blast composite."}

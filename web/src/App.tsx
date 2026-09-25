@@ -9,7 +9,7 @@ import {
   ReplayValidationError,
   RecordedDuration,
 } from "./replay";
-import { GenuineModelScene, ILLUSTRATIVE_MOTION_WINDOW_SECONDS, type ReplaySpeed } from "./GenuineModelScene";
+import { GenuineModelScene, getReplayPlaybackEndTime, type ReplaySpeed } from "./GenuineModelScene";
 import "./styles.css";
 
 function formatNumber(value: number | null, maximumFractionDigits = 0) {
@@ -267,11 +267,7 @@ export function App() {
 
   const actor = report?.actors.find((candidate) => candidate.id === selectedActorId) ?? null;
   const selectedEvent = actor?.events[selectedIndex] ?? null;
-  const combatEvents = actor?.events.filter((event) => event.phase === "combat") ?? [];
-  const lastCombatTime = combatEvents.length > 0 ? Math.max(...combatEvents.map((event) => event.time)) : 0;
-  const playbackEndTime = combatEvents.length > 0
-    ? Math.round((lastCombatTime + ILLUSTRATIVE_MOTION_WINDOW_SECONDS) * 1000) / 1000
-    : 0;
+  const playbackEndTime = getReplayPlaybackEndTime(actor?.events ?? []);
 
   const dpsSampleLabel = useMemo(() => {
     if (!actor || actor.aggregateDpsSamples === null) return "DPS sample count not recorded";

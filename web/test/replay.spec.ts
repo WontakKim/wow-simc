@@ -465,6 +465,172 @@ test("reframes genuine models after resizing the same page to mobile", async ({ 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("moves both source-linked original components on the authoritative Elemental Blast replay", async ({ page }) => {
+  const runtimeRequests: string[] = [];
+  const pageErrors: string[] = [];
+  page.on("request", (request) => runtimeRequests.push(request.url()));
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") pageErrors.push(message.text());
+  });
+  await page.goto("/");
+
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  const replayStatus = scene.locator("[data-testid='replay-effect-status']");
+  await expect(replayStatus).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
+  await expect(replayStatus).toContainText("9 original BLP textures");
+  await expect(replayStatus).toContainText("FileDataID 794788 + 613807");
+  await expect(replayStatus).toContainText(/partial original Elemental Blast components/i);
+
+  const canvas = scene.locator("canvas");
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  await seek.fill("19.52");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "4");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+  const earlySourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
+  const earlyFrame = await canvas.screenshot();
+
+  await seek.fill("19.85");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "2");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+  const laterSourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
+  const laterFrame = await canvas.screenshot();
+  expect(laterSourceX).toBeGreaterThan(earlySourceX);
+  expect(laterFrame.equals(earlyFrame)).toBe(false);
+
+  await seek.fill("19.52");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "4");
+  expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
+
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "0");
+  expect((await canvas.screenshot()).equals(earlyFrame)).toBe(false);
+  await scene.getByRole("button", { name: "Replay sync" }).click();
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "4");
+  expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
+
+  for (const fileDataId of [794788, 397894, 796153, 243229, 669041, 613807, 613804, 613805, 613806, 167020, 167034]) {
+    expect(runtimeRequests.some((url) => url.includes(`/model/native-effects/${fileDataId}.`))).toBe(true);
+  }
+  expect(runtimeRequests.every((url) => new URL(url).origin === "http://127.0.0.1:4173")).toBe(true);
+  expect(pageErrors).toEqual([]);
+});
+
+test("clears rendered replay particles when actor selection becomes empty", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as { sim: { players: Array<{ name: string }> } };
+    const secondActor = structuredClone(fixture.sim.players[0]);
+    secondActor.name = "Second Public Reference";
+    fixture.sim.players.push(secondActor);
+    await route.fulfill({ response, json: fixture });
+  });
+  await page.goto("/");
+
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
+  const canvas = scene.locator("canvas");
+  const actorSelector = page.getByLabel("Trace actor");
+  const captureCanvas = async () => {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    return canvas.screenshot();
+  };
+  await expect(actorSelector).toHaveValue("");
+  const idleFrame = await captureCanvas();
+
+  await actorSelector.selectOption({ index: 1 });
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("7.83");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+  const activeFrame = await captureCanvas();
+  expect(activeFrame.equals(idleFrame)).toBe(false);
+
+  await actorSelector.selectOption("");
+  await expect(actorSelector).toHaveValue("");
+  await expect(canvas).toHaveAttribute("data-replay-native-particles", "0");
+  await expect.poll(async () => (await captureCanvas()).equals(idleFrame)).toBe(true);
+
+  await actorSelector.selectOption({ index: 1 });
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("7.83");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+  await expect.poll(async () => (await captureCanvas()).equals(activeFrame)).toBe(true);
+});
+
+test("keeps a late composite capacity failure unavailable", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as {
+      sim: {
+        players: Array<{
+          collected_data: { action_sequence: Array<{ id?: number; time: number }> };
+        }>;
+      };
+    };
+    const sequence = fixture.sim.players[0].collected_data.action_sequence;
+    const elementalBlast = sequence.find((event) => event.id === 117014);
+    if (!elementalBlast) throw new Error("The public fixture has no Elemental Blast source record.");
+    fixture.sim.players[0].collected_data.action_sequence = Array.from(
+      { length: 17 },
+      () => ({ ...structuredClone(elementalBlast), time: 7.233 }),
+    );
+    await route.fulfill({ response, json: fixture });
+  });
+
+  let signalNativeRequest: (() => void) | undefined;
+  let releaseNativeResponse: (() => void) | undefined;
+  const nativeRequestStarted = new Promise<void>((resolve) => { signalNativeRequest = resolve; });
+  const nativeResponseGate = new Promise<void>((resolve) => { releaseNativeResponse = resolve; });
+  await page.route("**/model/native-effects/613807.m2", async (route) => {
+    signalNativeRequest?.();
+    await nativeResponseGate;
+    await route.continue();
+  });
+
+  await page.goto("/");
+  await nativeRequestStarted;
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("7.83");
+  releaseNativeResponse?.();
+
+  const replayAlert = scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" });
+  await expect(replayAlert).toContainText(/17 simultaneous component instances.*16-instance resource bound/, { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toHaveCount(0);
+  await expect(scene.locator("canvas")).toHaveAttribute("data-replay-native-particles", "0");
+});
+
+test("applies the latest replay cursor after both original components load late", async ({ page }) => {
+  await page.route("**/model/native-effects/613807.m2", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.continue();
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  const canvas = scene.locator("canvas");
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "2");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+});
+
+test("keeps replay effects hidden when a delayed composite load finishes in manual mode", async ({ page }) => {
+  await page.route("**/model/native-effects/613807.m2", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.continue();
+  });
+  const delayedM2Response = page.waitForResponse((response) => response.url().endsWith("/model/native-effects/613807.m2"));
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  const canvas = scene.locator("canvas");
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await delayedM2Response;
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "0");
+
+  await scene.getByRole("button", { name: "Replay sync" }).click();
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "2");
+});
+
 test("renders both original M2 components with deterministic isolated native transport", async ({ page }) => {
   const runtimeRequests: string[] = [];
   page.on("request", (request) => runtimeRequests.push(request.url()));
@@ -545,6 +711,11 @@ test("keeps existing scene modes usable when required native data is missing or 
   await page.route("**/model/native-effects/397894.blp", (route) => route.fulfill({ status: 404, body: "missing" }));
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  const replayAlert = scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" });
+  await expect(replayAlert).toContainText("FileDataID 397894", { timeout: 30_000 });
+  await expect(replayAlert).toContainText(/no substitute effect/i);
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   const alert = scene.getByRole("alert").filter({ hasText: "Native M2 component unavailable" });
   await expect(alert).toContainText("FileDataID 397894", { timeout: 30_000 });

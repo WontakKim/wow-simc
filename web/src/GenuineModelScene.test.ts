@@ -15,8 +15,11 @@ import {
   arrangeCombatants,
   configureVulperaMaterials,
   frameModels,
+  getReplayEffectAnchors,
+  getReplayPlaybackEndTime,
   isReplayClipMissing,
   resolveReplayAnimation,
+  resolveReplayEffectOccurrences,
 } from "./GenuineModelScene";
 import type { ReplayEvent } from "./replay";
 
@@ -136,6 +139,69 @@ function makeAction(overrides: Partial<ReplayEvent> = {}): ReplayEvent {
     ...overrides,
   };
 }
+
+describe("Elemental Blast native replay", () => {
+  it("uses the exact successful combat source prefix and keeps prior flights across later records", () => {
+    const precombat = makeAction({ key: "precombat-0", phase: "precombat", time: 0, id: 117014, name: "elemental_blast" });
+    const first = makeAction({ key: "combat-0", phaseIndex: 0, time: 1, id: 117014, name: "elemental_blast" });
+    const wrongId = makeAction({ key: "combat-1", phaseIndex: 1, time: 1, id: 188196, name: "elemental_blast" });
+    const wrongName = makeAction({ key: "combat-2", phaseIndex: 2, time: 1, id: 117014, name: "lightning_bolt" });
+    const failed = makeAction({ key: "combat-3", phaseIndex: 3, time: 1, id: 117014, name: "elemental_blast", queueFailed: true });
+    const wait = makeAction({ key: "combat-4", phaseIndex: 4, time: 1, kind: "wait", name: "Wait", spellName: null, id: null, queueFailed: null, wait: 0.1 });
+    const repeated = makeAction({ key: "combat-5", phaseIndex: 5, time: 1, id: 117014, name: "elemental_blast" });
+    const laterUnrelated = makeAction({ key: "combat-6", phaseIndex: 6, time: 1.1, id: 51505, name: "lava_burst" });
+    const events = [precombat, first, wrongId, wrongName, failed, wait, repeated, laterUnrelated];
+    expect(resolveReplayEffectOccurrences(events, 0, 1.3)).toEqual([]);
+    expect(resolveReplayEffectOccurrences(events, 1, 0.99)).toEqual([]);
+    expect(resolveReplayEffectOccurrences(events, 1, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0"]);
+    expect(resolveReplayEffectOccurrences(events, 5, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0"]);
+    expect(resolveReplayEffectOccurrences(events, 6, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0", "combat-5"]);
+    expect(resolveReplayEffectOccurrences(events, 7, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0", "combat-5"]);
+  });
+
+  it("uses deterministic release, arrival, and authored-lifespan decay boundaries", () => {
+    const event = makeAction({ key: "combat-0", phaseIndex: 0, time: 4, id: 117014, name: "elemental_blast" });
+    expect(resolveReplayEffectOccurrences([event], 0, 4.1999)).toEqual([]);
+    expect(resolveReplayEffectOccurrences([event], 0, 4.2)).toEqual([{
+      eventKey: "combat-0",
+      eventTime: 4,
+      elapsedSeconds: 0.2,
+      componentTimeSeconds: 0,
+    }]);
+    expect(resolveReplayEffectOccurrences([event], 0, 5)[0]).toMatchObject({ componentTimeSeconds: 0.8 });
+    const finalDecaySample = resolveReplayEffectOccurrences([event], 0, 6.5);
+    expect(finalDecaySample).toHaveLength(1);
+    expect(resolveReplayEffectOccurrences([event], 0, 6.5001)).toEqual([]);
+    expect(resolveReplayEffectOccurrences([event], 0, 5)).toEqual(resolveReplayEffectOccurrences([event], 0, 5));
+  });
+
+  it("extends only a supported final effect beyond the existing motion tail", () => {
+    const earlierElementalBlast = makeAction({ key: "combat-0", phaseIndex: 0, time: 4, id: 117014, name: "elemental_blast" });
+    const laterUnrelated = makeAction({ key: "combat-1", phaseIndex: 1, time: 10, id: 51505, name: "lava_burst" });
+    const lateElementalBlast = makeAction({ key: "combat-0", phaseIndex: 0, time: 9, id: 117014, name: "elemental_blast" });
+
+    expect(getReplayPlaybackEndTime([])).toBe(0);
+    expect(getReplayPlaybackEndTime([earlierElementalBlast, laterUnrelated])).toBeCloseTo(11.2);
+    expect(getReplayPlaybackEndTime([lateElementalBlast, laterUnrelated])).toBeCloseTo(11.5);
+    expect(getReplayPlaybackEndTime([{ ...lateElementalBlast, queueFailed: true }, laterUnrelated])).toBeCloseTo(11.2);
+  });
+
+  it("derives neutral flight anchors from the arranged model bounds", () => {
+    const vulpera = createModel(2, 4, 2);
+    const trainingDummy = createModel(2.4, 5, 2);
+    arrangeCombatants(vulpera, trainingDummy);
+    const casterBounds = new Box3().setFromObject(vulpera);
+    const targetBounds = new Box3().setFromObject(trainingDummy);
+
+    const anchors = getReplayEffectAnchors(vulpera, trainingDummy);
+
+    expect(anchors.caster.x).toBeCloseTo(casterBounds.getCenter(new Vector3()).x);
+    expect(anchors.target.x).toBeCloseTo(targetBounds.getCenter(new Vector3()).x);
+    expect(anchors.caster.y).toBeCloseTo(casterBounds.min.y + casterBounds.getSize(new Vector3()).y * 0.6);
+    expect(anchors.target.y).toBeCloseTo(targetBounds.min.y + targetBounds.getSize(new Vector3()).y * 0.6);
+    expect(anchors.target.x - anchors.caster.x).toBeCloseTo(8);
+  });
+});
 
 describe("resolveReplayAnimation", () => {
   it.each([

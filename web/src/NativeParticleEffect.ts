@@ -25,6 +25,13 @@ import { sampleNativeEmitter, type NativeParticleSample } from "./nativeParticle
 const ASSET_ROOT = "/model/native-effects";
 const SETUP_COMMAND = "node script/prepare-native-effects.mjs";
 
+export interface NativeParticleRenderInstance {
+  timeSeconds: number;
+  emissionEndSeconds: number;
+  modelScale: number;
+  sourceTranslationAtTime: (timeSeconds: number) => Vector3Tuple;
+}
+
 interface EmitterBatch {
   emitter: NativeParticleEmitter;
   geometry: InstancedBufferGeometry;
@@ -47,8 +54,8 @@ function maximumTrackValue(track: { sequences: Array<{ values: number[] }> }) {
 }
 
 function emitterCapacity(emitter: NativeParticleEmitter) {
-  const maximumRate = maximumTrackValue(emitter.emissionRate) + Math.abs(emitter.emissionRateVariation) * 0.5;
-  const maximumLifespan = maximumTrackValue(emitter.lifespan) + Math.abs(emitter.lifespanVariation) * 0.5;
+  const maximumRate = maximumTrackValue(emitter.emissionRate) + Math.abs(emitter.emissionRateVariation);
+  const maximumLifespan = maximumTrackValue(emitter.lifespan) + Math.abs(emitter.lifespanVariation);
   return Math.max(8, Math.min(1024, Math.ceil(maximumRate * (maximumLifespan + 0.1)) + 8));
 }
 
@@ -65,8 +72,12 @@ function createTexture(decoded: ReturnType<typeof decodeNativeBlp>) {
   return texture;
 }
 
-function createEmitterBatch(emitter: NativeParticleEmitter, texture: DataTexture): EmitterBatch {
-  const capacity = emitterCapacity(emitter);
+function createEmitterBatch(
+  emitter: NativeParticleEmitter,
+  texture: DataTexture,
+  maximumInstanceCount: number,
+): EmitterBatch {
+  const capacity = emitterCapacity(emitter) * maximumInstanceCount;
   const geometry = new InstancedBufferGeometry();
   geometry.setAttribute("position", new BufferAttribute(new Float32Array([
     -0.5, -0.5, 0,
@@ -163,14 +174,23 @@ export class NativeParticleEffect {
   readonly model: NativeM2Model;
   private readonly textures: DataTexture[];
   private readonly batches: EmitterBatch[];
+  private readonly maximumInstanceCount: number;
 
-  constructor(model: NativeM2Model, decodedTextures: ReturnType<typeof decodeNativeBlp>[]) {
+  constructor(
+    model: NativeM2Model,
+    decodedTextures: ReturnType<typeof decodeNativeBlp>[],
+    maximumInstanceCount = 1,
+  ) {
+    if (!Number.isInteger(maximumInstanceCount) || maximumInstanceCount < 1) {
+      throw new Error(`FileDataID ${model.fileDataId}: native instance capacity must be a positive integer.`);
+    }
     this.model = model;
+    this.maximumInstanceCount = maximumInstanceCount;
     this.textures = decodedTextures.map(createTexture);
     this.batches = model.emitters.map((emitter) => {
       const texture = this.textures[emitter.textureIndices[0]];
       if (!texture) throw new Error(`FileDataID ${model.fileDataId}: emitter ${emitter.index} texture is unavailable.`);
-      return createEmitterBatch(emitter, texture);
+      return createEmitterBatch(emitter, texture, maximumInstanceCount);
     });
 
     for (const batch of this.batches) {
@@ -184,16 +204,24 @@ export class NativeParticleEffect {
     this.group.scale.setScalar(0.38);
   }
 
-  setTime(timeSeconds: number, camera: Camera) {
+  private renderInstances(instances: NativeParticleRenderInstance[], camera: Camera) {
+    if (instances.length > this.maximumInstanceCount) {
+      throw new Error(
+        `FileDataID ${this.model.fileDataId}: ${instances.length} simultaneous component instances exceed the ${this.maximumInstanceCount}-instance resource bound.`,
+      );
+    }
+
     this.group.updateWorldMatrix(true, false);
     const localCamera = this.group.worldToLocal(camera.getWorldPosition(new Vector3()));
+    let totalParticleCount = 0;
     for (const batch of this.batches) {
-      let particles = sampleNativeEmitter(
+      let particles = instances.flatMap((instance) => sampleNativeEmitter(
         batch.emitter,
         this.model.bones[batch.emitter.boneIndex],
         this.model.sequenceDurationMs,
-        timeSeconds,
-      );
+        instance.timeSeconds,
+        instance,
+      ));
       if ((batch.emitter.flags & 0x2) !== 0) {
         particles = [...particles].sort((first, second) =>
           squaredDistance(second, localCamera) - squaredDistance(first, localCamera));
@@ -216,6 +244,7 @@ export class NativeParticleEffect {
         batch.velocities.setXYZ(index, ...velocity);
       });
       batch.geometry.instanceCount = particles.length;
+      totalParticleCount += particles.length;
       batch.offsets.needsUpdate = true;
       batch.sizes.needsUpdate = true;
       batch.colors.needsUpdate = true;
@@ -223,6 +252,27 @@ export class NativeParticleEffect {
       batch.uvRects.needsUpdate = true;
       batch.velocities.needsUpdate = true;
     }
+    return totalParticleCount;
+  }
+
+  setTime(timeSeconds: number, camera: Camera) {
+    return this.renderInstances([{
+      timeSeconds,
+      emissionEndSeconds: Number.POSITIVE_INFINITY,
+      modelScale: 1,
+      sourceTranslationAtTime: () => [0, 0, 0],
+    }], camera);
+  }
+
+  setReplayInstances(instances: NativeParticleRenderInstance[], camera: Camera) {
+    this.group.position.set(0, 0, 0);
+    this.group.rotation.set(0, 0, 0);
+    this.group.scale.setScalar(1);
+    return this.renderInstances(instances, camera);
+  }
+
+  clearInstances() {
+    for (const batch of this.batches) batch.geometry.instanceCount = 0;
   }
 
   dispose() {
@@ -253,7 +303,7 @@ async function fetchPinnedAsset(fileDataId: number, extension: "m2" | "blp", exp
   return source;
 }
 
-export async function loadNativeParticleEffect(asset: NativeEffectAsset) {
+export async function loadNativeParticleEffect(asset: NativeEffectAsset, maximumInstanceCount = 1) {
   try {
     const [modelSource, ...textureSources] = await Promise.all([
       fetchPinnedAsset(asset.fileDataId, "m2", asset.sha256),
@@ -270,7 +320,7 @@ export async function loadNativeParticleEffect(asset: NativeEffectAsset) {
     }
     const decodedTextures = textureSources.map((source, index) =>
       decodeNativeBlp(source, asset.textures[index].fileDataId));
-    return new NativeParticleEffect(model, decodedTextures);
+    return new NativeParticleEffect(model, decodedTextures, maximumInstanceCount);
   } catch (caught) {
     const reason = caught instanceof Error ? caught.message : "Unknown native asset failure.";
     throw new Error(`${reason} No substitute effect was rendered.`);

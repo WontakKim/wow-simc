@@ -19,6 +19,12 @@ export interface NativeParticleSample {
   uvFrame: number;
 }
 
+export interface NativeEmitterSampleOptions {
+  emissionEndSeconds?: number;
+  modelScale?: number;
+  sourceTranslationAtTime?: (timeSeconds: number) => Vector3Tuple;
+}
+
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value));
 }
@@ -275,8 +281,14 @@ export function sampleNativeEmitter(
   bone: NativeBone | undefined,
   sequenceDurationMs: number,
   timeSeconds: number,
+  options: NativeEmitterSampleOptions = {},
 ): NativeParticleSample[] {
-  const spawnTimes = createSpawnTimes(emitter, sequenceDurationMs, timeSeconds);
+  const emissionEndSeconds = Math.max(0, options.emissionEndSeconds ?? Number.POSITIVE_INFINITY);
+  const emissionSampleTime = Math.min(timeSeconds, emissionEndSeconds);
+  const spawnTimes = createSpawnTimes(emitter, sequenceDurationMs, emissionSampleTime)
+    .filter((spawn) => !Number.isFinite(emissionEndSeconds) || spawn.time < emissionEndSeconds - 0.0000001);
+  const modelScale = options.modelScale ?? 1;
+  const sourceTranslationAtTime = options.sourceTranslationAtTime ?? (() => [0, 0, 0]);
   const result: NativeParticleSample[] = [];
   for (const spawn of spawnTimes) {
     const spawnTimeMs = spawn.time * 1000;
@@ -311,8 +323,11 @@ export function sampleNativeEmitter(
     const acceleration = add(gravity, windAge > 0 ? emitter.windVector : [0, 0, 0] as Vector3Tuple);
     const dragFactor = emitter.drag > 0 ? Math.exp(-emitter.drag * age) : 1;
     const travelFactor = emitter.drag > 0 ? (1 - dragFactor) / emitter.drag : age;
-    const position = add(add(origin, scale(initialVelocity, travelFactor)), scale(acceleration, 0.5 * age * age));
-    const velocity = add(scale(initialVelocity, dragFactor), scale(acceleration, age));
+    const localPosition = add(add(origin, scale(initialVelocity, travelFactor)), scale(acceleration, 0.5 * age * age));
+    const localVelocity = add(scale(initialVelocity, dragFactor), scale(acceleration, age));
+    const sourceSampleTime = usesWorldCoordinates ? spawn.time : timeSeconds;
+    const position = add(sourceTranslationAtTime(sourceSampleTime), scale(localPosition, modelScale));
+    const velocity = scale(localVelocity, modelScale);
 
     const color = sampleNativeParticleTrack<Vector3Tuple>(emitter.color, progress, [1, 1, 1]);
     let alpha = sampleNativeParticleTrack(emitter.alpha, progress, 1);
@@ -325,8 +340,8 @@ export function sampleNativeEmitter(
     const twinkleScale = emitter.twinkleScale[0]
       + (emitter.twinkleScale[1] - emitter.twinkleScale[0]) * randomUnit(emitter.index, spawn.spawnIndex, 8);
     const size: Vector2Tuple = [
-      Math.max(0, authoredSize[0] * sharedScaleVariation * twinkleScale),
-      Math.max(0, authoredSize[1] * sharedScaleVariation * twinkleScale),
+      Math.max(0, authoredSize[0] * sharedScaleVariation * twinkleScale * modelScale),
+      Math.max(0, authoredSize[1] * sharedScaleVariation * twinkleScale * modelScale),
     ];
     const reverseSpin = (emitter.flags & 0x200) !== 0 && randomUnit(emitter.index, spawn.spawnIndex, 9) < 0.5 ? -1 : 1;
     const initialSpin = emitter.baseSpin + (randomUnit(emitter.index, spawn.spawnIndex, 10) - 0.5) * emitter.baseSpinVariation;

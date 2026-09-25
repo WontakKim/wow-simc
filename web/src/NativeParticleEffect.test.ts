@@ -7,6 +7,7 @@ import {
   Mesh,
   NormalBlending,
   ShaderMaterial,
+  PerspectiveCamera,
 } from "three";
 import { describe, expect, it } from "vitest";
 import { decodeNativeBlp } from "./nativeBlp";
@@ -38,6 +39,70 @@ describe("NativeParticleEffect source rendering", () => {
       expect(mesh.material.fragmentShader).toContain("#include <colorspace_fragment>");
     }
 
+    effect.dispose();
+  });
+
+  it("allocates for the full authored variation amplitude and disposes every GPU resource", () => {
+    const sourceModel = parseNativeM2(loadAsset(794788, "m2"), 794788);
+    const textures = sourceModel.textureFileDataIds.map((textureFileDataId) =>
+      decodeNativeBlp(loadAsset(textureFileDataId, "blp"), textureFileDataId));
+    const emitter = {
+      ...sourceModel.emitters[0],
+      emissionRate: {
+        ...sourceModel.emitters[0].emissionRate,
+        sequences: [{ timestamps: [0], values: [10] }],
+      },
+      emissionRateVariation: 4,
+      lifespan: {
+        ...sourceModel.emitters[0].lifespan,
+        sequences: [{ timestamps: [0], values: [2] }],
+      },
+      lifespanVariation: 1,
+    };
+    const model = { ...sourceModel, emitters: [emitter] };
+    const effect = new NativeParticleEffect(model, textures);
+    const mesh = effect.group.children[0] as Mesh<InstancedBufferGeometry, ShaderMaterial>;
+    const expectedCapacity = Math.ceil((10 + 4) * (2 + 1 + 0.1)) + 8;
+    expect(mesh.geometry.getAttribute("instanceOffset").count).toBe(expectedCapacity);
+
+    let geometryDisposals = 0;
+    let materialDisposals = 0;
+    let textureDisposals = 0;
+    mesh.geometry.addEventListener("dispose", () => { geometryDisposals += 1; });
+    mesh.material.addEventListener("dispose", () => { materialDisposals += 1; });
+    mesh.material.uniforms.map.value.addEventListener("dispose", () => { textureDisposals += 1; });
+    const parent = new Mesh();
+    parent.add(effect.group);
+    effect.dispose();
+
+    expect(geometryDisposals).toBe(1);
+    expect(materialDisposals).toBe(1);
+    expect(textureDisposals).toBe(1);
+    expect(effect.group.parent).toBeNull();
+  });
+
+  it("reuses bounded instance buffers for concurrent absolute-time replay samples", () => {
+    const model = parseNativeM2(loadAsset(613807, "m2"), 613807);
+    const textures = model.textureFileDataIds.map((textureFileDataId) =>
+      decodeNativeBlp(loadAsset(textureFileDataId, "blp"), textureFileDataId));
+    const effect = new NativeParticleEffect(model, textures, 2);
+    const camera = new PerspectiveCamera();
+    const geometry = (effect.group.children[0] as Mesh<InstancedBufferGeometry, ShaderMaterial>).geometry;
+    const offsetAttribute = geometry.getAttribute("instanceOffset");
+    effect.setReplayInstances([
+      { timeSeconds: 0.4, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [0, 0, 0] },
+      { timeSeconds: 0.2, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [1, 0, 0] },
+    ], camera);
+
+    expect(geometry.getAttribute("instanceOffset")).toBe(offsetAttribute);
+    expect(geometry.instanceCount).toBeGreaterThan(0);
+    effect.clearInstances();
+    expect(geometry.instanceCount).toBe(0);
+    expect(() => effect.setReplayInstances([
+      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [0, 0, 0] },
+      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [1, 0, 0] },
+      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [2, 0, 0] },
+    ], camera)).toThrow(/3 simultaneous component instances.*2-instance resource bound/);
     effect.dispose();
   });
 });

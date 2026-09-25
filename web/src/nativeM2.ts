@@ -399,7 +399,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     }
     const zSource = parseTrack<number>(offset + 0xf0, `${emitterLabel} zSource`, "float");
     if (zSource.sequences.some((sequence) => sequence.values.some((value) => value !== 0))) {
-      throw new Error(`${label}: ${emitterLabel} nonzero zSource is unsupported by this stationary component proof.`);
+      throw new Error(`${label}: ${emitterLabel} nonzero zSource is unsupported by this two-component proof.`);
     }
 
     return {

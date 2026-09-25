@@ -158,6 +158,42 @@ describe("native particle sampling", () => {
     expect(sampleNativeEmitter(emitter, identityBone, 667, 0)[0].position).toEqual(pivot);
   });
 
+  it("retains world-space birth positions while local particles follow a moving source", () => {
+    const movingSource = (timeSeconds: number): Vector3Tuple => [timeSeconds * 10, 0, 0];
+    const base = {
+      emissionSpeed: constantTrack(0),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+      emissionRate: constantTrack(2),
+      lifespan: constantTrack(2),
+    };
+
+    const world = sampleNativeEmitter(makeEmitter({ ...base, flags: 0x20031 }), undefined, 667, 0.75, {
+      sourceTranslationAtTime: movingSource,
+    });
+    const local = sampleNativeEmitter(makeEmitter({ ...base, flags: 0x20021 }), undefined, 667, 0.75, {
+      sourceTranslationAtTime: movingSource,
+    });
+
+    expect(world.map((particle) => particle.position[0])).toEqual([0, 5]);
+    expect(local.map((particle) => particle.position[0])).toEqual([7.5, 7.5]);
+    expect(sampleNativeEmitter(makeEmitter({ ...base, flags: 0x20031 }), undefined, 667, 0.75, {
+      sourceTranslationAtTime: () => [0, 0, 0],
+    })).toEqual(sampleNativeEmitter(makeEmitter({ ...base, flags: 0x20031 }), undefined, 667, 0.75));
+  });
+
+  it("stops births at visual arrival while already emitted particles finish their lifespans", () => {
+    const emitter = makeEmitter({
+      emissionSpeed: constantTrack(0),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+      emissionRate: constantTrack(2),
+      lifespan: constantTrack(2),
+    });
+
+    expect(sampleNativeEmitter(emitter, undefined, 667, 0.75, { emissionEndSeconds: 0.75 }).map(({ spawnIndex }) => spawnIndex)).toEqual([0, 1]);
+    expect(sampleNativeEmitter(emitter, undefined, 667, 1.5, { emissionEndSeconds: 0.75 }).map(({ spawnIndex }) => spawnIndex)).toEqual([0, 1]);
+    expect(sampleNativeEmitter(emitter, undefined, 667, 2.6, { emissionEndSeconds: 0.75 })).toEqual([]);
+  });
+
   it("keeps world-coordinate emitters out of nonidentity bone transforms", () => {
     const halfTurn = Math.sqrt(0.5);
     const transformedBone: NativeBone = {
