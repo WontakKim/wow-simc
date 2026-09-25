@@ -24,6 +24,8 @@ import {
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import type { ReplayEvent } from "./replay";
+import { loadNativeParticleEffect, type NativeParticleEffect } from "./NativeParticleEffect";
+import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
 
 const MODEL_ASSETS = {
   vulpera: {
@@ -56,7 +58,7 @@ const ELEMENTAL_SHAMAN_CLIPS = new Map<number, { actionName: string; clipName: s
 ]);
 
 type SceneStatus = "loading" | "ready" | "error";
-type AnimationMode = "replay" | "manual";
+type AnimationMode = "replay" | "manual" | "native";
 export type ReplaySpeed = 0.5 | 1 | 2;
 export type ReplayAnimationKind = "motion" | "settled" | "before" | "wait" | "failed" | "unmapped" | "unavailable";
 
@@ -95,6 +97,8 @@ interface AnimationController {
   applyReplayAnimation: (resolution: ReplayAnimationResolution) => void;
   playManualClip: (index: number, shouldPlay: boolean) => void;
   setManualPlaying: (shouldPlay: boolean) => void;
+  loadNativeEffect: (asset: NativeEffectAsset) => Promise<NativeParticleEffect | null>;
+  setNativeVisible: (isVisible: boolean) => void;
   resetCamera: () => void;
 }
 
@@ -282,7 +286,17 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const [selectedAnimationIndex, setSelectedAnimationIndex] = useState(0);
   const [animationMode, setAnimationMode] = useState<AnimationMode>("replay");
   const [isManualPlaying, setIsManualPlaying] = useState(false);
+  const [selectedNativeFileDataId, setSelectedNativeFileDataId] = useState<NativeEffectAsset["fileDataId"]>(794788);
+  const [nativePreviewTime, setNativePreviewTime] = useState(0);
+  const [isNativePlaying, setIsNativePlaying] = useState(false);
+  const [nativeStatus, setNativeStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [nativeEmitterCount, setNativeEmitterCount] = useState(0);
+  const [nativeTextureCount, setNativeTextureCount] = useState(0);
+  const [nativeError, setNativeError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const nativePreviewTimeRef = useRef(0);
+  const nativeLoadRequestRef = useRef(0);
+  const loadedNativeFileDataIdRef = useRef<number | null>(null);
 
   const replayAnimation = resolveReplayAnimation(
     replay?.events ?? [],
@@ -290,6 +304,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     replay?.cursor ?? 0,
   );
   replayAnimationRef.current = replayAnimation;
+  nativePreviewTimeRef.current = nativePreviewTime;
+  const selectedNativeAsset = NATIVE_EFFECT_ASSETS.find((asset) => asset.fileDataId === selectedNativeFileDataId) ?? NATIVE_EFFECT_ASSETS[0];
   const hasMissingReplayClip = status === "ready" && isReplayClipMissing(replayAnimation, animationNames);
 
   useEffect(() => {
@@ -326,6 +342,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let animationFrame = 0;
     let mixer: AnimationMixer | null = null;
     let activeAction: AnimationAction | null = null;
+    let nativeEffect: NativeParticleEffect | null = null;
+    let nativeEffectGeneration = 0;
     let resizeObserver: ResizeObserver | null = null;
     let modelBounds: Box3 | null = null;
     let defaultView: CameraView | null = null;
@@ -385,6 +403,17 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       const delta = Math.min(clock.getDelta(), 0.1);
       if (animationModeRef.current === "manual") mixer?.update(delta);
       controls.update();
+      if (animationModeRef.current === "native" && nativeEffect) {
+        try {
+          nativeEffect.setTime(nativePreviewTimeRef.current, camera);
+        } catch (caught) {
+          const message = caught instanceof Error ? caught.message : "Native particle rendering failed.";
+          nativeEffect.dispose();
+          nativeEffect = null;
+          setNativeStatus("error");
+          setNativeError(`${message} No substitute effect was rendered.`);
+        }
+      }
       renderer.render(scene, camera);
     };
     renderFrame();
@@ -397,6 +426,9 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       controls.stopListenToKeyEvents();
       controls.dispose();
       mixer?.stopAllAction();
+      nativeEffectGeneration += 1;
+      nativeEffect?.dispose();
+      nativeEffect = null;
       for (const root of loadedRoots) disposeObject(root);
       floor.geometry.dispose();
       floor.material.dispose();
@@ -499,6 +531,24 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         setManualPlaying: (shouldPlay) => {
           if (activeAction) activeAction.paused = !shouldPlay;
         },
+        loadNativeEffect: async (asset) => {
+          const generation = ++nativeEffectGeneration;
+          nativeEffect?.dispose();
+          nativeEffect = null;
+          const loadedEffect = await loadNativeParticleEffect(asset);
+          if (isStopped || generation !== nativeEffectGeneration) {
+            loadedEffect.dispose();
+            return null;
+          }
+          nativeEffect = loadedEffect;
+          nativeEffect.group.visible = animationModeRef.current === "native";
+          scene.add(nativeEffect.group);
+          nativeEffect.setTime(nativePreviewTimeRef.current, camera);
+          return nativeEffect;
+        },
+        setNativeVisible: (isVisible) => {
+          if (nativeEffect) nativeEffect.group.visible = isVisible;
+        },
         resetCamera,
       };
       setAnimationNames(animationClipNames);
@@ -521,12 +571,61 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
   useEffect(() => {
     animationModeRef.current = animationMode;
+    controllerRef.current?.setNativeVisible(animationMode === "native");
     if (animationMode === "manual") {
       controllerRef.current?.playManualClip(selectedAnimationIndex, false);
       return;
     }
     setIsManualPlaying(false);
+    if (animationMode === "native") {
+      controllerRef.current?.playManualClip(selectedAnimationIndex, false);
+      return;
+    }
+    setIsNativePlaying(false);
   }, [animationMode]);
+
+  useEffect(() => {
+    if (animationMode !== "native" || status !== "ready") return;
+    if (loadedNativeFileDataIdRef.current === selectedNativeAsset.fileDataId && nativeStatus === "ready") {
+      controllerRef.current?.setNativeVisible(true);
+      return;
+    }
+    const requestId = ++nativeLoadRequestRef.current;
+    let isCurrent = true;
+    setNativeStatus("loading");
+    setNativeError(null);
+    setNativeEmitterCount(0);
+    setNativeTextureCount(0);
+    void controllerRef.current?.loadNativeEffect(selectedNativeAsset).then((effect) => {
+      if (!isCurrent || requestId !== nativeLoadRequestRef.current || !effect) return;
+      loadedNativeFileDataIdRef.current = selectedNativeAsset.fileDataId;
+      setNativeEmitterCount(effect.model.emitters.length);
+      setNativeTextureCount(effect.model.textureFileDataIds.length);
+      setNativeStatus("ready");
+    }).catch((caught) => {
+      if (!isCurrent || requestId !== nativeLoadRequestRef.current) return;
+      loadedNativeFileDataIdRef.current = null;
+      setNativeStatus("error");
+      setNativeError(caught instanceof Error ? caught.message : "The native M2 component could not be loaded. No substitute effect was rendered.");
+    });
+    return () => {
+      isCurrent = false;
+    };
+  }, [animationMode, selectedNativeAsset, status]);
+
+  useEffect(() => {
+    if (animationMode !== "native" || !isNativePlaying) return;
+    let frameId = 0;
+    let previous: number | null = null;
+    const advance = (now: number) => {
+      const elapsed = previous === null ? 0 : (now - previous) / 1000;
+      previous = now;
+      setNativePreviewTime((current) => (current + elapsed) % NATIVE_PREVIEW_DURATION_SECONDS);
+      frameId = requestAnimationFrame(advance);
+    };
+    frameId = requestAnimationFrame(advance);
+    return () => cancelAnimationFrame(frameId);
+  }, [animationMode, isNativePlaying]);
 
   useEffect(() => {
     if (animationMode !== "replay") return;
@@ -545,9 +644,31 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   };
 
   const selectAnimationMode = (nextMode: AnimationMode) => {
-    if (nextMode === "manual" && replay?.isPlaying) replay.onTogglePlayback();
+    if (nextMode !== "replay" && replay?.isPlaying) replay.onTogglePlayback();
+    if (nextMode !== "manual") setIsManualPlaying(false);
+    if (nextMode !== "native") setIsNativePlaying(false);
     setAnimationMode(nextMode);
-    if (nextMode === "replay") setIsManualPlaying(false);
+  };
+
+  const onNativeComponentChange = (fileDataId: NativeEffectAsset["fileDataId"]) => {
+    nativeLoadRequestRef.current += 1;
+    loadedNativeFileDataIdRef.current = null;
+    setSelectedNativeFileDataId(fileDataId);
+    setNativePreviewTime(0);
+    setIsNativePlaying(false);
+    setNativeStatus("idle");
+    setNativeError(null);
+  };
+
+  const onNativePlaybackToggle = () => {
+    if (nativeStatus !== "ready") return;
+    if (nativePreviewTime >= NATIVE_PREVIEW_DURATION_SECONDS) setNativePreviewTime(0);
+    setIsNativePlaying((current) => !current);
+  };
+
+  const onNativeReset = () => {
+    setIsNativePlaying(false);
+    setNativePreviewTime(0);
   };
 
   return (
@@ -601,6 +722,13 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         >
           Manual preview
         </button>
+        <button
+          type="button"
+          aria-pressed={animationMode === "native"}
+          onClick={() => selectAnimationMode("native")}
+        >
+          Native M2 component preview
+        </button>
       </div>
 
       {animationMode === "replay" ? (
@@ -630,7 +758,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             </div>
           )}
         </>
-      ) : (
+      ) : animationMode === "manual" ? (
         <div className="model-controls">
           <label>
             <span>Exported character animation</span>
@@ -664,6 +792,79 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             Reset camera
           </button>
         </div>
+      ) : (
+        <div className="native-preview-panel">
+          <div className="native-preview-heading">
+            <div>
+              <span>Original source component</span>
+              <strong>{selectedNativeAsset.label}</strong>
+              <small>{selectedNativeAsset.filename} · FileDataID {selectedNativeAsset.fileDataId}</small>
+            </div>
+            <p>Two-component renderer proof · not complete Elemental Blast</p>
+          </div>
+          <label className="native-component-select">
+            <span>Original M2 component</span>
+            <select
+              aria-label="Original M2 component"
+              value={selectedNativeFileDataId}
+              onChange={(event) => onNativeComponentChange(Number(event.target.value) as NativeEffectAsset["fileDataId"])}
+              disabled={status !== "ready"}
+            >
+              {NATIVE_EFFECT_ASSETS.map((asset) => (
+                <option value={asset.fileDataId} key={asset.fileDataId}>
+                  {asset.label} · FileDataID {asset.fileDataId}
+                </option>
+              ))}
+            </select>
+          </label>
+          {nativeStatus === "loading" && (
+            <p role="status" data-testid="native-effect-status">
+              Loading original M2 and {selectedNativeAsset.textures.length} BLP textures for FileDataID {selectedNativeAsset.fileDataId}…
+            </p>
+          )}
+          {nativeStatus === "ready" && (
+            <p role="status" data-testid="native-effect-status" data-native-file-data-id={selectedNativeAsset.fileDataId}>
+              <strong>{nativeEmitterCount} of {selectedNativeAsset.expectedEmitterCount} authored emitters ready</strong>
+              <span> · {nativeTextureCount} original BLP textures · FileDataID {selectedNativeAsset.fileDataId}</span>
+              <small> · Component proof, not complete Elemental Blast.</small>
+            </p>
+          )}
+          {nativeError && (
+            <div className="model-error native-effect-error" role="alert">
+              <strong>Native M2 component unavailable.</strong>
+              <span>{nativeError}</span>
+            </div>
+          )}
+          <div className="transport native-preview-controls" aria-label="Native M2 component preview controls">
+            <button
+              className="play-button"
+              type="button"
+              onClick={onNativePlaybackToggle}
+              disabled={nativeStatus !== "ready"}
+              aria-label={isNativePlaying ? "Pause native preview" : "Play native preview"}
+            >
+              {isNativePlaying ? "Pause" : "Play"}
+            </button>
+            <button type="button" onClick={onNativeReset}>Reset original preview</button>
+            <label className="seek-control">
+              <span>Preview time</span>
+              <input
+                aria-label="Native preview time"
+                type="range"
+                min="0"
+                max={NATIVE_PREVIEW_DURATION_SECONDS}
+                step="0.001"
+                value={nativePreviewTime}
+                onChange={(event) => {
+                  setIsNativePlaying(false);
+                  setNativePreviewTime(Number(event.target.value));
+                }}
+              />
+              <span className="seek-output">{nativePreviewTime.toFixed(2)}s</span>
+            </label>
+            <button type="button" onClick={() => controllerRef.current?.resetCamera()} disabled={status !== "ready"}>Reset camera</button>
+          </div>
+        </div>
       )}
 
       <div className="model-ready-status">
@@ -678,7 +879,9 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       <p className="model-disclaimer">
         {animationMode === "replay"
           ? "Replay sync samples illustrative exported motion from recorded action timestamps. The 1.20s viewer motion window and clip duration are not cast duration or hit timing; no damage, VFX, or hit reaction is inferred."
-          : "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."}
+          : animationMode === "manual"
+            ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
+            : "Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component and its original BLP textures; it is not the complete Elemental Blast composite."}
       </p>
     </section>
   );

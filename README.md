@@ -133,6 +133,43 @@ The export marks `vulperamale_eyereflect` as opaque even though its texture is a
 
 wow.export's license covers the exporter, not Blizzard's game assets. The exported models remain subject to Blizzard's rights and terms; do not commit or redistribute them. `.gitignore` excludes both `.local/` and `web/public/model/`.
 
+### Acquire the original native particle components
+
+The scene also has a separate **Native M2 component preview** mode for a bounded two-component source-rendering proof:
+
+- FileDataID `794788`, `spells/leishen_lightning_burst_missile.m2`.
+- FileDataID `613807`, `spells/shaman_frost_missile.m2`.
+
+Prepare their original M2 and BLP files with the repository helper:
+
+```sh
+node script/prepare-native-effects.mjs
+```
+
+The helper performs bounded public HTTPS requests, downloads to temporary files, and promotes a file only after its exact byte size, SHA-256, magic, container bounds, version, emitter/bone counts, and texture IDs pass. It installs the ignored files under `web/public/model/native-effects/`. Existing valid files are verified without another request. A missing, partial, malformed, or hash-mismatched response exits nonzero with its FileDataID; there is no procedural substitute.
+
+The pinned original-byte hashes are:
+
+```text
+d74e632a23699e81ca90907baf6f6a74a005e22642567094134bf41ac4393ea4  794788.m2
+882871dc36baf215cb4166385e16be327c10f84b0f66f6937d84f7a7ea63c202  397894.blp
+8d9f1fadfe4422ffd3bb040ec550fdcb81de0f9a003b2c2c71b2d15abf9e56bf  796153.blp
+f2ecaa3d47fc455148e57154dadd1d6324c5d31136b70172c94a7c1418dde08e  243229.blp
+ec0af25f0cbfe223e273a7d7cfd8c6d5df1e9e7054eeac23858d8fb463b82a9e  669041.blp
+0ac91aa529011cd808b5d2880d685f5bf6714813dba898824797c345333376b9  613807.m2
+3890881a5441048e10de3a474a110cb64ed22bcf11e8dd215f60f36de360adce  613804.blp
+4b5a9d337499d317f5c465d655278be49db9e30f86df4b9b7b80e29c14cffb06  613805.blp
+68a30b5caa5557f7a9569b4f925eefcdfba05aa2a95899e7f3c0cd8da9224b86  613806.blp
+d4c485e69747d98297f931cacdb2b7311828a577b975b709e2f8dd6d1daa9c35  167020.blp
+ce09ebf4b23d22a7b53db389526e352020820c2da4352a51b79ccee87966e7f8  167034.blp
+```
+
+The public acquisition endpoint includes `version=12.1.0.69933`, matching the build selected for the earlier DB2 research. That query parameter does **not** independently prove that the returned raw bytes came from that exact build root; the hashes above pin the bytes this proof actually consumes. These game assets remain subject to Blizzard's rights and terms and are not committed or redistributed.
+
+Each source M2 is version 272 and contains six particle emitters, six unparented bones, zero mesh vertices, and no ribbons. The renderer consumes the authored emitter tracks, original BLP texture atlases, UV grids, blend functions, bone-relative transforms, and supported flags through deterministic billboard sampling. Authored lifespan variation uses the documented full symmetric amplitude, and sphere positions stay within the documented elevation/azimuth bounds. Nonzero `zSource` is rejected because these originals use zero and its interaction with other launch settings is outside this proof.
+
+The M2 documentation does not specify the native random formula for `speedVariation`, the exact distribution within sphere angular/radius bounds, or the default sphere launch direction. This renderer therefore uses a stable additive `base + (random - 0.5) * speedVariation` approximation, deterministic uniform-angle/linear-radius sphere sampling, and a radial launch direction matching the sampled sphere position unless `0x100` overrides it to +Z; it does not claim native RNG or distribution parity. Both originals have zero emission-rate variation, so native per-update rate-randomization timing does not affect this proof. This is a stationary, model-relative viewer: inherited missile translation is zero because there is no moving parent model. It is a renderer approximation for these two original components, not complete Elemental Blast, not the other missile components or spell-kit integration, and not pixel-identical game timing. Replay sync and Manual preview use independent clocks and remain usable if native assets fail.
+
 ### Run the browser app
 
 Install the pinned project dependencies and start the development server:
@@ -143,7 +180,7 @@ npm ci
 npm run dev
 ```
 
-Open the local URL printed by Vite. The model scene supports pointer orbit, wheel zoom, arrow-key pan while its canvas has focus, and camera reset. Replay play/pause, speed, previous/next, reset, and seek controls stay with the primary scene. Manual clip selection and manual play/pause appear only after switching modes.
+Open the local URL printed by Vite. The model scene supports pointer orbit, wheel zoom, arrow-key pan while its canvas has focus, and camera reset. Replay play/pause, speed, previous/next, reset, and seek controls stay with the primary scene. Manual clip selection and manual play/pause appear only after switching modes. Native component selection and deterministic play, pause, seek, and reset appear only in Native M2 component preview mode.
 
 The bundled Elemental Shaman reference opens automatically from `/fixture/elemental-shaman-replay.json`; no file selection or load action is required. Automatic playback and seek choose the last combat record at or before the cursor, with source order breaking equal-timestamp ties. Previous/next controls, arrow keys, timeline marks, and the event table preserve the exact selected record, including same-time precombat entries, and pause playback. The secondary inspector shows the selected snapshot time separately from the cursor. If the same-origin reference cannot be fetched or validated, the page reports the error and offers a retry while leaving the genuine scene and manual preview usable.
 
@@ -180,12 +217,13 @@ Run the local checks from `web/`:
 ```sh
 npm run typecheck
 npm test
+node ../script/prepare-native-effects.test.mjs
 npm run build
 PLAYWRIGHT_BROWSERS_PATH=../.local/playwright npx playwright install chromium
 PLAYWRIGHT_BROWSERS_PATH=../.local/playwright npm run test:browser
 ```
 
-The browser download and all generated build/test outputs remain ignored. Browser tests cover automatic reference loading and retry, genuine model loading, replay/manual mode separation, real pose changes, deterministic backward seeks, frozen pause, late model arrival, animation and camera controls, actionable model/WebGL failure states, the bundled full-state fixture, a legacy partial report, navigation, playback, diagnostics, and desktop/mobile overflow.
+The browser download and all generated build/test outputs remain ignored. Browser tests cover automatic reference loading and retry, genuine model loading, replay/manual/native mode separation, both original six-emitter components and their BLPs, deterministic native seek/pause/reset, native-only failures, real character pose changes, frozen replay pause, late model arrival, animation and camera controls, actionable model/WebGL failure states, the bundled full-state fixture, a legacy partial report, navigation, playback, diagnostics, and desktop/mobile overflow.
 
 ## Generated outputs
 
@@ -197,6 +235,7 @@ The CLI helpers keep their generated output under the ignored `.local/` director
 | `.local/build-log.*/` | A new `configure.log` and `build.log` directory per build invocation |
 | `.local/results/smoke-test.*/` | A new `run.log`, `report.json`, and `report.html` directory per smoke invocation |
 | `.local/wow-export/` | Local exporter archive, application, profile, cache, and raw exports |
+| `web/public/model/native-effects/` | Prepared original M2/BLP component files |
 
 Failed CLI runs retain their logs and any partial reports. The script prints the directory before execution. Keep private character exports under `.local/` as well; do not commit them or generated reports.
 

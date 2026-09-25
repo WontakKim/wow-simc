@@ -25,6 +25,7 @@ vi.mock("./GenuineModelScene", () => ({
       <span>Training Dummy</span>
       <button type="button" aria-pressed="true">Replay sync</button>
       <button type="button" aria-pressed="false">Manual preview</button>
+      <button type="button" aria-pressed="false">Native M2 component preview</button>
       {replay ? (
         <>
           <p data-testid="scene-replay-state">
@@ -364,6 +365,7 @@ describe("App", () => {
     expect(within(scene).getByText(/training dummy/i)).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: "Replay sync" })).toHaveAttribute("aria-pressed", "true");
     expect(within(scene).getByRole("button", { name: "Manual preview" })).toHaveAttribute("aria-pressed", "false");
+    expect(within(scene).getByRole("button", { name: "Native M2 component preview" })).toHaveAttribute("aria-pressed", "false");
     expect(within(scene).getByRole("combobox", { name: /exported character animation/i })).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: /play animation/i })).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: /reset camera/i })).toBeInTheDocument();

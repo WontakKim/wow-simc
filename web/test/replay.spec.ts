@@ -374,3 +374,130 @@ test("reframes genuine models after resizing the same page to mobile", async ({ 
   expect(trainingDummyPixelsAtRightEdge).toBe(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("renders both original M2 components with deterministic isolated native transport", async ({ page }) => {
+  const runtimeRequests: string[] = [];
+  page.on("request", (request) => runtimeRequests.push(request.url()));
+  await page.goto("/");
+
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+
+  const nativeStatus = scene.locator("[data-testid='native-effect-status']");
+  await expect(nativeStatus).toContainText("6 of 6 authored emitters ready", { timeout: 30_000 });
+  await expect(nativeStatus).toContainText("4 original BLP textures");
+  await expect(nativeStatus).toContainText("FileDataID 794788");
+  await expect(nativeStatus).toContainText(/component proof.*not complete Elemental Blast/i);
+
+  const canvas = scene.locator("canvas");
+  const seek = scene.getByRole("slider", { name: "Native preview time" });
+  await seek.fill("0.45");
+  const lightningEarly = await canvas.screenshot();
+  await seek.fill("1.1");
+  expect((await canvas.screenshot()).equals(lightningEarly)).toBe(false);
+  await seek.fill("0.45");
+  expect((await canvas.screenshot()).equals(lightningEarly)).toBe(true);
+
+  const component = scene.getByRole("combobox", { name: "Original M2 component" });
+  await component.selectOption("613807");
+  await expect(nativeStatus).toContainText("6 of 6 authored emitters ready", { timeout: 30_000 });
+  await expect(nativeStatus).toContainText("5 original BLP textures");
+  await expect(nativeStatus).toContainText("FileDataID 613807");
+  await seek.fill("0.45");
+  const frostFrame = await canvas.screenshot();
+  expect(frostFrame.equals(lightningEarly)).toBe(false);
+
+  await scene.getByRole("button", { name: "Play native preview" }).click();
+  await expect(scene.getByRole("button", { name: "Pause native preview" })).toBeVisible();
+  await page.waitForTimeout(160);
+  await scene.getByRole("button", { name: "Pause native preview" }).click();
+  const pausedTime = await seek.inputValue();
+  const pausedFrame = await canvas.screenshot();
+  await page.waitForTimeout(160);
+  expect(await seek.inputValue()).toBe(pausedTime);
+  expect((await canvas.screenshot()).equals(pausedFrame)).toBe(true);
+
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(scene.getByRole("button", { name: "Manual preview" })).toHaveAttribute("aria-pressed", "true");
+  await expect(scene.locator("[data-testid='native-effect-status']")).toHaveCount(0);
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  await expect(scene.getByRole("button", { name: "Play native preview" })).toBeVisible();
+  expect(await seek.inputValue()).toBe(pausedTime);
+  expect((await canvas.screenshot()).equals(pausedFrame)).toBe(true);
+
+  for (const fileDataId of [794788, 397894, 796153, 243229, 669041, 613807, 613804, 613805, 613806, 167020, 167034]) {
+    expect(runtimeRequests.some((url) => url.endsWith(`/model/native-effects/${fileDataId}.${fileDataId === 794788 || fileDataId === 613807 ? "m2" : "blp"}`))).toBe(true);
+  }
+  expect(runtimeRequests.every((url) => new URL(url).origin === "http://127.0.0.1:4173")).toBe(true);
+});
+
+test("applies the latest native seek after a delayed component load", async ({ page }) => {
+  await page.route("**/model/native-effects/613807.m2", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await route.continue();
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("613807");
+  const seek = scene.getByRole("slider", { name: "Native preview time" });
+  await seek.fill("0.72");
+  await expect(scene.locator("[data-testid='native-effect-status']")).toContainText("6 of 6 authored emitters ready", { timeout: 30_000 });
+  const soughtFrame = await scene.locator("canvas").screenshot();
+  await seek.fill("0.2");
+  expect((await scene.locator("canvas").screenshot()).equals(soughtFrame)).toBe(false);
+  await seek.fill("0.72");
+  expect((await scene.locator("canvas").screenshot()).equals(soughtFrame)).toBe(true);
+});
+
+test("keeps existing scene modes usable when required native data is missing or unsupported", async ({ page }) => {
+  await page.route("**/model/native-effects/397894.blp", (route) => route.fulfill({ status: 404, body: "missing" }));
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  const alert = scene.getByRole("alert").filter({ hasText: "Native M2 component unavailable" });
+  await expect(alert).toContainText("FileDataID 397894", { timeout: 30_000 });
+  await expect(alert).toContainText(/run.*prepare-native-effects/i);
+  await expect(alert).toContainText(/no substitute effect/i);
+
+  await scene.getByRole("button", { name: "Replay sync" }).click();
+  await expect(scene.locator(".replay-motion-status")).toBeVisible();
+  await expect(scene.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+});
+
+test("rejects unsupported native source bytes visibly and preserves mobile framing", async ({ page }) => {
+  const response = await page.request.get("http://127.0.0.1:4173/model/native-effects/794788.m2");
+  const unsupported = await response.body();
+  unsupported.writeUInt32LE(271, 12);
+  await page.addInitScript((expectedSha256) => {
+    const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
+    Object.defineProperty(crypto.subtle, "digest", {
+      configurable: true,
+      value: async (algorithm: AlgorithmIdentifier, source: BufferSource) => {
+        const bytes = ArrayBuffer.isView(source)
+          ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+          : new Uint8Array(source);
+        const isAlteredM2 = bytes.length === 9724
+          && String.fromCharCode(...bytes.subarray(0, 4)) === "MD21"
+          && new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(12, true) === 271;
+        if (!isAlteredM2) return originalDigest(algorithm, source);
+        return Uint8Array.from(expectedSha256.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16)).buffer;
+      },
+    });
+  }, "d74e632a23699e81ca90907baf6f6a74a005e22642567094134bf41ac4393ea4");
+  await page.route("**/model/native-effects/794788.m2", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/octet-stream",
+    body: unsupported,
+  }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  const alert = scene.getByRole("alert").filter({ hasText: "Native M2 component unavailable" });
+  await expect(alert).toContainText(/FileDataID 794788.*version 271.*272/i, { timeout: 30_000 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
+});

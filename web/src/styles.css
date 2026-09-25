@@ -1660,3 +1660,144 @@ td button {
     padding-inline: 16px;
   }
 }
+
+.native-preview-panel {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.8fr) minmax(280px, 1fr);
+  gap: 14px 20px;
+  align-items: end;
+  padding: 16px 20px 4px;
+}
+
+.native-preview-heading {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: end;
+}
+
+.native-preview-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.native-preview-heading span,
+.native-component-select > span {
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.native-preview-heading strong,
+.native-preview-heading small {
+  overflow-wrap: anywhere;
+}
+
+.native-preview-heading strong {
+  font-size: 0.92rem;
+}
+
+.native-preview-heading small,
+.native-preview-heading p,
+.native-preview-panel > [role="status"] {
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.native-preview-heading p,
+.native-preview-panel > [role="status"] {
+  margin: 0;
+}
+
+.native-preview-heading p {
+  max-width: 320px;
+  text-align: right;
+}
+
+.native-component-select {
+  display: grid;
+  gap: 6px;
+}
+
+.native-component-select select {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 36px 0 11px;
+  border: 1px solid var(--axis);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.native-preview-panel > [role="status"] {
+  align-self: center;
+}
+
+.native-preview-panel > [role="status"] strong {
+  color: var(--text);
+}
+
+.native-effect-error,
+.native-preview-controls {
+  grid-column: 1 / -1;
+}
+
+.native-effect-error {
+  border: 1px solid color-mix(in srgb, var(--failed) 28%, var(--border));
+  border-radius: 7px;
+}
+
+.native-preview-controls {
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 2px 0 12px;
+}
+
+.native-preview-controls .seek-control {
+  min-width: 260px;
+}
+
+@media (max-width: 900px) {
+  .native-preview-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .native-preview-panel > [role="status"] {
+    grid-column: 1;
+  }
+}
+
+@media (max-width: 620px) {
+  .animation-mode-tabs {
+    flex-wrap: wrap;
+  }
+
+  .native-preview-panel {
+    padding-inline: 16px;
+  }
+
+  .native-preview-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .native-preview-heading p {
+    max-width: none;
+    text-align: left;
+  }
+
+  .native-preview-controls > button {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .native-preview-controls .seek-control {
+    min-width: 100%;
+    margin-left: 0;
+  }
+}
