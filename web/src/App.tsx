@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AuraSnapshot,
   findEventAtOrBefore,
@@ -261,11 +261,11 @@ export function App() {
   const [cursor, setCursor] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
-  const [message, setMessage] = useState("Choose a report or load the bundled demo.");
+  const [message, setMessage] = useState("Loading bundled reference…");
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const lastFrameRef = useRef<number | null>(null);
-  const importRequestRef = useRef(0);
+  const referenceRequestRef = useRef(0);
 
   const actor = report?.actors.find((candidate) => candidate.id === selectedActorId) ?? null;
   const selectedEvent = actor?.events[selectedIndex] ?? null;
@@ -309,58 +309,49 @@ export function App() {
     setCursor(nextActor?.events[0]?.time ?? 0);
   };
 
-  const applyReport = (nextReport: ReplayReport, sourceName: string) => {
+  const applyReport = (nextReport: ReplayReport) => {
     setReport(nextReport);
     const onlyActor = nextReport.actors.length === 1 ? nextReport.actors[0] : null;
     setSelectedActorId(onlyActor?.id ?? null);
     resetSelection(onlyActor);
     setError(null);
-    setMessage(`Loaded ${sourceName} locally. No character data was uploaded or persisted.`);
+    setMessage("Loaded bundled Elemental Shaman reference.");
   };
 
-  const loadText = (text: string, sourceName: string) => {
+  const loadText = (text: string) => {
     let input: unknown;
     try {
       input = JSON.parse(text);
     } catch {
-      throw new ReplayValidationError(`${sourceName} is not valid JSON.`);
+      throw new ReplayValidationError("The bundled reference is not valid JSON.");
     }
-    applyReport(parseReplayReport(input), sourceName);
+    applyReport(parseReplayReport(input));
   };
 
-  const onFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    if (!file) return;
-    const requestId = ++importRequestRef.current;
+  const loadReference = async () => {
+    const requestId = ++referenceRequestRef.current;
     setError(null);
-    try {
-      const text = await file.text();
-      if (requestId !== importRequestRef.current) return;
-      loadText(text, file.name);
-    } catch (caught) {
-      if (requestId !== importRequestRef.current) return;
-      setError(caught instanceof Error ? caught.message : "The report could not be read.");
-    } finally {
-      input.value = "";
-    }
-  };
-
-  const loadDemo = async () => {
-    const requestId = ++importRequestRef.current;
-    setError(null);
+    setMessage("Loading bundled reference…");
     try {
       const response = await fetch("/fixture/elemental-shaman-replay.json");
-      if (requestId !== importRequestRef.current) return;
-      if (!response.ok) throw new Error(`Demo request failed with status ${response.status}.`);
+      if (requestId !== referenceRequestRef.current) return;
+      if (!response.ok) throw new Error(`Reference request failed with status ${response.status}.`);
       const text = await response.text();
-      if (requestId !== importRequestRef.current) return;
-      loadText(text, "bundled Elemental Shaman demo");
+      if (requestId !== referenceRequestRef.current) return;
+      loadText(text);
     } catch (caught) {
-      if (requestId !== importRequestRef.current) return;
-      setError(caught instanceof Error ? caught.message : "The bundled demo could not be loaded.");
+      if (requestId !== referenceRequestRef.current) return;
+      setError(caught instanceof Error ? caught.message : "The bundled reference could not be loaded.");
+      setMessage("Reference unavailable. The genuine model scene remains available.");
     }
   };
+
+  useEffect(() => {
+    void loadReference();
+    return () => {
+      referenceRequestRef.current += 1;
+    };
+  }, []);
 
   const selectActor = (id: string) => {
     const nextActor = report?.actors.find((candidate) => candidate.id === id) ?? null;
@@ -423,18 +414,23 @@ export function App() {
           <div>
             <p className="eyebrow">Secondary sampled trace inspector</p>
             <h2 id="trace-inspector-title">Inspect what SimC recorded.</h2>
-            <p>Load a sampled action sequence and inspect its recorded state snapshots. The trace is independent of the manual animation preview above; this tool does not simulate, optimize, infer damage, or explain why an action was chosen.</p>
+            <p>The bundled reference opens automatically for recorded-state inspection. The trace is independent of the manual animation preview above; this tool does not simulate, optimize, infer damage, or explain why an action was chosen.</p>
           </div>
-          <div className="import-panel">
-            <input id="report-file" type="file" accept="application/json,.json" onChange={onFileChange} />
-            <label className="file-button" htmlFor="report-file">Choose SimC JSON</label>
-            <button className="secondary-button" type="button" onClick={loadDemo}>Load bundled demo</button>
-            <small>Expected: report_version 2.0.0 with an action trace.</small>
+          <div className="reference-note">
+            <strong>Built-in reference</strong>
+            <span>Elemental Shaman · official MID2 profile</span>
+            <small>Same-origin fixture · report schema 2.0.0</small>
           </div>
         </section>
 
         <div className="load-status" role="status">{message}</div>
-        {error && <div className="error-banner" role="alert"><strong>Could not load report.</strong><span>{error}</span></div>}
+        {error && (
+          <div className="error-banner" role="alert">
+            <strong>Could not load reference.</strong>
+            <span>{error}</span>
+            <button className="retry-button" type="button" onClick={loadReference}>Retry loading reference</button>
+          </div>
+        )}
 
         {report && report.actors.length > 1 && (
           <section className="actor-picker card">

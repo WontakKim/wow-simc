@@ -1,8 +1,4 @@
 import { expect, test } from "@playwright/test";
-import { fileURLToPath } from "node:url";
-
-const fixturePath = fileURLToPath(new URL("../public/fixture/elemental-shaman-replay.json", import.meta.url));
-
 const partialReport = JSON.stringify({
   report_version: "2.0.0",
   version: "1210-01",
@@ -44,17 +40,12 @@ const partialReport = JSON.stringify({
   },
 });
 
-test("drives bundled full-state replay controls", async ({ page }) => {
+test("automatically opens the bundled full-state replay and drives its controls", async ({ page }) => {
   await page.goto("/");
-  const fileInput = page.getByLabel("Choose SimC JSON");
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    await page.keyboard.press("Tab");
-    if (await fileInput.evaluate((element) => element === document.activeElement)) break;
-  }
-  await expect(fileInput).toBeFocused();
-  await expect(page.locator('label[for="report-file"]')).toHaveCSS("outline-style", "solid");
-  await page.getByRole("button", { name: "Load bundled demo" }).click();
 
+  await expect(page.getByLabel("Choose SimC JSON")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Load bundled demo" })).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: "Loaded bundled Elemental Shaman reference" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "MID2_Shaman_Elemental_Farseer" })).toBeVisible();
   await expect(page.getByText(/not the highest, optimal, or representative result/i)).toBeVisible();
   await expect(page.getByText(/Rune of Unleashed Fire/)).toBeVisible();
@@ -89,15 +80,40 @@ test("drives bundled full-state replay controls", async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("imports and replaces local full and partial reports", async ({ page }) => {
-  await page.goto("/");
-  const input = page.getByLabel("Choose SimC JSON");
-
-  await input.setInputFiles({
-    name: "legacy-partial.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(partialReport),
+test("keeps the genuine scene usable through reference failure and retry", async ({ page }) => {
+  let referenceRequests = 0;
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    referenceRequests += 1;
+    if (referenceRequests === 1) {
+      await route.fulfill({ status: 503, body: "temporarily unavailable" });
+      return;
+    }
+    await route.continue();
   });
+
+  await page.goto("/");
+
+  const alert = page.getByRole("alert").filter({ hasText: "Could not load reference" });
+  await expect(alert).toContainText("status 503");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await expect(scene.locator("canvas")).toBeVisible();
+
+  await alert.getByRole("button", { name: "Retry loading reference" }).click();
+
+  await expect(page.getByRole("heading", { name: "MID2_Shaman_Elemental_Farseer" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "Could not load reference" })).toHaveCount(0);
+  expect(referenceRequests).toBe(2);
+});
+
+test("preserves missing-state semantics for a legacy partial reference", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: partialReport,
+  }));
+  await page.goto("/");
+
   await expect(page.getByRole("heading", { name: "Legacy Partial Actor" })).toBeVisible();
   await expect(page.getByText("Cooldown snapshot was not recorded at this event.")).toBeVisible();
   await expect(page.getByText("Target debuff snapshot was not recorded at this event.")).toBeVisible();
@@ -106,17 +122,11 @@ test("imports and replaces local full and partial reports", async ({ page }) => 
 
   await page.getByRole("button", { name: "Next event" }).click();
   await expect(page.getByTestId("selected-event")).toContainText("Wait 0.50s");
-
-  await input.setInputFiles(fixturePath);
-  await expect(page.getByRole("heading", { name: "MID2_Shaman_Elemental_Farseer" })).toBeVisible();
-  await expect(page.getByTestId("selected-event")).toContainText("precombat");
-  await expect(page.locator("tbody tr")).toHaveCount(59);
 });
 
 test("keeps the replay usable at mobile width", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Load bundled demo" }).click();
 
   await expect(page.getByRole("heading", { name: "MID2_Shaman_Elemental_Farseer" })).toBeVisible();
   await page.locator(".event-hit-target").first().focus();
@@ -206,12 +216,12 @@ test("shows actionable feedback when WebGL is unavailable", async ({ page }) => 
 });
 
 test("keeps model camera arrows isolated from trace playback and navigation", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: partialReport,
+  }));
   await page.goto("/");
-  await page.getByLabel("Choose SimC JSON").setInputFiles({
-    name: "keyboard-isolation.json",
-    mimeType: "application/json",
-    buffer: Buffer.from(partialReport),
-  });
 
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });

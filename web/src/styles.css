@@ -224,9 +224,9 @@ button {
   line-height: 1.65;
 }
 
-.import-panel {
+.reference-note {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   padding: 22px;
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -234,46 +234,16 @@ button {
   box-shadow: var(--shadow);
 }
 
-.import-panel input[type="file"] {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
+.reference-note strong {
+  font-size: 1rem;
 }
 
-.file-button,
-.secondary-button {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 16px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 0.88rem;
-  font-weight: 750;
+.reference-note span {
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
-.file-button {
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: #ffffff;
-}
-
-.import-panel input[type="file"]:focus-visible + .file-button {
-  outline: 3px solid var(--focus);
-  outline-offset: 3px;
-}
-
-.secondary-button {
-  border: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.import-panel small,
+.reference-note small,
 .metric-card small,
 .state-list small,
 .card-heading p,
@@ -291,14 +261,27 @@ figcaption {
 
 .error-banner {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto 1fr auto;
   gap: 14px;
+  align-items: center;
   margin: 0 0 20px;
   padding: 14px 16px;
   border-left: 3px solid var(--failed);
   border-radius: 6px;
   background: var(--failed-soft);
   font-size: 0.87rem;
+}
+
+.retry-button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 750;
 }
 
 .card {

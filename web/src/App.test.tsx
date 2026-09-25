@@ -31,9 +31,8 @@ interface StatefulReportOptions {
   precombatTime?: number;
 }
 
-function statefulReportFile(
+function statefulReportFixture(
   actorName = "State Actor",
-  name = "stateful.json",
   options: StatefulReportOptions = {},
 ) {
   const simulationOptions = {
@@ -42,31 +41,72 @@ function statefulReportFile(
   };
   const precombatTime = options.precombatTime ?? 0;
 
-  return new File([
-    JSON.stringify({
-      report_version: "2.0.0",
-      version: "1210-01",
-      sim: {
-        options: simulationOptions,
-        players: [{
-          name: actorName,
-          specialization: "Elemental Shaman",
+  return JSON.stringify({
+    report_version: "2.0.0",
+    version: "1210-01",
+    sim: {
+      options: simulationOptions,
+      players: [{
+        name: actorName,
+        specialization: "Elemental Shaman",
+        collected_data: {
+          dps: { mean: 2000, count: options.dpsSamples ?? 1 },
+          fight_length: { mean: 2 },
+          action_sequence_precombat: [
+            { time: precombatTime, id: 10, name: "first_setup", spell_name: "First Setup", target: "none", queue_failed: false, resources: { mana: 100 }, resources_max: { mana: 100 }, buffs: [{ id: 30, name: "setup_buff", stacks: 1 }] },
+            { time: precombatTime, id: 11, name: "second_setup", spell_name: "Second Setup", target: "none", queue_failed: false, resources: { mana: 100 }, resources_max: { mana: 100 } },
+          ],
+          action_sequence: [
+            { time: 0, id: 12, name: "first_combat", spell_name: "First Combat", target: "Target", queue_failed: false, resources: { mana: 95 }, resources_max: { mana: 100 }, cooldowns: [], targets: [] },
+            { time: 2, id: 13, name: "last_combat", spell_name: "Last Combat", target: "Target", queue_failed: false, resources: { mana: 90 }, resources_max: { mana: 100 }, cooldowns: [{ id: 40, name: "major_cooldown", stacks: 2, remains: 4 }], targets: [] },
+          ],
+        },
+      }],
+    },
+  });
+}
+
+function reportFixture() {
+  return JSON.stringify({
+    report_version: "2.0.0",
+    version: "1210-01",
+    ptr_enabled: false,
+    logs: [{
+      level: "implementation_not_yet_verified",
+      message: "Example implementation warning",
+    }],
+    sim: {
+      options: {
+        iterations: 1,
+        dbc: { version_used: "Live", Live: { wow_version: "12.1.0.69933" } },
+      },
+      players: [
+        {
+          name: "First Actor",
+          specialization: "Frost Mage",
           collected_data: {
-            dps: { mean: 2000, count: options.dpsSamples ?? 1 },
-            fight_length: { mean: 2 },
-            action_sequence_precombat: [
-              { time: precombatTime, id: 10, name: "first_setup", spell_name: "First Setup", target: "none", queue_failed: false, resources: { mana: 100 }, resources_max: { mana: 100 }, buffs: [{ id: 30, name: "setup_buff", stacks: 1 }] },
-              { time: precombatTime, id: 11, name: "second_setup", spell_name: "Second Setup", target: "none", queue_failed: false, resources: { mana: 100 }, resources_max: { mana: 100 } },
-            ],
+            dps: { mean: 1000, count: 1 },
+            fight_length: { mean: 4 },
             action_sequence: [
-              { time: 0, id: 12, name: "first_combat", spell_name: "First Combat", target: "Target", queue_failed: false, resources: { mana: 95 }, resources_max: { mana: 100 }, cooldowns: [], targets: [] },
-              { time: 2, id: 13, name: "last_combat", spell_name: "Last Combat", target: "Target", queue_failed: false, resources: { mana: 90 }, resources_max: { mana: 100 }, cooldowns: [{ id: 40, name: "major_cooldown", stacks: 2, remains: 4 }], targets: [] },
+              { time: 0, id: 1, name: "frostbolt", spell_name: "Frostbolt", target: "Target", queue_failed: false, resources: { mana: 100 }, resources_max: { mana: 100 } },
+              { time: 2, id: 2, name: "ice_lance", spell_name: "Ice Lance", target: "Target", queue_failed: true, resources: { mana: 95 }, resources_max: { mana: 100 } },
             ],
           },
-        }],
-      },
-    }),
-  ], name, { type: "application/json" });
+        },
+        {
+          name: "Second Actor",
+          specialization: "Elemental Shaman",
+          collected_data: {
+            dps: { mean: 2000, count: 1 },
+            fight_length: { mean: 6 },
+            action_sequence: [
+              { time: 1, wait: 0.5, resources: { mana: 90 }, resources_max: { mana: 100 } },
+            ],
+          },
+        },
+      ],
+    },
+  });
 }
 
 function createDeferred<T>() {
@@ -79,59 +119,33 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-function reportFile(name = "replay.json") {
-  return new File([
-    JSON.stringify({
-      report_version: "2.0.0",
-      version: "1210-01",
-      ptr_enabled: false,
-      logs: [{
-        level: "implementation_not_yet_verified",
-        message: "Example implementation warning",
-      }],
-      sim: {
-        options: {
-          iterations: 1,
-          dbc: { version_used: "Live", Live: { wow_version: "12.1.0.69933" } },
-        },
-        players: [
-          {
-            name: "First Actor",
-            specialization: "Frost Mage",
-            collected_data: {
-              dps: { mean: 1000, count: 1 },
-              fight_length: { mean: 4 },
-              action_sequence: [
-                { time: 0, id: 1, name: "frostbolt", spell_name: "Frostbolt", target: "Target", queue_failed: false, resources: { mana: 100 }, resources_max: { mana: 100 } },
-                { time: 2, id: 2, name: "ice_lance", spell_name: "Ice Lance", target: "Target", queue_failed: true, resources: { mana: 95 }, resources_max: { mana: 100 } },
-              ],
-            },
-          },
-          {
-            name: "Second Actor",
-            specialization: "Elemental Shaman",
-            collected_data: {
-              dps: { mean: 2000, count: 1 },
-              fight_length: { mean: 6 },
-              action_sequence: [
-                { time: 1, wait: 0.5, resources: { mana: 90 }, resources_max: { mana: 100 } },
-              ],
-            },
-          },
-        ],
-      },
-    }),
-  ], name, { type: "application/json" });
+function successfulResponse(body: string) {
+  return { ok: true, status: 200, text: async () => body } as Response;
+}
+
+function stubFixture(body: string) {
+  const fetchMock = vi.fn().mockResolvedValue(successfulResponse(body));
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 describe("App", () => {
-  it("imports locally, requires actor selection, and exposes truthful navigation and state", async () => {
+  it("loads the bundled reference automatically without file input and exposes truthful navigation and state", async () => {
+    const fixtureRequest = createDeferred<Response>();
+    const fetchMock = vi.fn().mockReturnValue(fixtureRequest.promise);
+    vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     render(<App />);
 
-    await user.upload(screen.getByLabelText(/choose simc json/i), reportFile());
+    expect(fetchMock).toHaveBeenCalledWith("/fixture/elemental-shaman-replay.json");
+    expect(screen.getByRole("status")).toHaveTextContent(/loading bundled reference/i);
+    expect(screen.queryByLabelText(/choose simc json/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /load bundled demo/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /genuine wow model scene/i })).toBeInTheDocument();
 
-    expect(screen.getByRole("status")).toHaveTextContent("Loaded replay.json");
+    fixtureRequest.resolve(successfulResponse(reportFixture()));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(/loaded bundled elemental shaman reference/i);
     expect(screen.getByRole("combobox", { name: /trace actor/i })).toHaveValue("");
     expect(screen.getByText(/choose one of 2 actors/i)).toBeInTheDocument();
 
@@ -157,26 +171,33 @@ describe("App", () => {
     expect(within(details).getByText("Ice Lance")).toBeInTheDocument();
   });
 
-  it("reports malformed files without losing the current replay", async () => {
+  it("keeps the model scene usable when reference validation fails and retries", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(successfulResponse("{}"))
+      .mockResolvedValueOnce(successfulResponse(statefulReportFixture("Retried Actor")));
+    vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     render(<App />);
-    const input = screen.getByLabelText(/choose simc json/i);
 
-    await user.upload(input, reportFile());
-    await user.selectOptions(screen.getByRole("combobox", { name: /trace actor/i }), "actor-0");
-    expect(screen.getByRole("heading", { name: "First Actor" })).toBeInTheDocument();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/could not load reference/i);
+    expect(alert).toHaveTextContent(/report_version/i);
+    expect(screen.getByRole("region", { name: /genuine wow model scene/i })).toBeInTheDocument();
+    expect(screen.queryByTestId("selected-event")).not.toBeInTheDocument();
 
-    await user.upload(input, new File(["not json"], "broken.json", { type: "application/json" }));
-    expect(screen.getByRole("alert")).toHaveTextContent(/broken.json is not valid json/i);
-    expect(screen.getByRole("heading", { name: "First Actor" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /retry loading reference/i }));
+
+    expect(await screen.findByRole("heading", { name: "Retried Actor" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("navigates same-time precombat entries and renders missing remains without inventing values", async () => {
+    stubFixture(statefulReportFixture());
     const user = userEvent.setup();
     render(<App />);
 
-    await user.upload(screen.getByLabelText(/choose simc json/i), statefulReportFile());
-    const details = screen.getByTestId("selected-event");
+    const details = await screen.findByTestId("selected-event");
     expect(within(details).getByText("First Setup")).toBeInTheDocument();
     expect(screen.getByText("Duration not recorded")).toBeInTheDocument();
     expect(screen.getByText("Cooldown snapshot was not recorded at this event.")).toBeInTheDocument();
@@ -199,18 +220,18 @@ describe("App", () => {
     expect(screen.queryByText(/^2 charges$/i)).not.toBeInTheDocument();
   });
 
-  it("pauses playback, reaches the final record, and resets on valid file replacement", async () => {
+  it("pauses playback and reaches the final record", async () => {
     let nextFrame: FrameRequestCallback | null = null;
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       nextFrame = callback;
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    stubFixture(statefulReportFixture());
 
     const user = userEvent.setup();
     render(<App />);
-    const input = screen.getByLabelText(/choose simc json/i);
-    await user.upload(input, statefulReportFile());
+    await screen.findByTestId("selected-event");
 
     await user.click(screen.getByRole("button", { name: "Play" }));
     expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
@@ -225,84 +246,43 @@ describe("App", () => {
     await act(async () => { nextFrame?.(4000); });
     expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     expect(within(screen.getByTestId("selected-event")).getByText("Last Combat")).toBeInTheDocument();
-
-    await user.upload(input, statefulReportFile("Replacement Actor", "replacement.json"));
-    expect(screen.getByRole("heading", { name: "Replacement Actor" })).toBeInTheDocument();
-    expect(within(screen.getByTestId("selected-event")).getByText("First Setup")).toBeInTheDocument();
-    expect(screen.getByText(/Loaded replacement.json locally/)).toBeInTheDocument();
   });
 
-  it("uses simulation metadata for the sampled iteration and DPS count for samples", async () => {
-    const user = userEvent.setup();
+  it.each([
+    {
+      caseName: "known simulation iterations",
+      actorName: "Known Iterations",
+      options: { simulationIterations: 5, dpsSamples: 1, precombatTime: 1.25 },
+      expectedIteration: /sampled iteration 1/i,
+      expectedSamples: /aggregate across 1 sample$/i,
+      unexpectedIteration: /sampled iteration not recorded/i,
+    },
+    {
+      caseName: "unknown simulation iterations",
+      actorName: "Unknown Iterations",
+      options: { dpsSamples: 5, precombatTime: 1.25 },
+      expectedIteration: /sampled iteration not recorded/i,
+      expectedSamples: /aggregate across 5 samples/i,
+      unexpectedIteration: /sampled iteration [01]/i,
+    },
+  ])("uses $caseName for the sampled iteration and DPS count", async ({
+    actorName,
+    options,
+    expectedIteration,
+    expectedSamples,
+    unexpectedIteration,
+  }) => {
+    stubFixture(statefulReportFixture(actorName, options));
     render(<App />);
-    const input = screen.getByLabelText(/choose simc json/i);
 
-    await user.upload(input, statefulReportFile("Known Iterations", "known.json", {
-      simulationIterations: 5,
-      dpsSamples: 1,
-      precombatTime: 1.25,
-    }));
-    expect(screen.getByText(/sampled iteration 1/i)).toBeInTheDocument();
-    expect(screen.getByText(/aggregate across 1 sample$/i)).toBeInTheDocument();
+    expect(await screen.findByText(expectedIteration)).toBeInTheDocument();
+    expect(screen.getByText(expectedSamples)).toBeInTheDocument();
     expect(screen.getByText("Source order · 1.25s")).toBeInTheDocument();
-
-    await user.upload(input, statefulReportFile("Unknown Iterations", "unknown.json", {
-      dpsSamples: 5,
-    }));
-    expect(screen.getByText(/sampled iteration not recorded/i)).toBeInTheDocument();
-    expect(screen.getByText(/aggregate across 5 samples/i)).toBeInTheDocument();
-    expect(screen.queryByText(/sampled iteration 0/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(unexpectedIteration)).not.toBeInTheDocument();
   });
 
-  it("keeps the latest import when an earlier demo succeeds or fails later", async () => {
-    const staleDemoText = createDeferred<string>();
-    const staleDemoFailure = createDeferred<Response>();
-    const latestDemoPayload = await statefulReportFile("Latest Demo", "latest-demo.json").text();
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, text: () => staleDemoText.promise })
-      .mockReturnValueOnce(staleDemoFailure.promise)
-      .mockResolvedValueOnce({ ok: true, text: async () => latestDemoPayload });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const user = userEvent.setup();
-    render(<App />);
-    const input = screen.getByLabelText(/choose simc json/i);
-    const demoButton = screen.getByRole("button", { name: /load bundled demo/i });
-
-    await user.click(demoButton);
-    await user.upload(input, statefulReportFile("Latest File", "latest.json"));
-    expect(screen.getByRole("heading", { name: "Latest File" })).toBeInTheDocument();
-
-    const stalePayload = await statefulReportFile("Stale Demo", "stale.json").text();
-    await act(async () => {
-      staleDemoText.resolve(stalePayload);
-      await staleDemoText.promise;
-    });
-    expect(screen.getByRole("heading", { name: "Latest File" })).toBeInTheDocument();
-
-    await user.click(demoButton);
-    await user.upload(input, statefulReportFile("Newest File", "newest.json"));
-    await act(async () => {
-      staleDemoFailure.reject(new Error("stale demo failure"));
-      await Promise.resolve();
-    });
-    expect(screen.getByRole("heading", { name: "Newest File" })).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-
-    const staleFileText = createDeferred<string>();
-    const staleFile = statefulReportFile("Stale File", "stale-file.json");
-    Object.defineProperty(staleFile, "text", { value: () => staleFileText.promise });
-    await user.upload(input, staleFile);
-    await user.click(demoButton);
-    expect(screen.getByRole("heading", { name: "Latest Demo" })).toBeInTheDocument();
-
-    staleFileText.resolve(await statefulReportFile("Stale File", "stale-file.json").text());
-    await act(async () => { await staleFileText.promise; });
-    expect(screen.getByRole("heading", { name: "Latest Demo" })).toBeInTheDocument();
-  });
-
-
-  it("makes the genuine-model scene primary and labels animation as a manual preview", () => {
+  it("makes the genuine-model scene primary and labels animation as a manual preview", async () => {
+    stubFixture(statefulReportFixture());
     render(<App />);
 
     const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
@@ -312,6 +292,6 @@ describe("App", () => {
     expect(within(scene).getByRole("combobox", { name: /exported character animation/i })).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: /play animation/i })).toBeInTheDocument();
     expect(within(scene).getByRole("button", { name: /reset camera/i })).toBeInTheDocument();
+    expect(await screen.findByTestId("selected-event")).toBeInTheDocument();
   });
-
 });
