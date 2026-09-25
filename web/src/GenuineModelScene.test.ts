@@ -1,6 +1,24 @@
-import { BufferGeometry, Mesh, MeshStandardMaterial, Object3D } from "three";
+import {
+  Box3,
+  BoxGeometry,
+  BufferGeometry,
+  Group,
+  Mesh,
+  MeshStandardMaterial,
+  Object3D,
+  PerspectiveCamera,
+  Vector3,
+} from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { describe, expect, it } from "vitest";
-import { configureVulperaMaterials } from "./GenuineModelScene";
+import {
+  arrangeCombatants,
+  configureVulperaMaterials,
+  frameModels,
+  isReplayClipMissing,
+  resolveReplayAnimation,
+} from "./GenuineModelScene";
+import type { ReplayEvent } from "./replay";
 
 describe("configureVulperaMaterials", () => {
   it("uses the exported alpha channel only for the Vulpera eye reflection", () => {
@@ -18,8 +36,85 @@ describe("configureVulperaMaterials", () => {
   });
 });
 
-import type { ReplayEvent } from "./replay";
-import { isReplayClipMissing, resolveReplayAnimation } from "./GenuineModelScene";
+function createModel(width: number, height: number, depth: number) {
+  const model = new Group();
+  model.add(new Mesh(new BoxGeometry(width, height, depth), new MeshStandardMaterial()));
+  return model;
+}
+
+function expectVectorsClose(actual: Vector3, expected: Vector3) {
+  expect(actual.x).toBeCloseTo(expected.x);
+  expect(actual.y).toBeCloseTo(expected.y);
+  expect(actual.z).toBeCloseTo(expected.z);
+}
+
+function expectBoundsInView(camera: PerspectiveCamera, bounds: Box3) {
+  camera.updateMatrixWorld(true);
+  for (const x of [bounds.min.x, bounds.max.x]) {
+    for (const y of [bounds.min.y, bounds.max.y]) {
+      for (const z of [bounds.min.z, bounds.max.z]) {
+        const projected = new Vector3(x, y, z).project(camera);
+        expect(Math.abs(projected.x)).toBeLessThan(1);
+        expect(Math.abs(projected.y)).toBeLessThan(1);
+        expect(projected.z).toBeGreaterThanOrEqual(-1);
+        expect(projected.z).toBeLessThanOrEqual(1);
+      }
+    }
+  }
+}
+
+describe("ranged scene layout", () => {
+  it("places the actual combatant roots 8 scene units apart with their original facing and scale", () => {
+    const vulpera = createModel(2, 4, 2);
+    const trainingDummy = createModel(2.4, 5, 2);
+
+    arrangeCombatants(vulpera, trainingDummy);
+
+    const vulperaCenter = new Box3().setFromObject(vulpera).getCenter(new Vector3());
+    const trainingDummyCenter = new Box3().setFromObject(trainingDummy).getCenter(new Vector3());
+    expect(vulperaCenter.x).toBeCloseTo(-4);
+    expect(trainingDummyCenter.x).toBeCloseTo(4);
+    expect(trainingDummyCenter.x - vulperaCenter.x).toBeCloseTo(8);
+    expect(vulpera.rotation.y).toBeCloseTo(0);
+    expect(trainingDummy.rotation.y).toBeCloseTo(Math.PI);
+    expect(vulpera.scale.toArray()).toEqual([1, 1, 1]);
+    expect(trainingDummy.scale.toArray()).toEqual([0.7, 0.7, 0.7]);
+  });
+
+  it("fits the ranged bounds at desktop and mobile aspects and restores the responsive default view", () => {
+    const vulpera = createModel(2, 4, 2);
+    const trainingDummy = createModel(2.4, 5, 2);
+    arrangeCombatants(vulpera, trainingDummy);
+    const bounds = new Box3()
+      .setFromObject(vulpera)
+      .union(new Box3().setFromObject(trainingDummy));
+    const camera = new PerspectiveCamera(36, 1440 / 620, 0.01, 100);
+    const controls = new OrbitControls(camera, document.createElement("canvas"));
+
+    const desktopView = frameModels(camera, controls, bounds);
+    expect(camera.fov).toBe(36);
+    expectVectorsClose(camera.position, desktopView.position);
+    expectVectorsClose(controls.target, desktopView.target);
+    expectBoundsInView(camera, bounds);
+
+    camera.aspect = 390 / 430;
+    const mobileView = frameModels(camera, controls, bounds);
+    expect(camera.fov).toBe(36);
+    expectBoundsInView(camera, bounds);
+    expect(camera.near).toBeGreaterThan(0);
+    expect(camera.far).toBeGreaterThan(camera.near);
+    expect(controls.minDistance).toBeGreaterThan(0);
+    expect(controls.maxDistance).toBeGreaterThan(controls.minDistance);
+
+    camera.position.set(100, 100, 100);
+    controls.target.set(30, 20, 10);
+    const resetMobileView = frameModels(camera, controls, bounds);
+    expectVectorsClose(resetMobileView.position, mobileView.position);
+    expectVectorsClose(resetMobileView.target, mobileView.target);
+    expect(resetMobileView.position.toArray()).not.toEqual(desktopView.position.toArray());
+    controls.dispose();
+  });
+});
 
 function makeAction(overrides: Partial<ReplayEvent> = {}): ReplayEvent {
   return {

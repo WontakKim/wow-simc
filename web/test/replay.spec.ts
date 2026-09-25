@@ -1,4 +1,84 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+interface ModelRegionAnalysis {
+  leftPixels: number;
+  rightPixels: number;
+  leftHeight: number;
+  rightHeight: number;
+  horizontalSeparation: number;
+}
+
+async function analyzeModelRegions(page: Page, screenshot: Buffer): Promise<ModelRegionAnalysis> {
+  return page.evaluate(async (imageUrl) => {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+    const sample = document.createElement("canvas");
+    sample.width = image.width;
+    sample.height = image.height;
+    const context = sample.getContext("2d");
+    if (!context) throw new Error("Could not inspect the WebGL screenshot.");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    const columnCounts = Array<number>(sample.width).fill(0);
+    const split = sample.width * 0.55;
+    let leftMinimumY = sample.height;
+    let leftMaximumY = -1;
+    let rightMinimumY = sample.height;
+    let rightMaximumY = -1;
+
+    for (let y = Math.floor(sample.height * 0.14); y < Math.floor(sample.height * 0.78); y += 1) {
+      for (let x = 0; x < sample.width; x += 1) {
+        const offset = (y * sample.width + x) * 4;
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const maximum = Math.max(red, green, blue);
+        const minimum = Math.min(red, green, blue);
+        const isBrightModelPixel = maximum > 85
+          && red + green + blue > 220
+          && maximum - minimum > 12;
+        const isWarmModelPixel = red > 50
+          && red > green * 1.12
+          && green > blue * 1.05;
+        if (!isBrightModelPixel && !isWarmModelPixel) continue;
+        columnCounts[x] += 1;
+        if (x < split) {
+          leftMinimumY = Math.min(leftMinimumY, y);
+          leftMaximumY = Math.max(leftMaximumY, y);
+        } else {
+          rightMinimumY = Math.min(rightMinimumY, y);
+          rightMaximumY = Math.max(rightMaximumY, y);
+        }
+      }
+    }
+
+    let leftPixels = 0;
+    let leftWeightedX = 0;
+    let rightPixels = 0;
+    let rightWeightedX = 0;
+    for (let x = 0; x < columnCounts.length; x += 1) {
+      const count = columnCounts[x];
+      if (count < 3) continue;
+      if (x < split) {
+        leftPixels += count;
+        leftWeightedX += x * count;
+      } else {
+        rightPixels += count;
+        rightWeightedX += x * count;
+      }
+    }
+
+    return {
+      leftPixels,
+      rightPixels,
+      leftHeight: Math.max(0, leftMaximumY - leftMinimumY + 1),
+      rightHeight: Math.max(0, rightMaximumY - rightMinimumY + 1),
+      horizontalSeparation: rightWeightedX / rightPixels / sample.width
+        - leftWeightedX / leftPixels / sample.width,
+    };
+  }, `data:image/png;base64,${screenshot.toString("base64")}`);
+}
+
 const partialReport = JSON.stringify({
   report_version: "2.0.0",
   version: "1210-01",
@@ -341,11 +421,21 @@ test("reframes genuine models after resizing the same page to mobile", async ({ 
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  const canvas = scene.locator("canvas");
+  const desktopModels = await analyzeModelRegions(page, await canvas.screenshot());
+  expect(desktopModels.leftPixels).toBeGreaterThan(500);
+  expect(desktopModels.rightPixels).toBeGreaterThan(500);
+  expect(desktopModels.horizontalSeparation).toBeGreaterThan(0.28);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await scene.getByRole("button", { name: "Reset camera" }).click();
-  const canvas = scene.locator("canvas");
   const screenshot = await canvas.screenshot();
+  const mobileModels = await analyzeModelRegions(page, screenshot);
+  expect(mobileModels.leftPixels).toBeGreaterThan(500);
+  expect(mobileModels.rightPixels).toBeGreaterThan(500);
+  expect(mobileModels.leftHeight).toBeGreaterThanOrEqual(36);
+  expect(mobileModels.rightHeight).toBeGreaterThanOrEqual(50);
+  expect(mobileModels.horizontalSeparation).toBeGreaterThan(0.5);
   const trainingDummyPixelsAtRightEdge = await page.evaluate(async (imageUrl) => {
     const image = new Image();
     image.src = imageUrl;

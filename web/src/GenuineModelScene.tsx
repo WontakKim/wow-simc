@@ -43,6 +43,7 @@ const MODEL_ASSETS = {
 const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
 const STAND_CLIP_NAME = "Stand (ID 0 variation 0)";
+const CAMERA_FOV = 36;
 export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
 
 const ELEMENTAL_SHAMAN_CLIPS = new Map<number, { actionName: string; clipName: string }>([
@@ -233,25 +234,44 @@ function placeModel(root: Group, x: number, rotationY: number, scale = 1) {
   });
 }
 
-function frameModels(camera: PerspectiveCamera, controls: OrbitControls, bounds: Box3): CameraView {
+export function arrangeCombatants(vulpera: Group, trainingDummy: Group) {
+  placeModel(vulpera, -4, 0);
+  placeModel(trainingDummy, 4, Math.PI, 0.7);
+}
+
+export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, bounds: Box3): CameraView {
   const center = bounds.getCenter(new Vector3());
   const size = bounds.getSize(new Vector3());
   const radius = Math.max(size.length() * 0.5, 1);
-  const verticalFov = (camera.fov * Math.PI) / 180;
-  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
-  const fitFov = Math.min(verticalFov, horizontalFov);
-  const distance = radius / Math.sin(fitFov / 2) * 1.2;
-  const direction = new Vector3(0.42, 0.28, 1).normalize();
-  const position = center.clone().add(direction.multiplyScalar(distance));
   const target = center.clone().add(new Vector3(0, size.y * 0.02, 0));
+  const direction = new Vector3(0.42, 0.28, 1).normalize();
+  const viewDirection = direction.clone().negate();
+  const viewRight = new Vector3().crossVectors(viewDirection, camera.up).normalize();
+  const viewUp = new Vector3().crossVectors(viewRight, viewDirection).normalize();
+  const verticalTangent = Math.tan((camera.fov * Math.PI) / 360);
+  const horizontalTangent = verticalTangent * camera.aspect;
+  let distance = 1;
 
+  for (const x of [bounds.min.x, bounds.max.x]) {
+    for (const y of [bounds.min.y, bounds.max.y]) {
+      for (const z of [bounds.min.z, bounds.max.z]) {
+        const relative = new Vector3(x, y, z).sub(target);
+        const depthOffset = relative.dot(direction);
+        const horizontalDistance = Math.abs(relative.dot(viewRight)) / horizontalTangent;
+        const verticalDistance = Math.abs(relative.dot(viewUp)) / verticalTangent;
+        distance = Math.max(distance, depthOffset + Math.max(horizontalDistance, verticalDistance) * 1.08);
+      }
+    }
+  }
+
+  const position = target.clone().add(direction.multiplyScalar(distance));
   camera.near = Math.max(0.01, distance / 100);
   camera.far = distance * 20;
   camera.position.copy(position);
   camera.updateProjectionMatrix();
   controls.target.copy(target);
   controls.minDistance = radius * 0.7;
-  controls.maxDistance = radius * 5;
+  controls.maxDistance = Math.max(radius * 5, distance * 1.5);
   controls.update();
 
   return { position, target };
@@ -349,7 +369,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let defaultView: CameraView | null = null;
     const loadedRoots: Object3D[] = [];
     const scene = new Scene();
-    const camera = new PerspectiveCamera(36, 1, 0.01, 100);
+    const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 100);
     const controls = new OrbitControls(camera, canvas);
     const clock = new Clock();
 
@@ -372,6 +392,11 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     keyLight.position.set(4, 7, 5);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.set(2048, 2048);
+    keyLight.shadow.camera.left = -8;
+    keyLight.shadow.camera.right = 8;
+    keyLight.shadow.camera.top = 8;
+    keyLight.shadow.camera.bottom = -8;
+    keyLight.shadow.camera.updateProjectionMatrix();
     scene.add(keyLight);
     const fillLight = new DirectionalLight(0x8ab4ff, 2.2);
     fillLight.position.set(-5, 3, 2);
@@ -468,8 +493,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       configureVulperaMaterials(vulpera.scene);
       // Facial bones extend along native +X, so these rotations face both exports toward each other.
-      placeModel(vulpera.scene, -0.95, 0);
-      placeModel(trainingDummy.scene, 0.95, Math.PI, 0.7);
+      arrangeCombatants(vulpera.scene, trainingDummy.scene);
       scene.add(vulpera.scene, trainingDummy.scene);
 
       modelBounds = new Box3()
