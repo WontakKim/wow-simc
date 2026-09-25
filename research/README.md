@@ -31,7 +31,7 @@ These are research findings, not a final architecture decision. See the [source 
 
 - Completed: public documentation research, relevant source checks, three public metadata GET requests, a pinned macOS ARM64 CLI build, and an official Frost Mage smoke simulation with JSON-v2/HTML output.
 - Reusable build and smoke helpers now provide the fixed official-sample workflow. Generated binaries, logs, and reports remain under ignored `.local/`.
-- A [local browser replay prototype](../README.md#browser-replay-prototype) now inspects sampled JSON-v2 action/state snapshots without running a backend simulation or uploading character data.
+- A [local browser replay prototype](../README.md#browser-genuine-model-proof) now inspects sampled JSON-v2 action/state snapshots without running a backend simulation or uploading character data.
 - One user-supplied character export subsequently completed a private manual baseline, with active talents and equipped-item details checked. No character identity, input, or output is versioned. Arbitrary-character support, profileset comparisons, and performance/mechanics benchmarks remain unverified.
 - No authenticated/paid Raidbots requests or hosted application implementation were performed. The manual character workflow is separate from the fixed official-profile smoke helper.
 - All documents are in English to follow the repository's coding/documentation instructions.
