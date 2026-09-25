@@ -942,3 +942,114 @@ test("reports authored and supported emitter counts for all eleven original sour
     }
   }
 });
+
+test("blends the genuine character pose at the tightest adjacent cast transition", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as {
+      sim: { players: Array<{ collected_data: {
+        action_sequence: Array<{ id?: number; time: number }>;
+        action_sequence_precombat: Array<unknown>;
+      } }> };
+    };
+    const sequence = fixture.sim.players[0].collected_data;
+    sequence.action_sequence = [sequence.action_sequence[36], sequence.action_sequence[38]];
+    sequence.action_sequence_precombat = [];
+    await route.fulfill({ response, json: fixture });
+  });
+  await page.route("**/model/native-effects/**", (route) => route.fulfill({ status: 404 }));
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status").filter({ hasText: "Both genuine models ready" })).toBeVisible();
+  const canvas = scene.locator("canvas");
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const capture = async (time: string) => {
+    await seek.fill(time);
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    return canvas.screenshot();
+  };
+  const before = await capture("32.351");
+  const boundary = await capture("32.353");
+  const middle = await capture("32.427");
+  const after = await capture("32.502");
+  const [immediateChange, fullChange] = await page.evaluate(async (images) => {
+    const decode = async (base64: string) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${base64}`;
+      await image.decode();
+      const surface = document.createElement("canvas");
+      surface.width = image.width;
+      surface.height = image.height;
+      const context = surface.getContext("2d");
+      if (!context) throw new Error("Cannot inspect character frames");
+      context.drawImage(image, 0, 0);
+      return context.getImageData(0, 0, image.width, image.height);
+    };
+    const frames = await Promise.all(images.map(decode));
+    const difference = (left: ImageData, right: ImageData) => {
+      let total = 0;
+      for (let y = Math.floor(left.height * 0.15); y < Math.floor(left.height * 0.8); y += 1) {
+        for (let x = 0; x < Math.floor(left.width * 0.55); x += 1) {
+          const offset = (y * left.width + x) * 4;
+          for (let channel = 0; channel < 3; channel += 1) {
+            total += Math.abs(left.data[offset + channel] - right.data[offset + channel]);
+          }
+        }
+      }
+      return total;
+    };
+    return [difference(frames[0], frames[1]), difference(frames[0], frames[3])];
+  }, [before, boundary, middle, after].map((frame) => frame.toString("base64")));
+  expect(fullChange).toBeGreaterThan(0);
+  expect(immediateChange).toBeLessThan(fullChange * 0.45);
+  expect(middle.equals(before)).toBe(false);
+  await capture("31.8");
+  expect((await capture("32.427")).equals(middle)).toBe(true);
+});
+
+test("repeated genuine casts blend two local clip times across backward seeks", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as {
+      sim: { players: Array<{ collected_data: {
+        action_sequence: Array<{ id?: number }>;
+        action_sequence_precombat: Array<unknown>;
+      } }> };
+    };
+    const sequence = fixture.sim.players[0].collected_data;
+    sequence.action_sequence = [sequence.action_sequence[37], sequence.action_sequence[38]];
+    sequence.action_sequence_precombat = [];
+    await route.fulfill({ response, json: fixture });
+  });
+  await page.route("**/model/native-effects/**", (route) => route.fulfill({ status: 404 }));
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status").filter({ hasText: "Both genuine models ready" })).toBeVisible();
+  const canvas = scene.locator("canvas");
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const capture = async (time: string) => {
+    await seek.fill(time);
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    return canvas.screenshot();
+  };
+  const outgoing = await capture("32.351");
+  const boundary = await capture("32.353");
+  const middle = await capture("32.427");
+  const incoming = await capture("32.502");
+  expect(outgoing.equals(boundary)).toBe(false);
+  expect(outgoing.equals(middle)).toBe(false);
+  expect(middle.equals(incoming)).toBe(false);
+  await capture("33.2");
+  expect((await capture("32.427")).equals(middle)).toBe(true);
+  await capture("32.36");
+  expect((await capture("32.427")).equals(middle)).toBe(true);
+
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  await scene.getByRole("combobox", { name: "Exported character animation" })
+    .selectOption({ label: "ShaSpellCastBothFront (ID 830 variation 0)" });
+  const manualAfterBlend = await canvas.screenshot();
+  await scene.getByRole("button", { name: "Replay sync" }).click();
+  await capture("32.6");
+  await scene.getByRole("button", { name: "Manual preview" }).click();
+  expect((await canvas.screenshot()).equals(manualAfterBlend)).toBe(true);
+});

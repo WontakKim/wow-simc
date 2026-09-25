@@ -49,6 +49,7 @@ const WEBGL_ERROR =
 const STAND_CLIP_NAME = "Stand (ID 0 variation 0)";
 const CAMERA_FOV = 36;
 export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
+export const REPLAY_MOTION_BLEND_SECONDS = 0.15;
 export const REPLAY_EFFECT_RELEASE_SECONDS = 0.2;
 export const REPLAY_EFFECT_TRAVEL_SECONDS = 0.8;
 export const REPLAY_EFFECT_DECAY_SECONDS = 1.5;
@@ -121,6 +122,12 @@ export interface ReplayAnimationResolution {
   status: string;
 }
 
+export interface ReplayMotionBlend {
+  incoming: ReplayAnimationResolution;
+  outgoing: ReplayAnimationResolution | null;
+  incomingWeight: number;
+}
+
 export interface SceneReplayState {
   events: ReplayEvent[];
   selectedIndex: number;
@@ -145,7 +152,7 @@ interface CameraView {
 }
 
 interface AnimationController {
-  applyReplayAnimation: (resolution: ReplayAnimationResolution) => void;
+  applyReplayAnimation: (blend: ReplayMotionBlend) => void;
   playManualClip: (index: number, shouldPlay: boolean) => void;
   setManualPlaying: (shouldPlay: boolean) => void;
   loadNativeEffect: (asset: NativeEffectAsset) => Promise<NativeParticleEffect | null>;
@@ -309,6 +316,37 @@ export function resolveReplayAnimation(
   };
 }
 
+export function resolveReplayMotionBlend(
+  events: ReplayEvent[],
+  selectedIndex: number,
+  cursor: number,
+): ReplayMotionBlend {
+  const incoming = resolveReplayAnimation(events, selectedIndex, cursor);
+  const event = events[selectedIndex];
+  if (!event || incoming.kind === "before") return { incoming, outgoing: null, incomingWeight: 1 };
+
+  const boundary = incoming.kind === "settled"
+    ? event.time + ILLUSTRATIVE_MOTION_WINDOW_SECONDS
+    : event.time;
+  const elapsed = cursor - boundary;
+  if (elapsed < 0 || elapsed >= REPLAY_MOTION_BLEND_SECONDS) {
+    return { incoming, outgoing: null, incomingWeight: 1 };
+  }
+
+  const outgoingAtBoundary = incoming.kind === "settled"
+    ? resolveReplayAnimation(events, selectedIndex, boundary - 0.000002)
+    : resolveReplayAnimation(events, selectedIndex > 0 ? selectedIndex - 1 : selectedIndex, boundary - 0.000002);
+  const outgoingEvent = incoming.kind === "settled" ? event : events[selectedIndex - 1];
+  const outgoing = outgoingAtBoundary.kind === "motion" && outgoingEvent
+    ? { ...outgoingAtBoundary, clipTime: cursor - outgoingEvent.time }
+    : outgoingAtBoundary;
+  if (outgoing.clipName === incoming.clipName
+    && outgoing.clipTime === incoming.clipTime) {
+    return { incoming, outgoing: null, incomingWeight: 1 };
+  }
+  return { incoming, outgoing, incomingWeight: elapsed / REPLAY_MOTION_BLEND_SECONDS };
+}
+
 export function isReplayClipMissing(
   resolution: ReplayAnimationResolution,
   animationNames: string[],
@@ -448,7 +486,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<AnimationController | null>(null);
   const animationModeRef = useRef<AnimationMode>("replay");
-  const replayAnimationRef = useRef(resolveReplayAnimation(
+  const replayAnimationRef = useRef(resolveReplayMotionBlend(
     replay?.events ?? [],
     replay?.selectedIndex ?? -1,
     replay?.cursor ?? 0,
@@ -478,16 +516,20 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const loadedNativeFileDataIdRef = useRef<number | null>(null);
   const replayStateRef = useRef(replay);
 
-  const replayAnimation = resolveReplayAnimation(
+  const replayMotionBlend = resolveReplayMotionBlend(
     replay?.events ?? [],
     replay?.selectedIndex ?? -1,
     replay?.cursor ?? 0,
   );
-  replayAnimationRef.current = replayAnimation;
+  const replayAnimation = replayMotionBlend.incoming;
+  replayAnimationRef.current = replayMotionBlend;
   replayStateRef.current = replay;
   nativePreviewTimeRef.current = nativePreviewTime;
   const selectedNativeAsset = NATIVE_EFFECT_ASSETS.find((asset) => asset.fileDataId === selectedNativeFileDataId) ?? NATIVE_EFFECT_ASSETS[0];
-  const hasMissingReplayClip = status === "ready" && isReplayClipMissing(replayAnimation, animationNames);
+  const missingReplayClip = status === "ready"
+    ? [replayAnimation, replayMotionBlend.outgoing].find((resolution) => resolution
+      && isReplayClipMissing(resolution, animationNames))
+    : null;
   const selectedReplayEvent = replay?.events[replay.selectedIndex];
   const selectedReplaySpell = selectedReplayEvent ? getSupportedReplaySpell(selectedReplayEvent) : null;
   const replayAssetIds = new Set((replay?.events ?? []).flatMap((event) =>
@@ -527,6 +569,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let animationFrame = 0;
     let mixer: AnimationMixer | null = null;
     let activeAction: AnimationAction | null = null;
+    let replayActions: AnimationAction[] = [];
     let nativeEffect: NativeParticleEffect | null = null;
     let nativeEffectGeneration = 0;
     let replayEffectGeneration = 0;
@@ -761,9 +804,12 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       mixer = new AnimationMixer(vulpera.scene);
       let activeClipIndex = -1;
 
+      const duplicateActions = new Map<number, AnimationAction>();
       const activateClip = (index: number, shouldRestart: boolean) => {
         const clip = clips[index];
         if (!clip || !mixer) return null;
+        for (const action of replayActions) action.stop();
+        replayActions = [];
         if (activeClipIndex !== index) {
           activeAction?.stop();
           activeAction = mixer.clipAction(clip);
@@ -773,22 +819,48 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         const action = activeAction;
         if (!action) return null;
         if (shouldRestart) action.reset().play();
+        action.setEffectiveWeight(1);
         return action;
       };
-      const applyReplayAnimation = (resolution: ReplayAnimationResolution) => {
+      const applyReplayAnimation = (blend: ReplayMotionBlend) => {
         if (!mixer) return;
-        const requestedIndex = resolution.kind === "motion"
-          ? animationClipNames.indexOf(resolution.clipName)
-          : defaultClipIndex;
-        const clipIndex = requestedIndex >= 0 ? requestedIndex : defaultClipIndex;
-        const action = activateClip(clipIndex, false);
-        if (!action) return;
-        action.paused = true;
-        const clipDuration = clips[clipIndex]?.duration ?? 0;
-        const finalClipSample = Math.max(0, clipDuration - 0.0001);
-        action.time = resolution.kind === "motion" && requestedIndex >= 0
-          ? Math.min(resolution.clipTime, finalClipSample)
-          : 0;
+        activeAction?.stop();
+        activeAction = null;
+        activeClipIndex = -1;
+        const incomingIndex = blend.incoming.kind === "motion"
+          ? animationClipNames.indexOf(blend.incoming.clipName) : defaultClipIndex;
+        const canBlend = incomingIndex >= 0 && (!blend.outgoing
+          || blend.outgoing.kind !== "motion"
+          || animationClipNames.includes(blend.outgoing.clipName));
+        const samples = canBlend && blend.outgoing
+          ? [{ resolution: blend.outgoing, weight: 1 - blend.incomingWeight, isOutgoing: true },
+            { resolution: blend.incoming, weight: blend.incomingWeight, isOutgoing: false }]
+          : [{ resolution: blend.incoming, weight: 1, isOutgoing: false }];
+        const nextActions: AnimationAction[] = [];
+        for (const { resolution, weight, isOutgoing } of samples) {
+          if (weight === 0) continue;
+          const requestedIndex = resolution.kind === "motion"
+            ? animationClipNames.indexOf(resolution.clipName) : defaultClipIndex;
+          const index = requestedIndex >= 0 ? requestedIndex : defaultClipIndex;
+          const clip = clips[index];
+          if (!clip) return;
+          const isRepeatedClip = isOutgoing && index === incomingIndex && blend.incoming.kind === "motion";
+          const action = isRepeatedClip
+            ? duplicateActions.get(index) ?? mixer.clipAction(clip.clone())
+            : mixer.clipAction(clip);
+          if (isRepeatedClip) duplicateActions.set(index, action);
+          if (!replayActions.includes(action)) action.reset().play();
+          action.paused = true;
+          action.time = resolution.kind === "motion" && requestedIndex >= 0
+            ? Math.min(resolution.clipTime, Math.max(0, clip.duration - 0.0001))
+            : 0;
+          action.setEffectiveWeight(weight);
+          nextActions.push(action);
+        }
+        for (const action of replayActions) {
+          if (!nextActions.includes(action)) action.stop();
+        }
+        replayActions = nextActions;
         mixer.update(0);
       };
       const playManualClip = (index: number, shouldPlay: boolean) => {
@@ -976,8 +1048,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
   useEffect(() => {
     if (animationMode !== "replay") return;
-    controllerRef.current?.applyReplayAnimation(replayAnimation);
-  }, [animationMode, replayAnimation.kind, replayAnimation.clipName, replayAnimation.clipTime]);
+    controllerRef.current?.applyReplayAnimation(replayMotionBlend);
+  }, [animationMode, replay?.events, replay?.selectedIndex, replay?.cursor]);
 
   const onAnimationChange = (index: number) => {
     setSelectedAnimationIndex(index);
@@ -1080,12 +1152,12 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       {animationMode === "replay" ? (
         <>
-          <div className="replay-motion-status" data-animation-kind={hasMissingReplayClip ? "missing" : replayAnimation.kind} aria-live="polite">
+          <div className="replay-motion-status" data-animation-kind={missingReplayClip ? "missing" : replayAnimation.kind} aria-live="polite">
             <span>Selected recorded action</span>
             <strong>{replayAnimation.eventLabel}</strong>
             <small>
-              {hasMissingReplayClip
-                ? `Required exported clip missing (${replayAnimation.clipName}) — idle.`
+              {missingReplayClip
+                ? `Required ${missingReplayClip === replayAnimation ? "" : "outgoing "}exported clip missing (${missingReplayClip.clipName}) — ${missingReplayClip === replayAnimation ? "idle" : "transition omitted"}.`
                 : replayAnimation.status}
             </small>
           </div>

@@ -1,10 +1,13 @@
 import {
+  AnimationClip,
+  AnimationMixer,
   Box3,
   BoxGeometry,
   BufferGeometry,
   Group,
   Mesh,
   MeshStandardMaterial,
+  NumberKeyframeTrack,
   Object3D,
   PerspectiveCamera,
   Vector3,
@@ -20,6 +23,7 @@ import {
   isReplayClipMissing,
   resolveReplayAnimation,
   resolveReplayEffectOccurrences,
+  resolveReplayMotionBlend,
 } from "./GenuineModelScene";
 import type { ReplayEvent } from "./replay";
 
@@ -308,5 +312,77 @@ describe("resolveReplayAnimation", () => {
 
     expect(isReplayClipMissing(resolution, ["Stand (ID 0 variation 0)"])).toBe(true);
     expect(isReplayClipMissing(resolution, [resolution.clipName])).toBe(false);
+  });
+});
+
+describe("replay motion transitions", () => {
+  it("blends cast to cast at the shortest fixture gap without stealing most of either motion", () => {
+    const first = makeAction({ time: 31.598, id: 443454, name: "ancestral_swiftness" });
+    const second = makeAction({ key: "combat-1", phaseIndex: 1, time: 32.352, id: 188196, name: "lightning_bolt" });
+    const events = [first, second];
+    const boundary = resolveReplayMotionBlend(events, 1, 32.352);
+    const middle = resolveReplayMotionBlend(events, 1, 32.427);
+    const completed = resolveReplayMotionBlend(events, 1, 32.502);
+
+    expect(boundary.incoming.kind).toBe("motion");
+    expect(boundary.incomingWeight).toBe(0);
+    expect(middle.incomingWeight).toBeCloseTo(0.5);
+    expect(middle.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.829, 3) });
+    expect(middle.incoming.clipTime).toBeCloseTo(0.075);
+    expect(completed.outgoing).toBeNull();
+    expect(completed.incomingWeight).toBe(1);
+    expect(resolveReplayMotionBlend(events, 1, 32.427)).toEqual(middle);
+    const repeated = [makeAction({ time: 31.598 }), makeAction({ key: "combat-1", time: 32.352 })];
+    const repeatedBlend = resolveReplayMotionBlend(repeated, 1, 32.427);
+    expect(repeatedBlend.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.829, 3) });
+    expect(repeatedBlend.incoming).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.075, 3) });
+    expect(repeatedBlend.outgoing?.clipName).toBe(repeatedBlend.incoming.clipName);
+    resolveReplayMotionBlend(events, 1, 34);
+    expect(resolveReplayMotionBlend(events, 1, 32.427)).toEqual(middle);
+  });
+
+  it("blends stand into a cast and casts into settled stand, but keeps idle resolution semantics", () => {
+    const event = makeAction();
+    const start = resolveReplayMotionBlend([event], 0, 4.075);
+    expect(start.incoming.kind).toBe("motion");
+    expect(start.outgoing).toMatchObject({ kind: "before", clipName: "Stand (ID 0 variation 0)" });
+    expect(start.incomingWeight).toBeCloseTo(0.5);
+    const settle = resolveReplayMotionBlend([event], 0, 5.275);
+    expect(settle.incoming.kind).toBe("settled");
+    expect(settle.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(1.275, 3) });
+    expect(settle.incomingWeight).toBeCloseTo(0.5);
+    expect(resolveReplayMotionBlend([event], 0, 5.35).incoming.kind).toBe("settled");
+    expect(resolveReplayMotionBlend([event], 0, 3.99).incoming.kind).toBe("before");
+    for (const changed of [
+      makeAction({ kind: "wait", name: "Wait", id: null, queueFailed: null }),
+      makeAction({ queueFailed: true }),
+      makeAction({ id: 1236616, name: "potion" }),
+    ]) {
+      expect(resolveReplayMotionBlend([changed], 0, 4.5).incoming.clipName).toBe("Stand (ID 0 variation 0)");
+    }
+  });
+
+  it("samples two instances of a repeated clip at different local times with zero mixer delta", () => {
+    const clip = new AnimationClip("cast", 1, [new NumberKeyframeTrack(".position[x]", [0, 1], [0, 10])]);
+    const model = new Object3D();
+    const mixer = new AnimationMixer(model);
+    const outgoing = mixer.clipAction(clip).play();
+    const incoming = mixer.clipAction(clip.clone()).play();
+    const sample = (cursor: number) => {
+      const weight = Math.max(0, Math.min(1, (cursor - 0.754) / 0.15));
+      outgoing.paused = incoming.paused = true;
+      outgoing.time = cursor;
+      incoming.time = cursor - 0.754;
+      outgoing.setEffectiveWeight(1 - weight);
+      incoming.setEffectiveWeight(weight);
+      mixer.update(0);
+      return model.position.x;
+    };
+    const halfway = sample(0.829);
+    expect(halfway).toBeCloseTo((8.29 + 0.75) / 2);
+    sample(0.1);
+    expect(sample(0.829)).toBeCloseTo(halfway);
+    sample(1.1);
+    expect(sample(0.829)).toBeCloseTo(halfway);
   });
 });
