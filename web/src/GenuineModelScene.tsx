@@ -53,6 +53,19 @@ interface AnimationController {
   resetCamera: () => void;
 }
 
+export function configureVulperaMaterials(root: Object3D) {
+  root.traverse((object) => {
+    if (!(object instanceof Mesh)) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if (material.name !== "vulperamale_eyereflect") continue;
+      material.transparent = true;
+      material.depthWrite = false;
+      material.needsUpdate = true;
+    }
+  });
+}
+
 function disposeObject(root: Object3D) {
   const textures = new Set<Texture>();
   root.traverse((object) => {
@@ -273,6 +286,7 @@ export function GenuineModelScene() {
       }
       if (isStopped) return;
 
+      configureVulperaMaterials(vulpera.scene);
       placeModel(vulpera.scene, -0.95);
       placeModel(trainingDummy.scene, 0.95, 0.7);
       scene.add(vulpera.scene, trainingDummy.scene);

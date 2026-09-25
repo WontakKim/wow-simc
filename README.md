@@ -57,7 +57,7 @@ Nonfatal engine diagnostics are printed, not suppressed. Exact DPS, iteration co
 
 The React application under [`web/`](web/) renders two genuine WoW exports together in one primary WebGL scene:
 
-- A default, unequipped Vulpera Type 1 character.
+- An unequipped Vulpera Type 1 character using the verified normal Compact/Both/Slit customization.
 - Training Dummy creature `109595`.
 
 The browser loads both GLBs only from ignored local files. It does not fetch runtime assets from Battle.net, upload character data, include telemetry, or provide a fallback mesh. If either genuine model is absent, the scene stops with setup guidance rather than substituting a primitive or billboard.
@@ -102,7 +102,7 @@ In wow.export:
 1. Choose **Battle.net CDN**, region **Korea**, and Retail Live build **`12.1.0.69933`**. A local WoW installation is not required.
 2. Set the export directory to this repository's `.local/wow-export/exports` directory.
 3. Select GLB for character and creature exports and enable model animation export.
-4. Under Characters, select Vulpera race `35`, Type 1 / ChrModel `69`, leave equipment empty, and export. The verified source is model FileDataID `1890761` (`character/vulpera/male/vulperamale.m2`) with skin FileDataID `1893903`.
+4. Under Characters, select Vulpera race `35`, Type 1 / ChrModel `69`, and leave equipment empty. Set Ears (option `336`) to Compact (choice `3323`), Eyesight (option `852`) to Both (choice `9541`), and Eye Style (option `854`) to Slit (choice `9581`), then export. The verified source is model FileDataID `1890761` (`character/vulpera/male/vulperamale.m2`) with skin FileDataID `1893903`.
 5. Under Creatures, select `Training Dummy [109595]`, display `3019` / `woodendummy`, and export. The verified source is model FileDataID `125259` (`creature/object/woodendummy.m2`) with skin FileDataID `478820`.
 6. Copy the exports to the ignored browser asset directory:
 
@@ -114,14 +114,18 @@ cp .local/wow-export/exports/creatures/TrainingDummy.glb \
   web/public/model/training-dummy.glb
 ```
 
+The earlier export selected Wanderer for Ears and lacked recognizable ears in both wow.export's preview and the resulting GLB. That is an observation about this exporter/build result, not a claim that the in-game Wanderer option inherently lacks ears.
+
 The verified files have these checksums:
 
 ```text
-a0056e501c5cbb1d00ad1b341e77d15e842234d122e2fbe70a48bd6da3dac835  web/public/model/vulpera.glb
+63c7670151f27fc184505e0f144a95ee05f7eb958bdf323c2b7b97e38d063fee  web/public/model/vulpera.glb
 0e6979643cec7705fc77dcac570ac9a7e5d7a17be15c4e03eb141c73ca58f484  web/public/model/training-dummy.glb
 ```
 
-The Vulpera GLB contains 13 meshes, five embedded PNG textures, one skin, and 336 clips. The dummy GLB contains one mesh, one embedded PNG texture, one skin, and four clips. Both have embedded buffers and images, so those two local GLBs are the only model files the browser requires.
+The verified Vulpera GLB is 61,054,876 bytes and contains 14 meshes, five embedded PNG textures, one skin, and 336 clips. The unchanged dummy GLB contains one mesh, one embedded PNG texture, one skin, and four clips. Both have embedded buffers and images, so those two local GLBs are the only model files the browser requires.
+
+The export marks `vulperamale_eyereflect` as opaque even though its texture is almost entirely transparent. The browser corrects only that reflection material to use its alpha channel without writing depth, revealing the genuine eye mesh beneath it; it does not modify other materials or fabricate eye geometry.
 
 wow.export's license covers the exporter, not Blizzard's game assets. The exported models remain subject to Blizzard's rights and terms; do not commit or redistribute them. `.gitignore` excludes both `.local/` and `web/public/model/`.
 
