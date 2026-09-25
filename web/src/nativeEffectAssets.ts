@@ -4,11 +4,11 @@ export interface NativeTextureAsset {
 }
 
 export interface NativeEffectAsset {
-  fileDataId: 794788 | 613807;
+  fileDataId: number;
   label: string;
   filename: string;
   sha256: string;
-  expectedEmitterCount: 6;
+  expectedEmitterCount: number;
   effectNameScale: 1 | 2;
   textures: NativeTextureAsset[];
 }
@@ -43,6 +43,194 @@ export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
       { fileDataId: 167034, sha256: "ce09ebf4b23d22a7b53db389526e352020820c2da4352a51b79ccee87966e7f8" },
     ],
   },
+  {
+    fileDataId: 4006618,
+    label: "Original M2 component 4006618",
+    filename: "FileDataID 4006618.m2",
+    sha256: "b02fc2e56920aee69a50259b4bf4af663ccab9fb1ff8806282ea383528f35446",
+    expectedEmitterCount: 3,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 3982249, sha256: "bfd1c7d1ae174e7ea68dd92e5abc5e6dbe809a769eaa795b9c6e12931b1b0612" },
+      { fileDataId: 4007016, sha256: "82efeb05e3af3070fd286d13d9c8f71750001ebf86437b73855e0109bec4107d" },
+      { fileDataId: 4007017, sha256: "513c21e811382f42d1a94256e9f66c1be4750e3dcc68d3ead4df86e0ec847ea5" },
+      { fileDataId: 3722811, sha256: "78dbc9cf5a2d45fae08fac4d36761ebe46f2e82ab120eb0bd7c60a6100f350ab" },
+      { fileDataId: 3308414, sha256: "0dcf13f6ef6db319bcebbea444baf1f7a3a5774f106599477761b197e0585827" },
+      { fileDataId: 4007018, sha256: "90b032731ca6124b4477710d388ea1b60b629f38b7c582d3e364ff26af9faedb" },
+    ],
+  },
+  {
+    fileDataId: 3980244,
+    label: "Original M2 component 3980244",
+    filename: "FileDataID 3980244.m2",
+    sha256: "788db595194c59e392da1c4651e9180d534a16f16df2e83d7eb0aa137414e712",
+    expectedEmitterCount: 6,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1560384, sha256: "3f77edefe85f7eeaed72a8254e50b08ce397fe738c0472fcf4273a3317ae0c2f" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 2114691, sha256: "d65d4521de924175fd132b9fc65a1d185cc2bc79c59789a5c5167b8559ff40cb" },
+      { fileDataId: 3722816, sha256: "8fc637eedb59427afb085eb82172315aaf986e90040e3344b049751455990722" },
+      { fileDataId: 3308414, sha256: "0dcf13f6ef6db319bcebbea444baf1f7a3a5774f106599477761b197e0585827" },
+      { fileDataId: 1983721, sha256: "7505fcbad4349fad0d60cb87f79a8dd332464cfb2aa1aaf70551a7ee07ce4b00" },
+      { fileDataId: 3982251, sha256: "3eca1afecd5d47b92d2d86688b4d70ea123940b4175c082a8460cfc7b66a03b2" },
+      { fileDataId: 1729857, sha256: "b7390ffd7ffceabd6cd8cd43577b825e78eedbc03cd67e129df80ceccca99111" },
+      { fileDataId: 2395678, sha256: "13e0952eaeb5076d6286127b3b4c6a6b30cac1ba872f0107df0701fd6e0bcd3a" },
+    ],
+  },
+  {
+    fileDataId: 1598036,
+    label: "Original M2 component 1598036",
+    filename: "FileDataID 1598036.m2",
+    sha256: "46bb520dc3e5c9ee5583e1ee01e379f9311752db5adcbb97c003791e8c618abf",
+    expectedEmitterCount: 4,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1284799, sha256: "e4d668282090043bb78419c2aa2fa5d1b6d40f6385d77bcb01b7b527d767196d" },
+      { fileDataId: 1284800, sha256: "b4836bebc9cfc912a003feabd297cd2e78bf6d21c58a2354aa8d2ffe3a0e24d8" },
+      { fileDataId: 1284801, sha256: "dba298bf290e74cb3030d0f3ee8042b9e593e58e60dc37be54568aae69d07c4f" },
+      { fileDataId: 1284802, sha256: "d8d371bf14ad03aedaa2b1435e20ecd560eb31e40d5984200aea740918b2eb30" },
+    ],
+  },
+  {
+    fileDataId: 1355634,
+    label: "Original M2 component 1355634",
+    filename: "FileDataID 1355634.m2",
+    sha256: "8f11ff91782b6aea867610755e6c75efaaf8dcff63077cdb303b48b6b353ee46",
+    expectedEmitterCount: 2,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1356879, sha256: "aae498aa0bb85c6c22b2bbc3f93cadca6ffb8917851999519792bdba6d38964c" },
+      { fileDataId: 167007, sha256: "65e6d342e45b0a55f0c52cc4731f8ceaf28312c84adc5d5d858c1d7648b1ac8e" },
+    ],
+  },
+  {
+    fileDataId: 1284864,
+    label: "Original M2 component 1284864",
+    filename: "FileDataID 1284864.m2",
+    sha256: "f1e1234ea9d5febb718d57d0b383217250d0c44c84dc7cc10130f2eb2c38063b",
+    expectedEmitterCount: 11,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1284801, sha256: "dba298bf290e74cb3030d0f3ee8042b9e593e58e60dc37be54568aae69d07c4f" },
+      { fileDataId: 1284802, sha256: "d8d371bf14ad03aedaa2b1435e20ecd560eb31e40d5984200aea740918b2eb30" },
+      { fileDataId: 1284799, sha256: "e4d668282090043bb78419c2aa2fa5d1b6d40f6385d77bcb01b7b527d767196d" },
+      { fileDataId: 1284800, sha256: "b4836bebc9cfc912a003feabd297cd2e78bf6d21c58a2354aa8d2ffe3a0e24d8" },
+    ],
+  },
+  {
+    fileDataId: 1109885,
+    label: "Original M2 component 1109885",
+    filename: "FileDataID 1109885.m2",
+    sha256: "3a0144b50861ef2ac327a5bc1f0c6f9824532eab5481846ad25f7f35f629be7a",
+    expectedEmitterCount: 6,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 982941, sha256: "495ca1dce4020a6ac1cc5e82af145baa2142fd57f78e4fcff7a0d1302f953a01" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 986837, sha256: "6ff75f3725c508f364a8baa75d12dbd224d7b3d410c140608bc096b94abe40e0" },
+      { fileDataId: 937025, sha256: "45bc37e4df4f017373a96871fc3a1c7606bce9a215c4d3cd7fc3cbbeb1164996" },
+      { fileDataId: 241063, sha256: "60e4f2e61dcf13df67b3430270841b90a6a0748da30d5239c3f201cc99ef3876" },
+      { fileDataId: 937026, sha256: "b9f38055a046d985e6c76dbbbbf30befa22d64c1ed995e721895e22e6abdae3a" },
+      { fileDataId: 986838, sha256: "7dc2d4c852e04968106282e8cc28897fdc2f52d499c77758e57c05aa64e49f81" },
+      { fileDataId: 930327, sha256: "0900fea7b2f23232644da79709543e127f383653b586af723939e5f19618aad0" },
+      { fileDataId: 167034, sha256: "ce09ebf4b23d22a7b53db389526e352020820c2da4352a51b79ccee87966e7f8" },
+      { fileDataId: 606564, sha256: "e76e88214153cc3e8afd069f5b32ccabfd489498505b04c2fb6a8848022451f2" },
+    ],
+  },
+  {
+    fileDataId: 4006621,
+    label: "Original M2 component 4006621",
+    filename: "FileDataID 4006621.m2",
+    sha256: "5778b48a64e1b4f21b1415676ad0e986a9a5fdf98646000012924a9eeee38a52",
+    expectedEmitterCount: 9,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 4007019, sha256: "ce7c826db700fceb0971506837e517bac379a96ba93ed4ea18f074b73c5d22ac" },
+      { fileDataId: 4007020, sha256: "5fd5009e942acb069693f19fb42c15493cc062de436c3f91a6530e8b87737254" },
+      { fileDataId: 4007017, sha256: "513c21e811382f42d1a94256e9f66c1be4750e3dcc68d3ead4df86e0ec847ea5" },
+      { fileDataId: 3982249, sha256: "bfd1c7d1ae174e7ea68dd92e5abc5e6dbe809a769eaa795b9c6e12931b1b0612" },
+      { fileDataId: 4007016, sha256: "82efeb05e3af3070fd286d13d9c8f71750001ebf86437b73855e0109bec4107d" },
+      { fileDataId: 983668, sha256: "f86ca357e085a8f503b6b713e1c973db9243a00e47502ba9732c7a490e71f6d0" },
+      { fileDataId: 1715203, sha256: "452fea117135cee43ae174fef19ae07a096ab21a252068d9b0c0b479b3fd8b0f" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 4007018, sha256: "90b032731ca6124b4477710d388ea1b60b629f38b7c582d3e364ff26af9faedb" },
+      { fileDataId: 3722811, sha256: "78dbc9cf5a2d45fae08fac4d36761ebe46f2e82ab120eb0bd7c60a6100f350ab" },
+      { fileDataId: 3308414, sha256: "0dcf13f6ef6db319bcebbea444baf1f7a3a5774f106599477761b197e0585827" },
+      { fileDataId: 3722811, sha256: "78dbc9cf5a2d45fae08fac4d36761ebe46f2e82ab120eb0bd7c60a6100f350ab" },
+      { fileDataId: 3389520, sha256: "7c929ad6021334bf86dae12f7709cbee3e4d6e2a4e744e8fa2f01d30b80464e1" },
+    ],
+  },
+  {
+    fileDataId: 6211618,
+    label: "Original M2 component 6211618",
+    filename: "FileDataID 6211618.m2",
+    sha256: "cb33c7ca545e968eed9eb4a3bcfd8234f305fa4ca254bf8b5dc094b9c6791a6f",
+    expectedEmitterCount: 4,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1983725, sha256: "721a022dc0a467eb34f4973596a71af466a9c1a99e5b5dc2fbc06f082de7a6c2" },
+      { fileDataId: 2924162, sha256: "7d0563517d354094adec999325675bd08d07546d51f11862adbae0db5c9e5ad8" },
+      { fileDataId: 2138647, sha256: "04222d4103e9429686a92b91eb16ac104c2162fed7bf65e8e27354d2eaeb1a5c" },
+      { fileDataId: 2913785, sha256: "d0377396c399b85abf9e19aed7f202d0082ca0f0067d56595b80f9f99b4f19b4" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 2318850, sha256: "1c93dd79dd6b9506738df1e2423f405b823802ee6f9f4856c6ac9c310ccb80d7" },
+      { fileDataId: 1718228, sha256: "3b09c939030a02f92b52510e65ea17102cfb9ed7ad5be2d80b0f9c06cf60dc20" },
+    ],
+  },
+  {
+    fileDataId: 1571475,
+    label: "Original M2 component 1571475",
+    filename: "FileDataID 1571475.m2",
+    sha256: "726b07fe1e0836af9213de90a44bbc25efdd6461623e8b638d451377273e3a1d",
+    expectedEmitterCount: 2,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1281038, sha256: "ec69b794a6071a03ae58fa328351ea19156fb9ea8106f47246e5dd5aa953d756" },
+      { fileDataId: 1571604, sha256: "8b77b47325a6d54cdb09bebe4ab4fe3fd35a5afa2e48b02055966c91d81c175f" },
+    ],
+  },
+  {
+    fileDataId: 4392095,
+    label: "Original M2 component 4392095",
+    filename: "FileDataID 4392095.m2",
+    sha256: "33343c30f5d8b42c4bb969c095f45a56136c6c41a8ed566494481d9982856d56",
+    expectedEmitterCount: 4,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 3982249, sha256: "bfd1c7d1ae174e7ea68dd92e5abc5e6dbe809a769eaa795b9c6e12931b1b0612" },
+      { fileDataId: 4007016, sha256: "82efeb05e3af3070fd286d13d9c8f71750001ebf86437b73855e0109bec4107d" },
+      { fileDataId: 4007017, sha256: "513c21e811382f42d1a94256e9f66c1be4750e3dcc68d3ead4df86e0ec847ea5" },
+      { fileDataId: 3722811, sha256: "78dbc9cf5a2d45fae08fac4d36761ebe46f2e82ab120eb0bd7c60a6100f350ab" },
+      { fileDataId: 3308414, sha256: "0dcf13f6ef6db319bcebbea444baf1f7a3a5774f106599477761b197e0585827" },
+      { fileDataId: 4007018, sha256: "90b032731ca6124b4477710d388ea1b60b629f38b7c582d3e364ff26af9faedb" },
+      { fileDataId: 4007019, sha256: "ce7c826db700fceb0971506837e517bac379a96ba93ed4ea18f074b73c5d22ac" },
+      { fileDataId: 4007020, sha256: "5fd5009e942acb069693f19fb42c15493cc062de436c3f91a6530e8b87737254" },
+    ],
+  },
+  {
+    fileDataId: 4050773,
+    label: "Original M2 component 4050773",
+    filename: "FileDataID 4050773.m2",
+    sha256: "bfbf42471672841692b590b995066cf1d4e3d38418a8ce74ad54ea052e8fa724",
+    expectedEmitterCount: 7,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 1560384, sha256: "3f77edefe85f7eeaed72a8254e50b08ce397fe738c0472fcf4273a3317ae0c2f" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 2114691, sha256: "d65d4521de924175fd132b9fc65a1d185cc2bc79c59789a5c5167b8559ff40cb" },
+      { fileDataId: 3722816, sha256: "8fc637eedb59427afb085eb82172315aaf986e90040e3344b049751455990722" },
+      { fileDataId: 3308414, sha256: "0dcf13f6ef6db319bcebbea444baf1f7a3a5774f106599477761b197e0585827" },
+      { fileDataId: 1983721, sha256: "7505fcbad4349fad0d60cb87f79a8dd332464cfb2aa1aaf70551a7ee07ce4b00" },
+      { fileDataId: 3982251, sha256: "3eca1afecd5d47b92d2d86688b4d70ea123940b4175c082a8460cfc7b66a03b2" },
+      { fileDataId: 1729857, sha256: "b7390ffd7ffceabd6cd8cd43577b825e78eedbc03cd67e129df80ceccca99111" },
+      { fileDataId: 3308408, sha256: "8192edabbc21df846f2f706735b9a9d8f77a1afb0b9ba48b19259e0043fc187e" },
+      { fileDataId: 1868695, sha256: "428f023e8bfd1f3346426eaf7bcbfd4c90411d0c43b3bdc4cec504a843bd5613" },
+      { fileDataId: 2395678, sha256: "13e0952eaeb5076d6286127b3b4c6a6b30cac1ba872f0107df0701fd6e0bcd3a" },
+    ],
+  },
 ] as const;
+
+export const NATIVE_REPLAY_EFFECT_ASSETS = NATIVE_EFFECT_ASSETS.slice(0, 2);
 
 export const NATIVE_PREVIEW_DURATION_SECONDS = 3;

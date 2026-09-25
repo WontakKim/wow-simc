@@ -29,7 +29,7 @@ import {
   type NativeParticleEffect,
   type NativeParticleRenderInstance,
 } from "./NativeParticleEffect";
-import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
+import { NATIVE_EFFECT_ASSETS, NATIVE_REPLAY_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
 
 const MODEL_ASSETS = {
   vulpera: {
@@ -401,6 +401,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const [nativeStatus, setNativeStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [nativeEmitterCount, setNativeEmitterCount] = useState(0);
   const [nativeTextureCount, setNativeTextureCount] = useState(0);
+  const [nativeLimitations, setNativeLimitations] = useState("");
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [replayEffectStatus, setReplayEffectStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [replayEffectError, setReplayEffectError] = useState<string | null>(null);
@@ -536,7 +537,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     const updateReplayEffects = () => {
       const replayState = replayStateRef.current;
       if (animationModeRef.current !== "replay"
-        || replayEffects.length !== NATIVE_EFFECT_ASSETS.length
+        || replayEffects.length !== NATIVE_REPLAY_EFFECT_ASSETS.length
         || !replayState
         || !replayAnchors) {
         clearReplayEffects();
@@ -745,7 +746,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           const generation = ++replayEffectGeneration;
           for (const { effect } of replayEffects) effect.dispose();
           replayEffects = [];
-          const results = await Promise.allSettled(NATIVE_EFFECT_ASSETS.map(async (asset) => ({
+          const results = await Promise.allSettled(NATIVE_REPLAY_EFFECT_ASSETS.map(async (asset) => ({
             asset,
             effect: await loadNativeParticleEffect(asset, NATIVE_REPLAY_INSTANCE_LIMIT),
           })));
@@ -843,10 +844,36 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     setNativeError(null);
     setNativeEmitterCount(0);
     setNativeTextureCount(0);
+    setNativeLimitations("");
     void controllerRef.current?.loadNativeEffect(selectedNativeAsset).then((effect) => {
       if (!isCurrent || requestId !== nativeLoadRequestRef.current || !effect) return;
       loadedNativeFileDataIdRef.current = selectedNativeAsset.fileDataId;
-      setNativeEmitterCount(effect.model.emitters.length);
+      setNativeEmitterCount(effect.renderedEmitterCount);
+      const blendSevenEmitters = effect.model.emitters
+        .filter((emitter) => emitter.blendingType === 7)
+        .map((emitter) => emitter.index);
+      setNativeLimitations([
+        ...effect.unsupportedEmitters,
+        ...(effect.primaryOnlyEmitters.length > 0
+          ? [`secondary original textures not combined for emitters ${effect.primaryOnlyEmitters.join(", ")}`]
+          : []),
+        ...effect.model.textureControlEntries.flatMap(([first, second], index) =>
+          first || second ? [`TXAC emitter ${index} (${first},${second}) texture controls not implemented`] : []),
+        ...effect.model.emitters.flatMap((emitter) =>
+          (emitter.flags & 0x40) !== 0 ? [`emitter ${emitter.index} parent-particle velocity inheritance not modeled`] : []),
+        ...effect.model.emitters.flatMap((emitter) => {
+          const colorFlags = [
+            (emitter.flags & 0x20000000) !== 0 ? "Modx4" : null,
+            (emitter.flags & 0x40000000) !== 0 ? "three-color" : null,
+          ].filter(Boolean);
+          return colorFlags.length > 0
+            ? [`emitter ${emitter.index}: ${colorFlags.join(" + ")} flags not reproduced (${(emitter.flags & 0x10000000) !== 0 ? "MultiTexture on" : "MultiTexture off; meaning unknown"})`]
+            : [];
+        }),
+        ...(blendSevenEmitters.length > 0
+          ? [`blend 7 uses unverified EGxBlend factors for emitters ${blendSevenEmitters.join(", ")}`]
+          : []),
+      ].join(" · "));
       setNativeTextureCount(effect.model.textureFileDataIds.length);
       setNativeStatus("ready");
     }).catch((caught) => {
@@ -1065,7 +1092,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               <strong>{selectedNativeAsset.label}</strong>
               <small>{selectedNativeAsset.filename} · FileDataID {selectedNativeAsset.fileDataId}</small>
             </div>
-            <p>Two-component renderer proof · not complete Elemental Blast</p>
+            <p>Original particle component preview · not a complete spell</p>
           </div>
           <label className="native-component-select">
             <span>Original M2 component</span>
@@ -1091,7 +1118,9 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             <p role="status" data-testid="native-effect-status" data-native-file-data-id={selectedNativeAsset.fileDataId}>
               <strong>{nativeEmitterCount} of {selectedNativeAsset.expectedEmitterCount} authored emitters ready</strong>
               <span> · {nativeTextureCount} original BLP textures · FileDataID {selectedNativeAsset.fileDataId}</span>
-              <small> · Component proof, not complete Elemental Blast.</small>
+              <small> · {selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807
+                ? "Component proof, not complete Elemental Blast."
+                : "Particle component preview, not a complete spell."}{nativeLimitations ? ` · ${nativeLimitations}` : ""}</small>
             </p>
           )}
           {nativeError && (
@@ -1146,7 +1175,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           ? "Replay sync samples illustrative exported motion and both source-linked original M2 components for successful Spell 117014 elemental_blast records. The 0.20s release and 0.80s linear flight use neutral model-bounds anchors and are viewer-only, not game cast, missile, hit, or attachment data. Particles decay after visual arrival; no impact, damage, sound, or hit reaction is inferred, and two components are not the complete four-component spell."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
-            : "Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component and its original BLP textures; it is not the complete Elemental Blast composite."}
+            : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component and its original BLP textures; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}
       </p>
     </section>
   );

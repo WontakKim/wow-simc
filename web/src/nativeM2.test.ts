@@ -6,7 +6,7 @@ const MODEL_BASE = 8;
 const PARTICLE_OFFSET = 0x300;
 const PARTICLE_STRIDE = 0x1ec;
 
-function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean; zSource?: number } = {}) {
+function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean; zSource?: number; version?: number; extension?: string } = {}) {
   const emitterCount = options.emitterCount ?? 6;
   const payload = new ArrayBuffer(0x3000);
   const view = new DataView(payload);
@@ -65,7 +65,7 @@ function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean;
   };
 
   bytes.set(new TextEncoder().encode("MD20"), 0);
-  writeUint32(4, 272);
+  writeUint32(4, options.version ?? 272);
   writeUint32(0x10, 0x90);
 
   writeArray(0x1c, 1, 0x180);
@@ -154,6 +154,7 @@ function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean;
   new DataView(textures).setUint32(4, 1002, true);
   addChunk("TXID", textures);
   if (options.includeExp2) addChunk("EXP2", new ArrayBuffer(4));
+  if (options.extension) addChunk(options.extension, new ArrayBuffer(4));
 
   const result = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
   let resultOffset = 0;
@@ -220,19 +221,18 @@ describe("parseNativeM2", () => {
     new DataView(badTrack).setUint32(MODEL_BASE + PARTICLE_OFFSET + 0x34 + 8, 0xffffff00, true);
     expect(() => parseNativeM2(badTrack, 703)).toThrow(/FileDataID 703.*emitter 0.*emissionSpeed.*bounds/i);
 
-    expect(() => parseNativeM2(buildM2Fixture({ includeExp2: true }), 704)).toThrow(/FileDataID 704.*EXP2.*unsupported/i);
+    expect(() => parseNativeM2(buildM2Fixture({ extension: "EXPT" }), 704)).toThrow(/FileDataID 704.*unsupported EXPT/i);
 
     const globalSequence = buildM2Fixture();
     new DataView(globalSequence).setInt16(MODEL_BASE + PARTICLE_OFFSET + 0x34 + 2, 0, true);
-    expect(() => parseNativeM2(globalSequence, 705)).toThrow(/FileDataID 705.*global sequence.*unsupported/i);
+    expect(() => parseNativeM2(globalSequence, 705)).toThrow(/FileDataID 705.*global sequence.*out of bounds/i);
 
     const parentedBone = buildM2Fixture();
     new DataView(parentedBone).setInt16(MODEL_BASE + 0x1c8, 0, true);
-    expect(() => parseNativeM2(parentedBone, 706)).toThrow(/FileDataID 706.*bone 0.*parented.*unsupported/i);
+    expect(() => parseNativeM2(parentedBone, 706)).toThrow(/FileDataID 706.*bone 0.*parent 0.*valid bone/i);
 
-    expect(() => parseNativeM2(buildM2Fixture({ zSource: 0.1 }), 707)).toThrow(
-      /FileDataID 707.*emitter 0.*zSource.*unsupported/i,
-    );
+    expect(parseNativeM2(buildM2Fixture({ zSource: 0.1 }), 707).emitters[0].zSource.sequences[0].values[0])
+      .toBeCloseTo(0.1);
   });
 });
 
@@ -268,5 +268,88 @@ describe("prepared original M2 assets", () => {
     expect(model.emitters.map((emitter) => emitter.flags)).toEqual(flags);
     expect(model.emitters[0].emissionRate.sequences[0].values[0]).toBe(firstRate);
     expect(model.emitters.every((emitter) => emitter.textureIndices.length === 1)).toBe(true);
+  });
+});
+
+
+describe("additional original particle structures", () => {
+  it("accepts version 274 with all 492 bytes per emitter", () => {
+    const model = parseNativeM2(buildM2Fixture({ version: 274 }), 4006618);
+    expect(model.version).toBe(274);
+    expect(model.emitters).toHaveLength(6);
+    expect(model.emitters[5].position[0]).toBeCloseTo(5.25);
+  });
+
+  it.each(["TXAC", "EXP2", "PGD1", "LDV1", "DETL"])("recognizes the %s extension chunk in real M2 data", async (extension) => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const bytes = readFileSync(resolve(process.cwd(), "public/model/native-effects/4006618.m2"));
+    const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const model = parseNativeM2(source, 4006618);
+    expect(model.emitters).toHaveLength(3);
+    expect(model.extensionChunks).toContain(extension);
+  });
+
+  it("reads bounded global sequence durations and preserves referenced tracks", () => {
+    const source = buildM2Fixture();
+    const view = new DataView(source);
+    view.setUint32(MODEL_BASE + 0x14, 1, true);
+    view.setUint32(MODEL_BASE + 0x18, 0x2f0, true);
+    view.setUint32(MODEL_BASE + 0x2f0, 2767, true);
+    view.setInt16(MODEL_BASE + PARTICLE_OFFSET + 0x34 + 2, 0, true);
+    const model = parseNativeM2(source, 4392095);
+    expect(model.globalSequenceDurationsMs).toEqual([2767]);
+    expect(model.emitters[0].emissionSpeed.globalSequence).toBe(0);
+  });
+
+  it("selects sequence zero duration for a stationary preview with multiple sequences", () => {
+    const source = buildM2Fixture();
+    const view = new DataView(source);
+    view.setUint32(MODEL_BASE + 0x1c, 2, true);
+    view.setUint32(MODEL_BASE + 0x180 + 0x40 + 4, 1400, true);
+    const model = parseNativeM2(source, 3980244);
+    expect(model.sequenceDurationMs).toBe(667);
+    expect(model.sequenceDurationsMs).toEqual([667, 1400]);
+  });
+
+  it("still rejects mesh vertices and ribbons with their FileDataID", () => {
+    for (const [offset, name] of [[0x3c, "vertices"], [0x120, "ribbon"]] as const) {
+      const source = buildM2Fixture();
+      new DataView(source).setUint32(MODEL_BASE + offset, 1, true);
+      expect(() => parseNativeM2(source, 4006618)).toThrow(new RegExp(`FileDataID 4006618.*${name}`));
+    }
+  });
+});
+
+
+describe("eleven pinned particle-only sources", () => {
+  it.each([
+    [4006618, 274, 3], [3980244, 274, 6], [1598036, 274, 4],
+    [1355634, 274, 2], [1284864, 272, 11], [1109885, 272, 6],
+    [4006621, 274, 9], [6211618, 274, 4], [1571475, 274, 2],
+    [4392095, 274, 4], [4050773, 274, 7],
+  ])("parses every emitter of FileDataID %i", async (fileDataId, version, count) => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${fileDataId}.m2`));
+    const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const model = parseNativeM2(source, fileDataId);
+    expect(model.version).toBe(version);
+    expect(model.emitters).toHaveLength(count);
+
+    const view = new DataView(source);
+    expect(String.fromCharCode(...new Uint8Array(source, 0, 4))).toBe("MD21");
+    const modelBase = 8;
+    const emitterCount = view.getUint32(modelBase + 0x128, true);
+    const emitterOffset = view.getUint32(modelBase + 0x12c, true);
+    expect(emitterCount).toBe(count);
+    for (let index = 0; index < emitterCount; index += 1) {
+      const record = modelBase + emitterOffset + index * 0x1ec;
+      expect(view.getUint32(record, true)).toBe(0xffffffff);
+      expect(view.getUint16(record + 0x14, true)).toBe(model.emitters[index].boneIndex);
+      expect(view.getUint32(record + 4, true)).toBe(model.emitters[index].flags);
+      expect(view.getUint16(record + 0x30, true)).toBe(model.emitters[index].rows);
+      expect(view.getUint16(record + 0x32, true)).toBe(model.emitters[index].columns);
+    }
   });
 });

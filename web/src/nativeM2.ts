@@ -28,7 +28,7 @@ export interface NativeParticleEmitter {
   position: Vector3Tuple;
   boneIndex: number;
   textureIndices: number[];
-  blendingType: 2 | 4;
+  blendingType: 2 | 4 | 7;
   emitterType: 1 | 2;
   priorityPlane: number;
   rows: number;
@@ -70,11 +70,16 @@ export interface NativeParticleEmitter {
   followSpeed2: number;
   followScale2: number;
   enabled: NativeTrack<number>;
+  alphaCutoff: NativeParticleTrack<number>;
 }
 
 export interface NativeM2Model {
   fileDataId: number;
-  version: 272;
+  version: 272 | 274;
+  sequenceDurationsMs: number[];
+  globalSequenceDurationsMs: number[];
+  extensionChunks: string[];
+  textureControlEntries: Array<[number, number]>;
   sequenceDurationMs: number;
   textureFileDataIds: number[];
   bones: NativeBone[];
@@ -92,7 +97,7 @@ type ParticleValueKind = "vector3" | "fixed16" | "vector2" | "uint16";
 const PARTICLE_STRIDE = 0x1ec;
 const BONE_STRIDE = 0x58;
 const SUPPORTED_PARTICLE_FLAGS =
-  0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x100 | 0x200 | 0x10000 | 0x20000 | 0x800000;
+  0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400 | 0x10000 | 0x20000 | 0x80000 | 0x100000 | 0x200000 | 0x800000 | 0x2000000 | 0x4000000 | 0x10000000 | 0x20000000 | 0x40000000;
 
 function fourCc(source: Uint8Array, offset: number) {
   return String.fromCharCode(...source.subarray(offset, offset + 4));
@@ -120,10 +125,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       throw new Error(`${label}: ${tag} chunk payload is outside source bounds.`);
     }
     if (chunks.has(tag)) throw new Error(`${label}: duplicate ${tag} chunk.`);
-    if (tag === "EXP2" || tag === "EXPT") {
-      throw new Error(`${label}: ${tag} particle extensions are unsupported by this component proof.`);
-    }
-    if (tag !== "MD21" && tag !== "SFID" && tag !== "TXID") {
+    if (tag !== "MD21" && tag !== "SFID" && tag !== "TXID"
+      && tag !== "TXAC" && tag !== "EXP2" && tag !== "PGD1" && tag !== "LDV1" && tag !== "DETL") {
       throw new Error(`${label}: unsupported ${tag} chunk.`);
     }
     chunks.set(tag, { offset: payloadOffset, size });
@@ -176,7 +179,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   checkModelBounds(0, 0x130, "MD20 header");
   if (fourCc(sourceBytes, modelBase) !== "MD20") throw new Error(`${label}: MD21 payload does not begin with MD20.`);
   const version = getUint32(4, "version");
-  if (version !== 272) throw new Error(`${label}: M2 version ${version} is unsupported; this proof requires version 272.`);
+  if (version !== 272 && version !== 274) throw new Error(`${label}: M2 version ${version} is unsupported; only 272 and 274 are supported.`);
   const globalFlags = getUint32(0x10, "global flags");
   const headerSize = (globalFlags & 0x8) !== 0 ? 0x138 : 0x130;
   checkModelBounds(0, headerSize, "MD20 header");
@@ -186,8 +189,12 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   const sequences = readArray(0x1c, "sequences");
   checkArray(sequences, 0x40, "sequences");
   if (sequences.count === 0) throw new Error(`${label}: at least one animation sequence is required.`);
-  const sequenceDurationMs = getUint32(sequences.offset + 4, "sequence 0 duration");
+  const sequenceDurationsMs = Array.from({ length: sequences.count }, (_, index) =>
+    getUint32(sequences.offset + index * 0x40 + 4, `sequence ${index} duration`));
+  const sequenceDurationMs = sequenceDurationsMs[0];
   if (sequenceDurationMs === 0) throw new Error(`${label}: animation sequence 0 has zero duration.`);
+  const globalSequenceDurationsMs = Array.from({ length: globalLoops.count }, (_, index) =>
+    getUint32(globalLoops.offset + index * 4, `global sequence ${index} duration`));
 
   const parseQuaternion = (offset: number, fieldLabel: string): QuaternionTuple => {
     const convert = (value: number) => (value < 0 ? value + 32768 : value - 32767) / 32767;
@@ -223,8 +230,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       throw new Error(`${label}: ${fieldLabel} interpolation ${interpolation} is unsupported.`);
     }
     const globalSequence = source.getInt16(trackOffset + 2, true);
-    if (globalSequence >= 0) {
-      throw new Error(`${label}: ${fieldLabel} global sequence ${globalSequence} is unsupported by this two-component proof.`);
+    if (globalSequence >= globalSequenceDurationsMs.length) {
+      throw new Error(`${label}: ${fieldLabel} global sequence ${globalSequence} is out of bounds.`);
     }
     const timestampDescriptors = readArray(offset + 4, `${fieldLabel} timestamps`);
     const valueDescriptors = readArray(offset + 12, `${fieldLabel} values`);
@@ -253,6 +260,10 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
         return parseCompressedGravity(valueOffset, `${fieldLabel} value`) as T;
       });
       parsedSequences.push({ timestamps, values });
+    }
+    if (globalSequence >= 0 && globalSequenceDurationsMs[globalSequence] === 0
+      && parsedSequences.some((sequence) => sequence.values.length > 1)) {
+      throw new Error(`${label}: ${fieldLabel} global sequence ${globalSequence} has zero duration and multiple keys.`);
     }
     return { interpolation, globalSequence, sequences: parsedSequences };
   };
@@ -293,6 +304,43 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     };
   };
 
+  const readChunkArray = (tag: string, descriptorOffset: number, stride: number, expectedCount: number) => {
+    const chunk = chunks.get(tag);
+    if (!chunk) return null;
+    if (descriptorOffset + 8 > chunk.size) throw new Error(`${label}: ${tag} array descriptor is truncated.`);
+    const count = source.getUint32(chunk.offset + descriptorOffset, true);
+    const offset = source.getUint32(chunk.offset + descriptorOffset + 4, true);
+    if (count !== expectedCount || offset > chunk.size || count * stride > chunk.size - offset) {
+      throw new Error(`${label}: ${tag} array does not match ${expectedCount} particle emitters or is outside chunk bounds.`);
+    }
+    return { chunk, count, offset };
+  };
+  const readExtendedParticleTrack = (index: number): NativeParticleTrack<number> => {
+    const array = readChunkArray("EXP2", 0, 28, particleRecords.count);
+    if (!array) return { timestamps: [], values: [] };
+    const base = array.chunk.offset + array.offset + index * 28;
+    const zSource = source.getFloat32(base, true);
+    const colorMultiplier = source.getFloat32(base + 4, true);
+    const alphaMultiplier = source.getFloat32(base + 8, true);
+    if (zSource !== 0 || colorMultiplier !== 1 || alphaMultiplier !== 1) {
+      throw new Error(`${label}: emitter ${index} EXP2 zSource/color/alpha multipliers require unsupported values ${zSource}/${colorMultiplier}/${alphaMultiplier}.`);
+    }
+    const timeCount = source.getUint32(base + 12, true);
+    const timeOffset = source.getUint32(base + 16, true);
+    const valueCount = source.getUint32(base + 20, true);
+    const valueOffset = source.getUint32(base + 24, true);
+    if (timeCount !== valueCount || timeCount > 256 || timeOffset > array.chunk.size
+      || timeCount * 2 > array.chunk.size - timeOffset || valueOffset > array.chunk.size
+      || valueCount * 2 > array.chunk.size - valueOffset) {
+      throw new Error(`${label}: emitter ${index} EXP2 alpha cutoff track is outside chunk bounds.`);
+    }
+    return {
+      timestamps: Array.from({ length: timeCount }, (_, key) => source.getUint16(array.chunk.offset + timeOffset + key * 2, true)),
+      values: Array.from({ length: valueCount }, (_, key) =>
+        Math.max(0, source.getInt16(array.chunk.offset + valueOffset + key * 2, true) / 32767)),
+    };
+  };
+
   const textureRecords = readArray(0x50, "textures");
   checkArray(textureRecords, 16, "textures");
   if (textureChunk.size % 4 !== 0) throw new Error(`${label}: TXID chunk size is not aligned.`);
@@ -320,8 +368,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   const bones = Array.from({ length: boneRecords.count }, (_, index): NativeBone => {
     const offset = boneRecords.offset + index * BONE_STRIDE;
     const parentIndex = getInt16(offset + 8, `bone ${index} parent`);
-    if (parentIndex !== -1) {
-      throw new Error(`${label}: bone ${index} requires a parented transform, which is unsupported by this two-component proof.`);
+    if (parentIndex < -1 || parentIndex >= index) {
+      throw new Error(`${label}: bone ${index} parent ${parentIndex} is not an earlier valid bone.`);
     }
     return {
       flags: getUint32(offset + 4, `bone ${index} flags`),
@@ -334,6 +382,27 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   });
 
   const particleRecords = readArray(0x128, "particle emitters");
+  const textureAlphaChunk = chunks.get("TXAC");
+  if (textureAlphaChunk && textureAlphaChunk.size !== particleRecords.count * 2) {
+    throw new Error(`${label}: TXAC particle entries do not match ${particleRecords.count} emitters.`);
+  }
+  const textureControlEntries: Array<[number, number]> = textureAlphaChunk
+    ? Array.from({ length: particleRecords.count }, (_, index) => [
+      source.getUint8(textureAlphaChunk.offset + index * 2),
+      source.getUint8(textureAlphaChunk.offset + index * 2 + 1),
+    ]) : [];
+  const particleGeosets = readChunkArray("PGD1", 0, 2, particleRecords.count);
+  if (particleGeosets) {
+    for (let index = 0; index < particleRecords.count; index += 1) {
+      const value = source.getUint16(particleGeosets.chunk.offset + particleGeosets.offset + index * 2, true);
+      if (value !== 0) throw new Error(`${label}: PGD1 emitter ${index} geoset ${value} is unsupported.`);
+    }
+  }
+  const lodChunk = chunks.get("LDV1");
+  if (lodChunk && lodChunk.size !== 16) throw new Error(`${label}: LDV1 has unsupported size ${lodChunk.size}.`);
+  const detailChunk = chunks.get("DETL");
+  if (detailChunk && detailChunk.size % 16 !== 0) throw new Error(`${label}: DETL light data has invalid size.`);
+  readChunkArray("EXP2", 0, 28, particleRecords.count);
   checkArray(particleRecords, PARTICLE_STRIDE, "particle emitters");
   if (particleRecords.count > 256) throw new Error(`${label}: particle emitter count ${particleRecords.count} is unreasonable.`);
   const emitters = Array.from({ length: particleRecords.count }, (_, index): NativeParticleEmitter => {
@@ -360,14 +429,17 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     }
     const textureId = getUint16(offset + 0x16, `${emitterLabel} texture ID`);
     const textureIndices = [textureId & 0x1f, (textureId >> 5) & 0x1f, (textureId >> 10) & 0x1f];
-    if (textureIndices[1] !== 0 || textureIndices[2] !== 0) {
-      throw new Error(`${label}: ${emitterLabel} requires unsupported multi-texture indices.`);
+    const usesMultipleTextures = (flags & 0x10000000) !== 0;
+    if (!usesMultipleTextures && (textureIndices[1] !== 0 || textureIndices[2] !== 0)) {
+      throw new Error(`${label}: ${emitterLabel} has multi-texture indices without the multi-texture flag.`);
     }
-    if (textureIndices[0] >= textureFileDataIds.length) {
-      throw new Error(`${label}: ${emitterLabel} texture index ${textureIndices[0]} is outside TXID bounds.`);
+    for (const textureIndex of usesMultipleTextures ? textureIndices : textureIndices.slice(0, 1)) {
+      if (textureIndex >= textureFileDataIds.length) {
+        throw new Error(`${label}: ${emitterLabel} texture index ${textureIndex} is outside TXID bounds.`);
+      }
     }
     const blendingType = source.getUint8(absolute(offset + 0x28, 1, `${emitterLabel} blend`));
-    if (blendingType !== 2 && blendingType !== 4) {
+    if (blendingType !== 2 && blendingType !== 4 && blendingType !== 7) {
       throw new Error(`${label}: ${emitterLabel} blend ${blendingType} is unsupported.`);
     }
     const emitterType = source.getUint8(absolute(offset + 0x29, 1, `${emitterLabel} type`));
@@ -377,8 +449,9 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     if (getUint16(offset + 0x2a, `${emitterLabel} color index`) !== 0) {
       throw new Error(`${label}: ${emitterLabel} particle color replacement is unsupported.`);
     }
-    if (source.getUint16(absolute(offset + 0x2c, 2, `${emitterLabel} multi-texture scale`), true) !== 0) {
-      throw new Error(`${label}: ${emitterLabel} multi-texture scale is unsupported.`);
+    if (!usesMultipleTextures && (flags & 0x100000) === 0
+      && source.getUint16(absolute(offset + 0x2c, 2, `${emitterLabel} multi-texture scale`), true) !== 0) {
+      throw new Error(`${label}: ${emitterLabel} multi-texture scale without multi-texture flag is unsupported.`);
     }
     const rows = getUint16(offset + 0x30, `${emitterLabel} rows`);
     const columns = getUint16(offset + 0x32, `${emitterLabel} columns`);
@@ -392,22 +465,21 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     if (!isZeroVector(tumbleMinimum) || !isZeroVector(tumbleMaximum)) {
       throw new Error(`${label}: ${emitterLabel} model-particle tumble is unsupported.`);
     }
-    for (let byteIndex = 0; byteIndex < 16; byteIndex += 1) {
-      if (source.getUint8(absolute(offset + 0x1dc + byteIndex, 1, `${emitterLabel} multi-texture scroll`)) !== 0) {
-        throw new Error(`${label}: ${emitterLabel} multi-texture scroll is unsupported.`);
+    if (!usesMultipleTextures && (flags & 0x100000) === 0) {
+      for (let byteIndex = 0; byteIndex < 16; byteIndex += 1) {
+        if (source.getUint8(absolute(offset + 0x1dc + byteIndex, 1, `${emitterLabel} multi-texture scroll`)) !== 0) {
+          throw new Error(`${label}: ${emitterLabel} multi-texture scroll without multi-texture flag is unsupported.`);
+        }
       }
     }
     const zSource = parseTrack<number>(offset + 0xf0, `${emitterLabel} zSource`, "float");
-    if (zSource.sequences.some((sequence) => sequence.values.some((value) => value !== 0))) {
-      throw new Error(`${label}: ${emitterLabel} nonzero zSource is unsupported by this two-component proof.`);
-    }
 
     return {
       index,
       flags,
       position: getVector3(offset + 8, `${emitterLabel} position`),
       boneIndex: getUint16(offset + 0x14, `${emitterLabel} bone`),
-      textureIndices: [textureIndices[0]],
+      textureIndices: usesMultipleTextures ? textureIndices : [textureIndices[0]],
       blendingType,
       emitterType,
       priorityPlane: getInt16(offset + 0x2e, `${emitterLabel} priority plane`),
@@ -450,6 +522,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       followSpeed2: getFloat32(offset + 0x1b8, `${emitterLabel} follow speed 2`),
       followScale2: getFloat32(offset + 0x1bc, `${emitterLabel} follow scale 2`),
       enabled: parseTrack(offset + 0x1c8, `${emitterLabel} enabled`, "uint8"),
+      alphaCutoff: readExtendedParticleTrack(index),
     };
   });
 
@@ -461,8 +534,12 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
 
   return {
     fileDataId,
-    version: 272,
+    version,
     sequenceDurationMs,
+    sequenceDurationsMs,
+    globalSequenceDurationsMs,
+    extensionChunks: [...chunks.keys()].filter((tag) => !["MD21", "SFID", "TXID"].includes(tag)),
+    textureControlEntries,
     textureFileDataIds,
     bones,
     emitters,

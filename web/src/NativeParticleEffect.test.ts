@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   AdditiveBlending,
+  CustomBlending,
+  OneFactor,
+  OneMinusSrcAlphaFactor,
   InstancedBufferGeometry,
   Mesh,
   NormalBlending,
@@ -39,6 +42,23 @@ describe("NativeParticleEffect source rendering", () => {
       expect(mesh.material.fragmentShader).toContain("#include <colorspace_fragment>");
     }
 
+    effect.dispose();
+  });
+
+  it("uses inverse-source-alpha additive factors for original blend 7 and skips only the refraction emitter", () => {
+    const model = parseNativeM2(loadAsset(4006621, "m2"), 4006621);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    expect(effect.renderedEmitterCount).toBe(8);
+    expect(effect.unsupportedEmitters).toEqual(["emitter 4: refraction unsupported"]);
+    expect(effect.group.children).toHaveLength(8);
+    const blendSeven = model.emitters.findIndex((emitter) => emitter.blendingType === 7);
+    const material = (effect.group.children[blendSeven] as Mesh<InstancedBufferGeometry, ShaderMaterial>).material;
+    expect(material.blending).toBe(CustomBlending);
+    expect(material.blendSrc).toBe(OneMinusSrcAlphaFactor);
+    expect(material.blendDst).toBe(OneFactor);
+    expect(material.blendSrcAlpha).toBe(OneMinusSrcAlphaFactor);
+    expect(material.blendDstAlpha).toBe(OneFactor);
     effect.dispose();
   });
 

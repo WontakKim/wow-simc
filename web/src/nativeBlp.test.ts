@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from "vitest";
 import { decodeNativeBlp } from "./nativeBlp";
+import { NATIVE_EFFECT_ASSETS } from "./nativeEffectAssets";
 
 function makeBlp(alphaDepth: number, alphaEncoding: number, block: Uint8Array) {
   const source = new Uint8Array(1172 + block.length);
@@ -101,5 +102,26 @@ describe("prepared original BLP assets", () => {
 
     expect(decoded).toMatchObject({ width, height, compression });
     expect(decoded.pixels.some((value) => value !== 0)).toBe(true);
+  });
+});
+
+
+describe("new original preview BLP assets", () => {
+  const textureIds = [...new Set(NATIVE_EFFECT_ASSETS.slice(2).flatMap((asset) =>
+    asset.textures.map((texture) => texture.fileDataId)))];
+
+  it("decodes all 44 pinned original textures as BC1 or BC3", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    expect(textureIds).toHaveLength(44);
+    const compressionCounts = { BC1: 0, BC3: 0 };
+    for (const fileDataId of textureIds) {
+      const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${fileDataId}.blp`));
+      const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      const image = decodeNativeBlp(source, fileDataId);
+      expect(image.width * image.height * 4).toBe(image.pixels.length);
+      compressionCounts[image.compression] += 1;
+    }
+    expect(compressionCounts).toEqual({ BC1: 6, BC3: 38 });
   });
 });

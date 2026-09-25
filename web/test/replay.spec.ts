@@ -762,3 +762,56 @@ test("rejects unsupported native source bytes visibly and preserves mobile frami
   await scene.getByRole("button", { name: "Manual preview" }).click();
   await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
 });
+
+
+test("loads a version 274 original component with every authored emitter", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4006618");
+  await expect(scene.locator("[data-testid='native-effect-status']"))
+    .toContainText("3 of 3 authored emitters ready", { timeout: 30_000 });
+});
+
+
+test("reports the exact unsupported refraction emitter without dropping its original component", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4006621");
+  await expect(scene.locator("[data-testid='native-effect-status']"))
+    .toContainText("8 of 9 authored emitters ready", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='native-effect-status']"))
+    .toContainText("emitter 4: refraction unsupported");
+});
+
+
+test("reports authored and supported emitter counts for all eleven original sources", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  const selector = scene.getByRole("combobox", { name: "Original M2 component" });
+  const status = scene.locator("[data-testid='native-effect-status']");
+  for (const [fileDataId, rendered, authored] of [
+    [4006618, 3, 3], [3980244, 6, 6], [1598036, 4, 4], [1355634, 2, 2],
+    [1284864, 11, 11], [1109885, 6, 6], [4006621, 8, 9], [6211618, 4, 4],
+    [1571475, 2, 2], [4392095, 4, 4], [4050773, 7, 7],
+  ]) {
+    await selector.selectOption(String(fileDataId));
+    await expect(status).toContainText(`${rendered} of ${authored} authored emitters ready`, { timeout: 30_000 });
+    await expect(status).toHaveAttribute("data-native-file-data-id", String(fileDataId));
+    if (fileDataId === 1109885) {
+      await expect(status).toContainText("emitter 3 parent-particle velocity inheritance not modeled");
+    }
+    if (fileDataId === 1598036) {
+      await expect(status).toContainText("emitter 0: Modx4 + three-color flags not reproduced (MultiTexture off; meaning unknown)");
+      await expect(status).toContainText("blend 7 uses unverified EGxBlend factors for emitters 0, 1, 2");
+    }
+    if (fileDataId === 4006621) {
+      await expect(status).toContainText("emitter 1: Modx4 + three-color flags not reproduced (MultiTexture off; meaning unknown)");
+    }
+  }
+});

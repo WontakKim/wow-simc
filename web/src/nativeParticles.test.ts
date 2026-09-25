@@ -77,6 +77,7 @@ function makeEmitter(overrides: Partial<NativeParticleEmitter> = {}): NativePart
     followScale1: 0,
     followSpeed2: 0,
     followScale2: 0,
+    alphaCutoff: particleTrack<number>([], []),
     enabled: { interpolation: 0, globalSequence: -1, sequences: [] },
     ...overrides,
   };
@@ -277,5 +278,52 @@ describe("native particle sampling", () => {
     expect(samples).toEqual(sampleNativeEmitter(varied, undefined, 667, 0.8));
     expect(new Set(samples.map((sample) => sample.uvFrame)).size).toBeGreaterThan(1);
     expect(samples.some((sample) => Math.abs(sample.position[0]) > 0.01)).toBe(true);
+  });
+});
+
+
+describe("global particle clocks", () => {
+  it("loops an authored global track independently of sequence zero", () => {
+    const track: NativeTrack<number> = {
+      interpolation: 1, globalSequence: 0,
+      sequences: [{ timestamps: [0, 1000, 2767], values: [0, 10, 0] }],
+    };
+    expect(sampleNativeTrack(track, 1500, 333, -1, [2767])).toBeCloseTo(7.1703, 3);
+    expect(sampleNativeTrack(track, 4267, 333, -1, [2767])).toBeCloseTo(7.1703, 3);
+  });
+});
+
+
+describe("original emitter extensions", () => {
+  it("steers nonzero authored zSource toward its z target", () => {
+    const emitter = makeEmitter({ position: [1, 2, 0], emissionSpeed: constantTrack(1),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]), zSource: constantTrack(2), emissionRate: constantTrack(1) });
+    const particle = sampleNativeEmitter(emitter, undefined, 667, 0)[0];
+    expect(particle.velocity[0]).toBeCloseTo(-1 / 3);
+    expect(particle.velocity[1]).toBeCloseTo(-2 / 3);
+    expect(particle.velocity[2]).toBeCloseTo(2 / 3);
+  });
+
+  it("applies an earlier parent bone transform to a child emitter", () => {
+    const parent = makeBone();
+    const child = { ...makeBone(), parentIndex: 0, translation: constantTrack<Vector3Tuple>([0, 2, 0]) };
+    const emitter = makeEmitter({ emissionSpeed: constantTrack(0),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]), emissionRate: constantTrack(1) });
+    const sample = sampleNativeEmitter(emitter, child, 667, 0, { bones: [parent, child] })[0];
+    expect(sample.position).toEqual([1, 2, 0]);
+  });
+
+  it("keeps a separate authored variation on the second axis", () => {
+    const base = makeEmitter({ scaleVariation: [0, 1], emissionRate: constantTrack(1) });
+    const shared = sampleNativeEmitter(base, undefined, 667, 0)[0].size;
+    const separate = sampleNativeEmitter({ ...base, flags: base.flags | 0x80000 }, undefined, 667, 0)[0].size;
+    expect(shared).toEqual([2, 4]);
+    expect(separate[0]).toBe(shared[0]);
+    expect(separate[1]).not.toBe(shared[1]);
+  });
+
+  it("samples the authored EXP2 lifetime alpha cutoff", () => {
+    const emitter = makeEmitter({ alphaCutoff: particleTrack([0, 32767], [0, 0.5]), emissionRate: constantTrack(1) });
+    expect(sampleNativeEmitter(emitter, undefined, 667, 1)[0].alphaCutoff).toBeCloseTo(0.25);
   });
 });

@@ -3,6 +3,7 @@ import {
   BufferAttribute,
   Camera,
   ClampToEdgeWrapping,
+  CustomBlending,
   DataTexture,
   DynamicDrawUsage,
   Group,
@@ -11,6 +12,8 @@ import {
   LinearFilter,
   Mesh,
   NormalBlending,
+  OneFactor,
+  OneMinusSrcAlphaFactor,
   RGBAFormat,
   ShaderMaterial,
   SRGBColorSpace,
@@ -42,6 +45,7 @@ interface EmitterBatch {
   rotations: InstancedBufferAttribute;
   uvRects: InstancedBufferAttribute;
   velocities: InstancedBufferAttribute;
+  alphaCutoffs: InstancedBufferAttribute;
   capacity: number;
 }
 
@@ -99,12 +103,14 @@ function createEmitterBatch(
   const rotations = new InstancedBufferAttribute(new Float32Array(capacity), 1).setUsage(DynamicDrawUsage);
   const uvRects = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4).setUsage(DynamicDrawUsage);
   const velocities = new InstancedBufferAttribute(new Float32Array(capacity * 3), 3).setUsage(DynamicDrawUsage);
+  const alphaCutoffs = new InstancedBufferAttribute(new Float32Array(capacity), 1).setUsage(DynamicDrawUsage);
   geometry.setAttribute("instanceOffset", offsets);
   geometry.setAttribute("instanceSize", sizes);
   geometry.setAttribute("instanceColor", colors);
   geometry.setAttribute("instanceRotation", rotations);
   geometry.setAttribute("instanceUvRect", uvRects);
   geometry.setAttribute("instanceVelocity", velocities);
+  geometry.setAttribute("instanceAlphaCutoff", alphaCutoffs);
   geometry.instanceCount = 0;
 
   const velocityOriented = (emitter.flags & 0x4) !== 0;
@@ -118,6 +124,8 @@ function createEmitterBatch(
       attribute float instanceRotation;
       attribute vec4 instanceUvRect;
       attribute vec3 instanceVelocity;
+      attribute float instanceAlphaCutoff;
+      varying float particleAlphaCutoff;
       varying vec2 particleUv;
       varying vec4 particleColor;
       void main() {
@@ -138,16 +146,18 @@ function createEmitterBatch(
         gl_Position = projectionMatrix * (center + vec4(rotated, 0.0, 0.0));
         particleUv = instanceUvRect.xy + uv * instanceUvRect.zw;
         particleColor = instanceColor;
+        particleAlphaCutoff = instanceAlphaCutoff;
       }
     `,
     fragmentShader: `
       uniform sampler2D map;
       varying vec2 particleUv;
       varying vec4 particleColor;
+      varying float particleAlphaCutoff;
       void main() {
         vec4 texel = texture2D(map, particleUv);
         float alpha = texel.a * particleColor.a;
-        if (alpha <= ${alphaCutoff}) discard;
+        if (alpha <= max(${alphaCutoff}, particleAlphaCutoff)) discard;
         gl_FragColor = vec4(texel.rgb * particleColor.rgb, alpha);
         #include <colorspace_fragment>
       }
@@ -155,11 +165,16 @@ function createEmitterBatch(
     transparent: true,
     depthTest: true,
     depthWrite: false,
-    blending: emitter.blendingType === 2 ? NormalBlending : AdditiveBlending,
+    blending: emitter.blendingType === 2 ? NormalBlending
+      : emitter.blendingType === 7 ? CustomBlending : AdditiveBlending,
+    blendSrc: emitter.blendingType === 7 ? OneMinusSrcAlphaFactor : undefined,
+    blendDst: emitter.blendingType === 7 ? OneFactor : undefined,
+    blendSrcAlpha: emitter.blendingType === 7 ? OneMinusSrcAlphaFactor : undefined,
+    blendDstAlpha: emitter.blendingType === 7 ? OneFactor : undefined,
     fog: false,
   });
 
-  return { emitter, geometry, material, offsets, sizes, colors, rotations, uvRects, velocities, capacity };
+  return { emitter, geometry, material, offsets, sizes, colors, rotations, uvRects, velocities, alphaCutoffs, capacity };
 }
 
 function squaredDistance(sample: NativeParticleSample, cameraPosition: Vector3) {
@@ -172,6 +187,9 @@ function squaredDistance(sample: NativeParticleSample, cameraPosition: Vector3) 
 export class NativeParticleEffect {
   readonly group = new Group();
   readonly model: NativeM2Model;
+  readonly renderedEmitterCount: number;
+  readonly unsupportedEmitters: string[];
+  readonly primaryOnlyEmitters: number[];
   private readonly textures: DataTexture[];
   private readonly batches: EmitterBatch[];
   private readonly maximumInstanceCount: number;
@@ -185,9 +203,21 @@ export class NativeParticleEffect {
       throw new Error(`FileDataID ${model.fileDataId}: native instance capacity must be a positive integer.`);
     }
     this.model = model;
+    this.unsupportedEmitters = model.emitters
+      .filter((emitter) => (emitter.flags & 0x100000) !== 0)
+      .map((emitter) => `emitter ${emitter.index}: refraction unsupported`);
+    const renderedEmitters = model.emitters.filter((emitter) => (emitter.flags & 0x100000) === 0);
+    if (renderedEmitters.length === 0) {
+      throw new Error(`FileDataID ${model.fileDataId}: no supported authored emitters; ${this.unsupportedEmitters.join(", ")}.`);
+    }
+    this.renderedEmitterCount = renderedEmitters.length;
+    this.primaryOnlyEmitters = renderedEmitters
+      .filter((emitter) => emitter.textureIndices.length > 1
+        && emitter.textureIndices.some((textureId) => textureId !== emitter.textureIndices[0]))
+      .map((emitter) => emitter.index);
     this.maximumInstanceCount = maximumInstanceCount;
     this.textures = decodedTextures.map(createTexture);
-    this.batches = model.emitters.map((emitter) => {
+    this.batches = renderedEmitters.map((emitter) => {
       const texture = this.textures[emitter.textureIndices[0]];
       if (!texture) throw new Error(`FileDataID ${model.fileDataId}: emitter ${emitter.index} texture is unavailable.`);
       return createEmitterBatch(emitter, texture, maximumInstanceCount);
@@ -220,7 +250,7 @@ export class NativeParticleEffect {
         this.model.bones[batch.emitter.boneIndex],
         this.model.sequenceDurationMs,
         instance.timeSeconds,
-        instance,
+        { ...instance, bones: this.model.bones, globalSequenceDurationsMs: this.model.globalSequenceDurationsMs },
       ));
       if ((batch.emitter.flags & 0x2) !== 0) {
         particles = [...particles].sort((first, second) =>
@@ -242,6 +272,7 @@ export class NativeParticleEffect {
         const height = 1 / batch.emitter.rows;
         batch.uvRects.setXYZW(index, column * width, 1 - (row + 1) * height, width, height);
         batch.velocities.setXYZ(index, ...velocity);
+        batch.alphaCutoffs.setX(index, particle.alphaCutoff);
       });
       batch.geometry.instanceCount = particles.length;
       totalParticleCount += particles.length;
@@ -251,6 +282,7 @@ export class NativeParticleEffect {
       batch.rotations.needsUpdate = true;
       batch.uvRects.needsUpdate = true;
       batch.velocities.needsUpdate = true;
+      batch.alphaCutoffs.needsUpdate = true;
     }
     return totalParticleCount;
   }
