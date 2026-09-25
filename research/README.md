@@ -1,7 +1,7 @@
 # WoW Retail Damage Simulation Research
 
 Research date: **2026-09-25**. Scope: World of Warcraft **Retail**, not Classic.
-Starting point: [Raidbots developer documentation](https://www.raidbots.com/developers).
+Starting point: [Raidbots developer documentation](https://www.raidbots.com/developers). For the implemented build and official-sample workflow, start with the [repository quick start](../README.md#quick-start).
 
 ## Key findings
 
@@ -24,13 +24,13 @@ These are research findings, not a final architecture decision. See the [source 
 | [data/static-game-data.md](data/static-game-data.md) | Dataset purposes, observed metadata, and caching/version rules |
 | [data/snapshots/raidbots-live-metadata.2026-09-25.json](data/snapshots/raidbots-live-metadata.2026-09-25.json) | Small, complete metadata snapshot; no character data |
 | [evaluation/implementation-options.md](evaluation/implementation-options.md) | Implementation choices, recommended first experiment, and open questions |
-| [examples/README.md](examples/README.md) | How to use the research-only encounter configuration |
+| [examples/README.md](examples/README.md) | Official-profile smoke input and reusable encounter overlay |
 | [sources/README.md](sources/README.md) | Primary sources, inspected commits, verification, and limitations |
 
 ## Status and boundaries
 
-- Completed: public documentation research, relevant current-source checks, three public metadata GET requests, and local document consistency checks.
-- Not performed: engine installation/build, actual damage simulations, authenticated requests, paid requests, or application implementation.
-- No character export, specialization, talent build, or target encounter was supplied. Consequently, there are **no measured DPS results** in this research.
-- Example commands are a runbook for a later experiment, not a claim that they were executed here.
+- Completed: public documentation research, relevant source checks, three public metadata GET requests, a pinned macOS ARM64 CLI build, and an official Frost Mage smoke simulation with JSON-v2/HTML output.
+- Reusable build and smoke helpers now provide the fixed official-sample workflow. Generated binaries, logs, and reports remain under ignored `.local/`.
+- One user-supplied character export subsequently completed a private manual baseline, with active talents and equipped-item details checked. No character identity, input, or output is versioned. Arbitrary-character support, profileset comparisons, and performance/mechanics benchmarks remain unverified.
+- No authenticated/paid Raidbots requests or hosted application implementation were performed. The manual character workflow is separate from the fixed official-profile smoke helper.
 - All documents are in English to follow the repository's coding/documentation instructions.

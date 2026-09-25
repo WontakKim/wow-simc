@@ -7,6 +7,7 @@ Access date for the research below: **2026-09-25**.
 - **Documentation:** a claim explicitly described by an official page or repository wiki.
 - **Source inspection:** a behavior checked in current public code; not a runtime test.
 - **Live observation:** an actual read-only response received during this research.
+- **Local execution:** a built CLI run and selected checks on its generated output, not a guarantee of mechanics correctness.
 - **Recommendation:** project analysis derived from the above; not an upstream promise.
 
 All external material is version-sensitive. Recheck mutable pages, game data, and the engine before implementation. Historical examples are not evidence of current Retail mechanics.
@@ -95,15 +96,23 @@ Performed:
 - Read official documentation and current public page text.
 - Check engine source for build settings, options, JSON versions, and selected result paths.
 - Fetch metadata using three documented selectors and compare their parsed content and raw checksums.
-- Preserve only the small metadata snapshot in the repository, not downloaded application bundles or engine source.
+- Preserve the small metadata snapshot as research evidence; downloaded application bundles are not versioned. Engine source is now separately pinned through the `simc/` submodule.
 - Check local document links, code-fence balance, shell-example syntax, metadata shape/checksum, encounter-option registration, and whitespace/diff consistency.
+
+Follow-up local execution:
+
+- Build the pinned engine with CMake 4.4.3 and AppleClang 21 on macOS ARM64, using Release mode with GUI/upstream tests disabled. The CLI is local, not installed globally on PATH.
+- Run the official Frost Mage profile with the single-target overlay and short smoke overrides. Inspect JSON-v2/HTML output, engine revision, Live data selection, expected actor, positive finite DPS, and diagnostics.
+- Preserve generated logs/reports under ignored `.local/`; the [tracked smoke input](../examples/smoke-test.simc) and [reusable helpers](../../README.md#quick-start) reproduce the procedure, not an identical numerical result.
+- Observe the upstream libc++ deployment-target warning and the Rune of Unleashed Fire `implementation_not_yet_verified` diagnostic. See [execution details](../simulationcraft/local-execution.md#observed-warnings-and-verification-limits).
+- Subsequently run one user-supplied character export privately with the full single-target overlay. Check original-file preservation, active talents, equipped item IDs/levels and selected modifiers, engine/data identity, output files, and reported mean uncertainty. Do not version identifying details, input, or results.
 
 Not performed:
 
-- Engine build/install or an actual CLI run; `simc` and `cmake` were not on PATH.
-- Validation of a real character, APL, talent string, DPS result, or live JSON report fixture.
+- General arbitrary-character validation, profileset execution, independent APL/talent/mechanics correctness validation, full report-schema validation, or tracked result fixtures.
+- Full upstream tests, other operating systems, and performance/throughput benchmarking.
 - Paid/authenticated Raidbots activity, API-key acquisition, or simulation submission.
 - Rate-limit probing, load testing, browser automation, or hosted application deployment.
 - Complete dataset-schema, item-level-calculation, licensing, or legal review.
 
-The report-format mismatch is resolved by documenting the inspected source and choosing explicit version-2 output in the example. Remaining runtime uncertainties are deliberately left visible rather than represented as tested behavior.
+The report-format mismatch is addressed by documenting the inspected source, choosing explicit version-2 output, and verifying selected fields in the official single-actor run. Remaining runtime and mechanics uncertainties are left visible rather than represented as tested behavior.

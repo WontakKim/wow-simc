@@ -1,91 +1,93 @@
 # Local SimulationCraft Execution
 
-Research date: 2026-09-25. This is an unexecuted runbook, not an installed runtime.
+Research and local verification date: 2026-09-25. The pinned CLI has been built, an official sample simulation has succeeded, and one private character baseline has completed on macOS ARM64. Arbitrary-character support and profileset workflows remain unverified.
 
 ## Why use the CLI
 
 SimulationCraft is the underlying combat engine. Its [repository README](https://github.com/simulationcraft/simc) recommends the command-line `simc` executable over the largely unmaintained GUI. It accepts character/configuration files and emits reports suitable for local automation.
 
-Observed upstream state:
+The repository's `simc/` submodule pins commit `1e0751c16d04df565bea9d7c4ac228f9cc4b0e46`, observed on upstream's `midnight` branch at `2026-09-25T05:51:42Z`. The main engine is GPL-3.0; bundled dependencies have additional licenses. The parent gitlink records the engine revision; a moving branch name does not provide the same reproducibility.
 
-- Default branch: `midnight`.
-- Inspected commit: `1e0751c16d04df565bea9d7c4ac228f9cc4b0e46`.
-- Commit timestamp: `2026-09-25T05:51:42Z`.
-- Main engine license: GPL-3.0; bundled dependencies have additional licenses.
+## Initialize and build
 
-Use the [official download page](https://www.simulationcraft.org/download.html) for a suitable available binary, or build from source. This research did not verify a specific downloadable release or its platform support.
-
-## Source build recipe
-
-Current [root CMake configuration](https://github.com/simulationcraft/simc/blob/1e0751c16d04df565bea9d7c4ac228f9cc4b0e46/CMakeLists.txt) establishes:
-
-- CMake declaration `3.10...3.22` (minimum 3.10 with the stated policy compatibility range, not a hard maximum of 3.22).
-- C++17.
-- `BUILD_GUI=OFF` for CLI-only use; Qt is not needed for that target.
-- Threads, and libcurl for networking on non-Windows builds, as configured in `engine/CMakeLists.txt`.
-- `SC_NO_NETWORKING=ON` can remove network/Armory support and its libcurl dependency. It is optional, not part of the baseline recipe below.
-
-On macOS, install Xcode Command Line Tools and CMake before building. The older build wiki's GUI instructions and compiler examples are not authoritative minimum-version requirements for this commit.
-
-Example commands for a **future** isolated engine checkout, run from this repository's root:
+Follow the [root quick start](../../README.md#quick-start) for a fresh clone. From an existing repository root:
 
 ```sh
-mkdir -p .local
-git clone --branch midnight --single-branch \
-  https://github.com/simulationcraft/simc.git .local/simulationcraft
-git -C .local/simulationcraft checkout 1e0751c16d04df565bea9d7c4ac228f9cc4b0e46
-cmake -S .local/simulationcraft -B .local/simulationcraft/build \
-  -DBUILD_GUI=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build .local/simulationcraft/build --target simc --parallel 4
+git submodule update --init --recursive -- simc
+./script/build-simc.sh
 ```
 
-Do not commit `.local/`, character exports, or generated reports. Add appropriate ignore rules when actually introducing this workflow. These directories and an ignore file were not created as part of the research.
-
-For a standard single-configuration CMake generator, the expected executable is `.local/simulationcraft/build/simc`. Multi-configuration generators can place it beneath a configuration directory. Verify the resulting path instead of assuming all platforms have the same layout.
-
-Pinning this commit makes a research experiment reproducible; it is **not** advice to use this commit indefinitely for future Retail patches.
-
-## Run a baseline
-
-Prerequisites:
-
-- A built/installed compatible `simc` executable.
-- A complete, current `/simc` export saved as `.local/character.simc` in UTF-8.
-- An output directory the process can write to.
-
-From the repository root:
+The helper checks required tools and the source pin, preserves logs, and runs this configuration:
 
 ```sh
-mkdir -p .local/results/baseline
-.local/simulationcraft/build/simc \
-  ptr=0 \
+cmake -S simc -B .local/simc-build \
+  -DBUILD_GUI=OFF \
+  -DBUILD_TESTING=OFF \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build .local/simc-build --target simc --parallel 4
+```
+
+Current [upstream CMake configuration](https://github.com/simulationcraft/simc/blob/1e0751c16d04df565bea9d7c4ac228f9cc4b0e46/CMakeLists.txt) declares CMake `3.10...3.22` and C++17. That declaration is a minimum/policy range, not a hard CMake maximum. The helper's `-S`/`-B` syntax requires **CMake 3.13+**; 4.4.3 is the locally tested version.
+
+A single-configuration generator is required by the helper's executable path. On macOS, Xcode Command Line Tools supply the compiler and Make. CMake checks thread support and libcurl for the networking-enabled build. `BUILD_GUI=OFF` removes the Qt requirement; `BUILD_TESTING=OFF` excludes upstream test registration. Python 3 is required only by the separate smoke validator.
+
+- Source: `simc/`.
+- Executable: `.local/simc-build/simc`.
+- Build logs: a fresh `.local/build-log.*/` directory per helper invocation.
+- Generated files and private character inputs: ignored by the existing `/.local/` rule.
+
+The helpers do not install tools, reset/update the engine, or change the submodule pin. A revision mismatch requires inspection before running the submodule update command. Rebuild after intentionally changing the pin. Keeping this commit forever is not appropriate for future Retail patches.
+
+## Run the official smoke profile
+
+```sh
+./script/smoke-test.sh
+```
+
+The [tracked input](../examples/smoke-test.simc) reuses the official `simc/profiles/MID2/MID2_Mage_Frost.simc` profile and [single-target overlay](../examples/single-target.simc), then applies a short execution check: 60 seconds, 100 requested iterations, zero duration variation, two threads, and seed `20260925`.
+
+`ptr=0` appears before actor creation. `item_db_source=local` limits item lookup to bundled data for this sample; it is not a network sandbox. The script selects `json2` for explicit JSON-v2 output and supplies per-run output paths on the command line.
+
+Each run retains `run.log`, `report.json`, and `report.html` under a fresh `.local/results/smoke-test.*/` directory. The helper checks process success, the report version, expected actor, Live data selection, engine revision, finite positive DPS, nonempty HTML, and error/fatal diagnostics. It prints other diagnostics and never treats a previous run's report as current success.
+
+The original successful run requested 100 iterations but recorded 101 in `sim.options.iterations` and 99 DPS samples. Exact counts or exact DPS are not smoke acceptance criteria. The report's `sim.options.dbc.version_used` identifies the selected environment; the top-level `ptr_enabled` flag describes compiled support, not whether this run selected PTR.
+
+## Observed warnings and verification limits
+
+- Build: macOS ARM64, AppleClang 21, CMake 4.4.3, Unix Makefiles, and SDK libcurl 8.7.1. The CLI reports engine `1210-01`, source revision `1e0751c`, and Live data `12.1.0.69933`.
+- Upstream's macOS 10.15 deployment target triggers `The selected platform is no longer supported by libc++.` warnings. Compilation succeeds; the source and warning have not been patched or suppressed.
+- The engine reports `implementation_not_yet_verified` for Rune of Unleashed Fire. Its proc targeting and damage/healing behavior include assumptions. This is visible in both `run.log` and JSON diagnostics.
+- The smoke test verifies one official sample and selected JSON-v2 fields, not full schema conformance, arbitrary characters, every mechanic, profilesets, other operating systems, or the full upstream test suite.
+
+## Manual real-character baseline
+
+One user-supplied export completed a private manual baseline using the same pinned engine and the full single-target overlay. Its actor identity, active talent string, equipped item IDs/levels and selected modifiers, Live data, and JSON/HTML outputs were checked. The original file was preserved; private input, output, and identifying details are not versioned. This verifies that input, not arbitrary exports or mechanical accuracy.
+
+The following recipe is separate from the fixed smoke helper. Supply a complete, compatible `/simc` export as `.local/character.simc` in UTF-8 first. From the repository root, use a new directory for each experiment:
+
+```sh
+mkdir -p .local/results
+result_directory=$(mktemp -d .local/results/baseline.XXXXXX)
+.local/simc-build/simc \
+  ptr=0 item_db_source=local \
   .local/character.simc \
   research/examples/single-target.simc \
-  html=.local/results/baseline/report.html \
-  json2=.local/results/baseline/report.json
+  seed=20260925 \
+  "html=$result_directory/report.html" \
+  "json2=$result_directory/report.json"
 ```
 
-`ptr=0` is placed before actor creation because it applies to subsequently defined actors. Inspect the export for conflicting settings. `json2` explicitly selects the supported version-2 report path in the inspected source; see [input and results](input-and-results.md) before choosing a different format.
+Inspect the export for conflicting settings. See [input and results](input-and-results.md) for parse order and output-version selection. A separate sustained-AoE experiment can override `desired_targets=5` after the overlay, but that is not a Mythic+ route model. Error-targeted runs must inspect achieved uncertainty rather than assuming a requested threshold was reached.
 
-To run a separate sustained five-target experiment, use a different result directory and pass `desired_targets=5` after the encounter file. This is an AoE scenario, not a Mythic+ route model.
+## Deferred general-runner requirements
 
-For a higher-precision comparison, explicitly choose a different stopping policy, for example `iterations=100000 target_error=0.1`, then inspect achieved error and iteration counts. A requested threshold is not a guarantee of reaching it before a cap or external time limit.
+A later arbitrary-character runner needs more than the fixed smoke helper:
 
-## Execution contract for a future wrapper
+1. Validate input/version compatibility and retain the original and effective input.
+2. Use process argument arrays rather than shell interpolation of user text.
+3. Isolate unrestricted SimC scripts, which can exercise file/network features.
+4. Bound wall-clock time, CPU, memory, and outer concurrency; terminate work on cancellation.
+5. Capture diagnostics and preserve process failures without accepting stale reports.
+6. Parse required actor/metric fields by supported schema version and retain provenance.
 
-This is a proposed minimum, not implemented code:
-
-1. Validate executable availability, input readability, output writability, and requested version/environment before execution.
-2. Invoke the process with an argument array, not a shell command assembled from user text.
-3. Treat arbitrary SimC scripts as executable configuration with file/network capabilities. Prefer a constrained character-export workflow; isolate unrestricted scripts and limit their resources.
-4. Set a wall-clock deadline and CPU/memory/concurrency limits. Do not default every job to all host threads.
-5. Capture stdout, stderr, exit status, engine identity, and effective input.
-6. On failure, expose useful diagnostics. Do not return a successful result from a stale report left by an earlier run.
-7. On success, require a parseable report with the expected actor and finite DPS, and inspect reported warnings/errors.
-8. Keep each run's inputs/results separate. Cancellation or timeout must terminate its work rather than merely stop waiting for it.
-
-The [Output wiki](https://github.com/simulationcraft/simc/wiki/Output) documents zero as success and nonzero statuses for parsing, initialization, execution, and I/O failures. A future wrapper should preserve actual statuses and messages rather than depending exclusively on a possibly changing numeric taxonomy.
-
-## Verification status
-
-The environment has `clang++`, but neither `cmake` nor `simc` was found on PATH. No dependencies were installed and no build or simulation was attempted. Build flags and report options were inspected in source; the commands remain execution-unverified.
+The [Output wiki](https://github.com/simulationcraft/simc/wiki/Output) documents zero as success and nonzero statuses for parsing, initialization, execution, and I/O failures. Preserve actual statuses/messages rather than depending exclusively on a possibly changing numeric taxonomy. No general runner is implemented by these two fixed-purpose scripts.

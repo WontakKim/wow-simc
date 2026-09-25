@@ -11,17 +11,21 @@ Research date: 2026-09-25. Recommendations below are project analysis, not state
 | Approved Raidbots submission integration | Could delegate engine operations to Raidbots | Availability, permission, contract, limits, and pricing unverified | Blocked pending confirmation; not assumed available |
 | New damage engine from static JSON | Full control in principle | Requires class mechanics, procs, APLs, encounter simulation, and continuous patch validation | Not justified for an initial implementation |
 
-**Recommendation:** first validate one real Retail character with SimulationCraft CLI, using a manual Raidbots Quick Sim as a comparison when available. Use Raidbots static data only where a concrete lookup/UI requirement needs it. This is a proposed direction, not authorization to implement or deploy it now.
+## Current execution foundation
 
-## Smallest useful next experiment
+The engine is pinned as `simc/`, and a macOS ARM64 CLI build plus one official Frost Mage smoke simulation have succeeded. The [build and smoke helpers](../../README.md#quick-start) make that fixed workflow repeatable without installing dependencies or changing upstream source. One user-supplied character export also completed a private manual baseline, with active talents and equipped-item details checked. This validates those executions and selected report fields, not arbitrary character inputs or all game mechanics. Private inputs and results are not versioned.
 
-1. **Select one character/specialization and encounter.**
-   - Input: a current addon export and agreed single-target or sustained-AoE scenario.
-   - Verify: intended equipment/talents are present; no accidental PTR or custom-APL mismatch.
-2. **Obtain one pinned engine build.**
-   - Record commit, engine version, build/toolchain, game-data version, and platform.
-   - Verify: binary starts and accepts the profile; prerequisites fail early with clear messages.
-3. **Run the baseline with explicit settings.**
+**Next recommendation:** use the validated private baseline for one controlled gear or talent comparison, and compare against a manual Raidbots Quick Sim when a matching report is available. Use static data only where a concrete lookup/UI requirement needs it. Further comparisons are not implemented by the fixed build/smoke helpers.
+
+## Future controlled comparison
+
+1. **Confirm the character and encounter for the comparison.**
+   - Reuse the privately validated baseline if it is still current, or obtain a fresh addon export.
+   - Verify: intended equipment/talents and the agreed encounter are unchanged; no accidental PTR or custom-APL mismatch.
+2. **Retain the matching engine and data version.**
+   - Record the commit, engine version, toolchain, game-data version, and platform for both baseline and candidate.
+   - Verify: neither engine nor environment changes between variants; the earlier baseline does not prove compatibility after a patch.
+3. **Retain or regenerate the baseline with explicit settings.**
    - Save original export, effective input, stdout/stderr, HTML, JSON, and command arguments.
    - Verify: successful exit, correct actor, valid finite DPS, no unhandled errors.
 4. **Add exactly one legitimate gear or talent alternative.**
@@ -44,11 +48,11 @@ Research date: 2026-09-25. Recommendations below are project analysis, not state
 - If Raidbots is involved: report URL and retrieval time.
 - If external static data is used: metadata/content hash and retrieval time.
 
-## Questions to resolve before implementation
+## Questions before comparison or application work
 
 These do not block the completed research, but change the next development task:
 
-1. Which specialization and real character export should the first experiment support?
+1. Should the next comparison reuse the privately validated export, or use a newer character state?
 2. Is the initial question single-target raid DPS, sustained AoE, or a specific dungeon route?
 3. Is the primary feature baseline DPS, gear ranking, talent comparison, or rotation experimentation?
 4. Should simulations run locally or on hosted infrastructure? What job size and concurrency are expected?
@@ -63,4 +67,4 @@ These do not block the completed research, but change the next development task:
 - Large combinations grow quickly. Validate one alternative before building optimizers.
 - Arbitrary SimC input can exercise file/network features; do not expose unrestricted execution without isolation.
 - Engine distribution/modification requires reviewing GPL and bundled dependency obligations. A subprocess boundary alone is not a complete licensing analysis.
-- No engine run or real-character fixture has been validated yet. No performance, throughput, or correctness benchmark is claimed.
+- The official single-actor smoke workflow and one private character baseline have been validated. General input support, profileset execution, tracked result fixtures, cross-platform behavior, and performance/throughput/mechanics benchmarks remain unverified.

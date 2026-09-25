@@ -75,7 +75,7 @@ Therefore, `json2=report.json` is a deliberate compatibility choice in the examp
 
 ## Relevant result paths
 
-These paths are source-inspected in [`report_json.cpp`](https://github.com/simulationcraft/simc/blob/1e0751c16d04df565bea9d7c4ac228f9cc4b0e46/engine/report/json/report_json.cpp), not validated against a newly executed report:
+These paths are source-inspected in [`report_json.cpp`](https://github.com/simulationcraft/simc/blob/1e0751c16d04df565bea9d7c4ac228f9cc4b0e46/engine/report/json/report_json.cpp). The official single-actor smoke report additionally confirms version/revision metadata, selected simulation options and game-data identity, the intended actor's mean DPS, and diagnostic records. Profileset paths remain source-inspected only; this is not full schema validation:
 
 | Path | Meaning / handling |
 | --- | --- |
@@ -106,4 +106,4 @@ Raidbots adds its own `simbot` metadata and may truncate actors. Its JSON must n
 - Handle optional fields without silently accepting missing required statistics.
 - Reject unsupported schema versions with an actionable message.
 - Keep achieved precision and iterations alongside DPS; avoid ranking tiny differences as conclusive.
-- Add real single-actor and profileset fixtures after the first engine execution. No such fixtures exist in this research yet.
+- The fixed smoke helper checks one official single-actor report. A separate manual run also validated selected fields for one private character export. Both sets of generated reports are ignored local evidence, not tracked fixtures. Profileset execution and reusable result fixtures remain future work.

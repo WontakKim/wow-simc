@@ -1,0 +1,11 @@
+# Includes are relative to the repository root; this is not a DPS benchmark.
+ptr=0
+item_db_source=local
+input=simc/profiles/MID2/MID2_Mage_Frost.simc
+input=research/examples/single-target.simc
+# Keep the official actor and baseline encounter, but shorten the execution check.
+iterations=100
+max_time=60
+vary_combat_length=0
+threads=2
+seed=20260925
