@@ -18,6 +18,12 @@ export function threeToNativePoint(point: Vec3): Vec3 {
 // e2 -> -e3, e3 -> e2. C is a proper rotation, so C^-1 = C^T.
 const C: number[] = [1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1];
 
+/** The Z-up -> Y-up basis for a whole native actor: native +Z (up) -> three
+ * +Y, native +X -> three +X, native +Y -> three -Z. Apply once at the actor
+ * root; nativeToThreeMatrix(identity) conjugates C away into the identity, so
+ * pass this matrix directly instead. */
+export const NATIVE_TO_THREE_BASIS: number[] = C;
+
 function transpose(matrix: number[]): number[] {
   return [
     matrix[0], matrix[4], matrix[8], matrix[12],

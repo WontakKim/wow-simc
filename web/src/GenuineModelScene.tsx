@@ -27,7 +27,7 @@ import {
 import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
 import nativeModelManifest from "./nativeModelManifest.json";
 import { loadNativeActorBundle, type NativeModelManifest } from "./m2/actorLoader";
-import { nativeToThreeMatrix, nativeToThreePoint } from "./m2/coordinates";
+import { NATIVE_TO_THREE_BASIS } from "./m2/coordinates";
 import { STAND_ANIMATION_ID, animationOptionLabel } from "./m2/animations";
 import {
   blendBoneMatrices,
@@ -48,13 +48,12 @@ const ACTOR_ASSETS = {
 } as const;
 
 // Native M2 actors are Z-up; the basis conversion is applied exactly once, at
-// the actor root (C from ./m2/coordinates). The extra yaw on top of C turns the
-// converted model's authored facing toward the opponent so arrangeCombatants'
-// 0 / pi rotations face the combatants toward each other.
-const NATIVE_BASIS = new Matrix4().fromArray(nativeToThreeMatrix([
-  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-]));
-const ACTOR_BASE_YAW = -Math.PI / 2;
+// the actor root (NATIVE_TO_THREE_BASIS = C from ./m2/coordinates). The
+// Vulpera is authored facing native +X, which C already keeps on three +X, so
+// no extra base yaw is needed and arrangeCombatants' 0 / pi rotations face the
+// combatants toward each other.
+export const NATIVE_BASIS = new Matrix4().fromArray(NATIVE_TO_THREE_BASIS);
+export const ACTOR_BASE_YAW = 0;
 
 const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
