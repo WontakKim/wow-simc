@@ -12,15 +12,19 @@ import { describe, expect, it } from "vitest";
 import officialFixture from "../public/fixture/elemental-shaman-replay.json";
 import {
   REPLAY_SOURCE_ATTACHMENTS,
+  REPLAY_COMPONENT_INSTANCE_LIMITS,
   arrangeCombatants,
   frameModels,
   getReplayEffectAnchors,
   getReplayEffectSourceAnchor,
+  isReplayClipMissing,
   resolveLoggedEffectOccurrences,
+  resolveLoggedMotionBlend,
   resolveLoggedAnimation,
   getLoggedPlaybackEndTime,
 } from "./GenuineModelScene";
-import { parseReplayReport } from "./replay";
+import { parseReplayReport, type ReplayEvent } from "./replay";
+import type { CombatTimeline } from "./combatLog";
 import { NATIVE_EFFECT_ASSETS } from "./nativeEffectAssets";
 import { blendBoneMatrices } from "./m2/sampler";
 
@@ -110,7 +114,7 @@ describe("logged native replay scheduling", () => {
     expect(resolveLoggedAnimation(timeline, 3).kind).toBe("motion");
     expect(resolveLoggedAnimation(timeline, 3).eventLabel).toBe("Lava Burst");
     expect(resolveLoggedAnimation(timeline, 0.5).eventLabel).not.toMatch(/overload/);
-    expect(resolveLoggedAnimation(timeline, 3.66).kind).not.toBe("motion");
+    expect(resolveLoggedAnimation(timeline, 3.66).eventLabel).not.toBe("Lava Burst");
   });
   it("releases at finish, flies until hit, then shows impact only after hit", () => {
     const before = resolveLoggedEffectOccurrences(timeline, 3.649).filter((effect) => effect.spellId === 51505 && effect.eventTime === 3.65);
@@ -134,6 +138,153 @@ describe("logged native replay scheduling", () => {
     ] })).toBe(50);
     expect(resolveLoggedAnimation(timeline, 3.5)).toEqual(resolveLoggedAnimation(timeline, 3.5));
     expect(resolveLoggedEffectOccurrences(timeline, 3.95)).toEqual(resolveLoggedEffectOccurrences(timeline, 3.95));
+  });
+
+  it("reproduces cast poses and original effects across reset, backward seek and repeated casts", () => {
+    const firstPose = resolveLoggedMotionBlend(timeline, 2.649);
+    const flight = resolveLoggedEffectOccurrences(timeline, 3.95);
+    const repeatedPose = resolveLoggedMotionBlend(timeline, 33.42);
+    resolveLoggedMotionBlend(timeline, 33.7);
+    resolveLoggedEffectOccurrences(timeline, 0);
+    resolveLoggedMotionBlend(timeline, 0);
+    expect(resolveLoggedMotionBlend(timeline, 2.649)).toEqual(firstPose);
+    expect(resolveLoggedEffectOccurrences(timeline, 3.95)).toEqual(flight);
+    expect(resolveLoggedMotionBlend(timeline, 33.42)).toEqual(repeatedPose);
+  });
+
+  it("reports missing mapped native clips rather than substituting stand or another cast", () => {
+    const active = resolveLoggedAnimation(timeline, 3.2);
+    expect(active).toMatchObject({ kind: "motion", animationId: 1148 });
+    expect(isReplayClipMissing(active, ["Stand (ID 0 variation 0)"])).toBe(true);
+    expect(isReplayClipMissing(active, [active.clipName])).toBe(false);
+    const isolated = { ...timeline, occurrences: timeline.occurrences.filter((occurrence) => occurrence.actionName === "lava_burst" && occurrence.castStart === 2.574) };
+    expect(isReplayClipMissing(resolveLoggedAnimation(isolated, 3.9), ["Stand (ID 0 variation 0)"])).toBe(false);
+  });
+
+  it("blends stand into the logged Lava Burst precast and release into stand without shifting either boundary", () => {
+    const isolated = { ...timeline, occurrences: timeline.occurrences.filter((occurrence) =>
+      occurrence.actionName === "lava_burst" && occurrence.castStart === 2.574) };
+    const before = resolveLoggedMotionBlend(isolated, 2.573);
+    const boundary = resolveLoggedMotionBlend(isolated, 2.574);
+    const middle = resolveLoggedMotionBlend(isolated, 2.649);
+    const release = resolveLoggedMotionBlend(isolated, 3.65);
+    const settle = resolveLoggedMotionBlend(isolated, 3.725);
+    const completed = resolveLoggedMotionBlend(isolated, 3.8);
+    expect(before.incoming.kind).toBe("settled");
+    expect(boundary).toMatchObject({ incoming: { kind: "motion", animationId: 1148, clipTime: 0 },
+      outgoing: { kind: "settled", animationId: 0 }, incomingWeight: 0 });
+    expect(middle.incomingWeight).toBeCloseTo(0.5);
+    expect(release.incoming.kind).toBe("motion");
+    expect(release.incoming.clipTime).toBeCloseTo(1.076);
+    expect(settle).toMatchObject({ incoming: { kind: "settled" }, outgoing: { kind: "motion", animationId: 1148 }, incomingWeight: expect.closeTo(0.5) });
+    expect(completed.outgoing).toBeNull();
+  });
+
+  it("blends successive logged casts across the five-millisecond real gap using independent clip times", () => {
+    const preceding = resolveLoggedMotionBlend(timeline, 33.34);
+    const boundary = resolveLoggedMotionBlend(timeline, 33.345);
+    const middle = resolveLoggedMotionBlend(timeline, 33.42);
+    const complete = resolveLoggedMotionBlend(timeline, 33.495);
+    expect(preceding.incoming).toMatchObject({ kind: "motion", animationId: 830, clipTime: expect.closeTo(0.988) });
+    expect(boundary.incomingWeight).toBe(0);
+    expect(middle.incoming).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.075) });
+    expect(middle.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.988) });
+    expect(middle.incomingWeight).toBeCloseTo(0.5);
+    expect(complete.outgoing).toBeNull();
+  });
+
+  it("introduces an instant pose only after its logged release and then returns to stand", () => {
+    const isolated = { ...timeline, occurrences: timeline.occurrences.filter((occurrence) =>
+      occurrence.actionName === "lightning_bolt" && occurrence.castFinish === 31.598) };
+    const before = resolveLoggedMotionBlend(isolated, 31.597);
+    const boundary = resolveLoggedMotionBlend(isolated, 31.598);
+    const entering = resolveLoggedMotionBlend(isolated, 31.673);
+    const leaving = resolveLoggedMotionBlend(isolated, 31.823);
+    const complete = resolveLoggedMotionBlend(isolated, 31.898);
+    expect(before.incoming.kind).toBe("settled");
+    expect(boundary).toMatchObject({ incoming: { kind: "motion", clipTime: 0 },
+      outgoing: { kind: "settled" }, incomingWeight: 0 });
+    expect(entering.incomingWeight).toBeCloseTo(0.5);
+    expect(leaving).toMatchObject({ incoming: { kind: "settled" },
+      outgoing: { kind: "motion" }, incomingWeight: expect.closeTo(0.5) });
+    expect(complete.outgoing).toBeNull();
+  });
+
+  it("keeps failed queues, waits, unsupported actions and future selections explicitly idle", () => {
+    const sample = parseReplayReport(officialFixture).actors[0].events[0];
+    const empty: CombatTimeline = { occurrences: [], auras: [], unmatched: [] };
+    const wait: ReplayEvent = { ...sample, kind: "wait", name: "Wait", id: null, queueFailed: null, wait: 0.5, time: 4 };
+    const failed: ReplayEvent = { ...sample, queueFailed: true, time: 4 };
+    const unsupported: ReplayEvent = { ...sample, id: 1236616, name: "potion", time: 4 };
+    expect(resolveLoggedAnimation(empty, 3.99, wait)).toMatchObject({ kind: "before", animationId: 0, status: expect.stringMatching(/before.*idle/) });
+    expect(resolveLoggedAnimation(empty, 4, wait)).toMatchObject({ kind: "wait", animationId: 0, status: expect.stringMatching(/wait.*idle/) });
+    expect(resolveLoggedAnimation(empty, 4, failed)).toMatchObject({ kind: "failed", animationId: 0, status: expect.stringMatching(/failure.*idle/) });
+    expect(resolveLoggedAnimation(empty, 4, unsupported)).toMatchObject({ kind: "unmapped", animationId: 0, status: expect.stringMatching(/mapping.*idle/) });
+    const noMappedCast = { ...empty, occurrences: [{ ...timeline.occurrences[0], spellId: 1236616, actionName: "potion", castStart: 4, castFinish: 4, isBackground: false }] };
+    expect(resolveLoggedAnimation(noMappedCast, 4).kind).toBe("settled");
+    expect(resolveLoggedEffectOccurrences(noMappedCast, 4)).toEqual([]);
+  });
+
+  it("bounds simultaneous original components using the new trace, including overloads", () => {
+    const moments = timeline.occurrences.flatMap((occurrence) => [
+      occurrence.castStart, occurrence.castFinish, occurrence.travelStart,
+      ...occurrence.impacts.flatMap((impact) => [impact.time, impact.time + 0.1]),
+    ]).filter((time): time is number => time !== null).concat(timeline.auras.map((aura) => aura.time));
+    const peaks = new Map<number, number>();
+    for (const time of moments) {
+      const counts = new Map<number, number>();
+      for (const effect of resolveLoggedEffectOccurrences(timeline, time)) {
+        for (const component of effect.components) counts.set(component.fileDataId, (counts.get(component.fileDataId) ?? 0) + 1);
+      }
+      for (const [fileDataId, count] of counts) peaks.set(fileDataId, Math.max(peaks.get(fileDataId) ?? 0, count));
+    }
+    expect(moments.find((time) => resolveLoggedEffectOccurrences(timeline, time)
+      .flatMap((effect) => effect.components).filter((component) => component.fileDataId === 794788).length === 4)).toBe(8.651);
+    expect(peaks.get(4329984)).toBe(7);
+    expect(peaks.get(6211617)).toBe(4);
+    expect(peaks.get(794788)).toBe(4);
+    expect([...peaks].sort(([left], [right]) => left - right))
+      .toEqual([...REPLAY_COMPONENT_INSTANCE_LIMITS].sort(([left], [right]) => left - right));
+  });
+
+  it("shares the original missile across Lava Burst, Elemental Blast and overloads without blocked body 3980281", () => {
+    const lava = resolveLoggedEffectOccurrences(timeline, 3.95).filter((effect) => effect.spellId === 51505);
+    const blast = timeline.occurrences.find((occurrence) => occurrence.actionName === "elemental_blast" && occurrence.travelStart !== null)!;
+    const blastFlight = resolveLoggedEffectOccurrences(timeline, blast.travelStart! + 0.1)
+      .find((effect) => effect.eventKey === blast.key && effect.components.some((component) => component.anchor === "projectile"))!;
+    const overload = resolveLoggedEffectOccurrences(timeline, 0.65).filter((effect) => effect.spellId === 285466);
+    expect(lava.flatMap((effect) => effect.components.map((component) => component.fileDataId))).toContain(4329984);
+    expect(blastFlight.components.map((component) => component.fileDataId)).toEqual([4329984, 794788, 613807]);
+    expect(overload.length).toBeGreaterThan(0);
+    expect(overload.flatMap((effect) => effect.components.map((component) => component.fileDataId))).toContain(4329984);
+    expect([...lava, blastFlight, ...overload].flatMap((effect) => effect.components.map((component) => component.fileDataId))).not.toContain(3980281);
+  });
+
+  it("does not invent an Ancestral Swiftness component or an ancestor-source missile", () => {
+    expect(timeline.occurrences.some((occurrence) => occurrence.spellId === 443454)).toBe(true);
+    expect(resolveLoggedEffectOccurrences(timeline, 31.598).some((effect) => effect.spellId === 443454)).toBe(false);
+    expect(timeline.occurrences.some((occurrence) => occurrence.actor.includes("_ancestor") && occurrence.travelStart !== null)).toBe(true);
+    expect(resolveLoggedEffectOccurrences(timeline, 4.55).some((effect) => effect.sourceActor?.includes("_ancestor"))).toBe(false);
+  });
+
+  it("uses all equal-time precombat source lines without letting a selected prefix fabricate later effects", () => {
+    const events = parseReplayReport(officialFixture).actors[0].events;
+    expect(events.slice(0, 8).map((event) => [event.phase, event.time, event.name])).toEqual([
+      ["precombat", 0, "snapshot_stats"], ["precombat", 0, "flametongue_weapon"],
+      ["precombat", 0, "lightning_shield"], ["precombat", 0, "trinket_1_buffs"],
+      ["precombat", 0, "trinket_2_buffs"], ["precombat", 0, "trinket_1_special"],
+      ["precombat", 0, "trinket_2_special"], ["precombat", 0, "stormkeeper"],
+    ]);
+    const atZero = resolveLoggedEffectOccurrences(timeline, 0);
+    expect(atZero.some((effect) => effect.spellId === 192106)).toBe(true);
+    expect(atZero.some((effect) => effect.spellId === 191634)).toBe(true);
+    expect(atZero.some((effect) => effect.spellId === 318038)).toBe(false);
+    expect(atZero.filter((effect) => effect.spellId === 51505)).not.toHaveLength(0);
+    expect(atZero.filter((effect) => effect.spellId === 51505).every((effect) =>
+      effect.eventKey === timeline.occurrences.find((occurrence) => occurrence.actionName === "lava_burst_asc"
+        && occurrence.travelStart === 0)?.key)).toBe(true);
+    expect(atZero.some((effect) => effect.eventTime === 1.777)).toBe(false);
+    expect(resolveLoggedEffectOccurrences(timeline, 0)).toEqual(atZero);
   });
 });
 

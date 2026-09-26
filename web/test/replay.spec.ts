@@ -945,6 +945,18 @@ test("clears rendered replay particles when actor selection becomes empty", asyn
   await expect.poll(async () => (await captureCanvas()).equals(activeFrame)).toBe(true);
 });
 
+test("renders the bundled four-way Elemental Blast component peak without a capacity error", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status").filter({ hasText: "Both genuine models ready" })).toBeVisible();
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("8.651");
+  const canvas = scene.locator("canvas");
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Original components ready", { timeout: 30_000 });
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /794788,613807/);
+  await expect(scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" })).toHaveCount(0);
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+});
+
 test("keeps a late composite capacity failure unavailable", async ({ page }) => {
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
@@ -959,13 +971,13 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
     const elementalBlast = sequence.find((event) => event.id === 117014);
     if (!elementalBlast) throw new Error("The public fixture has no Elemental Blast source record.");
     fixture.sim.players[0].collected_data.action_sequence = Array.from(
-      { length: 3 },
+      { length: 5 },
       () => ({ ...structuredClone(elementalBlast), time: 7.233 }),
     );
     const capture = (fixture as typeof fixture & { capture: { combat_log: Array<[number, string]> } }).capture;
     capture.combat_log = capture.combat_log.filter(([, line]) => line.includes("Action 'elemental_blast' (117014)")
       && Number(line.split(" ", 1)[0]) < 9)
-      .flatMap(([ordinal, line]) => Array.from({ length: 3 }, (_, instance) => [ordinal * 10 + instance, line] as [number, string]));
+      .flatMap(([ordinal, line]) => Array.from({ length: 5 }, (_, instance) => [ordinal * 10 + instance, line] as [number, string]));
     await route.fulfill({ response, json: fixture });
   });
 
@@ -986,7 +998,7 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
   releaseNativeResponse?.();
 
   const replayAlert = scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" });
-  await expect(replayAlert).toContainText(/3 simultaneous component instances.*2-instance resource bound/, { timeout: 30_000 });
+  await expect(replayAlert).toContainText(/5 simultaneous component instances.*4-instance resource bound/, { timeout: 30_000 });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toHaveCount(0);
   await expect(scene.locator("canvas")).toHaveAttribute("data-replay-native-particles", "0");
 });

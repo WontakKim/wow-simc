@@ -63,6 +63,7 @@ const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
 const STAND_CLIP_NAME = animationOptionLabel(STAND_ANIMATION_ID, 0);
 const CAMERA_FOV = 36;
+const REPLAY_POSE_BLEND_SECONDS = 0.15;
 const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
 const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
 type ReplayEffectAnchor = "caster" | "target" | "projectile";
@@ -84,11 +85,12 @@ const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
   [443454, { actionName: "ancestral_swiftness", components: [] }],
 ]);
 
-// Shared component capacities include overlapping occurrences from more than one spell in the public fixture.
-const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
-  [794788, 2], [613807, 2], [4006618, 16], [1598036, 1],
-  [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 16],
-  [3980244, 16], [4329984, 16], [6211617, 16], [6211618, 16], [1571475, 16], [4392095, 1], [4050773, 1],
+// Peak simultaneous component counts measured from the pinned paired combat log,
+// including overloads, impact decay, and shared assets across spell families.
+export const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
+  [794788, 4], [613807, 4], [4006618, 8], [1598036, 1],
+  [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 3],
+  [3980244, 8], [4329984, 7], [6211617, 4], [6211618, 4], [1571475, 7], [4392095, 1], [4050773, 1],
 ]);
 // SpellVisualMissile rows 28854 and 28867–28869 and SpellVisualKitModelAttach rows 321812/321824, build 12.1.0.69933.
 // Mapped to native M2 attachment ids on the caster model (21 SpellHandL, 22 SpellHandR, 34 Chest).
@@ -264,20 +266,75 @@ export function getLoggedPlaybackEndTime(timeline: CombatTimeline) {
     ...timeline.unmatched.map((event) => event.time));
 }
 
-export function resolveLoggedAnimation(timeline: CombatTimeline, cursor: number): ReplayAnimationResolution {
-  const current = timeline.occurrences.filter((occurrence) => !occurrence.isBackground
-    && occurrence.castFinish !== null && (occurrence.castStart ?? occurrence.castFinish) <= cursor
-    && cursor <= occurrence.castFinish).at(-1);
-  const mapped = current && ELEMENTAL_SHAMAN_ANIMATIONS.get(current.spellId);
-  if (!current || !mapped || !current.actionName.startsWith(mapped.actionName)) {
-    return { kind: "settled", eventLabel: "No active foreground cast", clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID, clipTime: 0, status: "Idle between logged casts; background procs do not restart the caster pose." };
+function getLoggedForegroundCasts(timeline: CombatTimeline) {
+  return timeline.occurrences.filter((occurrence) => {
+    const mapped = ELEMENTAL_SHAMAN_ANIMATIONS.get(occurrence.spellId);
+    return !occurrence.isBackground && occurrence.castFinish !== null
+      && mapped !== undefined && occurrence.actionName.startsWith(mapped.actionName);
+  });
+}
+
+function createLoggedCastAnimation(occurrence: CombatTimeline["occurrences"][number], cursor: number): ReplayAnimationResolution {
+  const animationId = ELEMENTAL_SHAMAN_ANIMATIONS.get(occurrence.spellId)!.animationId;
+  return { kind: "motion", eventLabel: occurrence.actionName.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" "),
+    clipName: animationOptionLabel(animationId, 0), animationId,
+    clipTime: cursor - (occurrence.castStart ?? occurrence.castFinish!),
+    status: occurrence.castStart === null ? `Instant release at ${occurrence.castFinish!.toFixed(3)}s (SimC log); pose blend after release is presentation only.`
+      : `Logged cast ${occurrence.castStart.toFixed(3)}–${occurrence.castFinish!.toFixed(3)}s; native pose holds at clip end until release.` };
+}
+
+export function resolveLoggedAnimation(timeline: CombatTimeline, cursor: number, selectedEvent?: ReplayEvent): ReplayAnimationResolution {
+  const casts = getLoggedForegroundCasts(timeline);
+  const current = casts.filter((occurrence) => (occurrence.castStart ?? occurrence.castFinish!) <= cursor
+    && cursor <= occurrence.castFinish!).at(-1);
+  if (current) return createLoggedCastAnimation(current, cursor);
+  const instant = casts.filter((occurrence) => occurrence.castStart === null
+    && occurrence.castFinish! < cursor && cursor < occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS).at(-1);
+  if (instant) return createLoggedCastAnimation(instant, cursor);
+
+  const idle = (kind: ReplayAnimationKind, status: string): ReplayAnimationResolution => ({
+    kind, eventLabel: selectedEvent && kind !== "settled" ? getEventLabel(selectedEvent) : "No active foreground cast",
+    clipName: STAND_CLIP_NAME, animationId: STAND_ANIMATION_ID, clipTime: 0, status,
+  });
+  if (selectedEvent && cursor < selectedEvent.time) return idle("before", "The cursor is before this recorded action — idle.");
+  if (selectedEvent?.kind === "wait") return idle("wait", "Recorded wait — idle; no cast motion.");
+  if (selectedEvent?.queueFailed) return idle("failed", "Recorded queue failure — idle; no successful cast motion.");
+  if (selectedEvent?.kind === "action" && selectedEvent.id !== null
+    && !ELEMENTAL_SHAMAN_ANIMATIONS.has(selectedEvent.id)) {
+    return idle("unmapped", "No supported native cast animation mapping — idle.");
   }
-  return { kind: "motion", eventLabel: current.actionName.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" "),
-    clipName: animationOptionLabel(mapped.animationId, 0), animationId: mapped.animationId,
-    clipTime: cursor - (current.castStart ?? current.castFinish!),
-    status: current.castStart === null ? `Instant release at ${current.castFinish!.toFixed(3)}s (SimC log).`
-      : `Logged cast ${current.castStart.toFixed(3)}–${current.castFinish!.toFixed(3)}s; native pose holds at clip end until release.` };
+  return idle("settled", "Idle between logged casts; background procs do not restart the caster pose.");
+}
+
+export function resolveLoggedMotionBlend(timeline: CombatTimeline, cursor: number, selectedEvent?: ReplayEvent): ReplayMotionBlend {
+  const incoming = resolveLoggedAnimation(timeline, cursor, selectedEvent);
+  const casts = getLoggedForegroundCasts(timeline);
+  const active = casts.filter((occurrence) => (occurrence.castStart ?? occurrence.castFinish!) <= cursor
+    && cursor <= occurrence.castFinish!).at(-1);
+  const instant = active ?? casts.filter((occurrence) => occurrence.castStart === null
+    && occurrence.castFinish! < cursor && cursor < occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS).at(-1);
+  if (instant && incoming.kind === "motion") {
+    const boundary = instant.castStart ?? instant.castFinish!;
+    const elapsed = roundReplayTime(cursor - boundary);
+    if (elapsed < REPLAY_POSE_BLEND_SECONDS) {
+      const previous = casts.filter((occurrence) => occurrence.ordinal < instant.ordinal
+        && occurrence.castFinish! <= boundary).at(-1);
+      const outgoing = previous && boundary - previous.castFinish! < REPLAY_POSE_BLEND_SECONDS
+        ? createLoggedCastAnimation(previous, previous.castFinish!)
+        : { kind: "settled" as const, eventLabel: "No active foreground cast", clipName: STAND_CLIP_NAME,
+          animationId: STAND_ANIMATION_ID, clipTime: 0, status: "Idle before the logged cast." };
+      return { incoming, outgoing, incomingWeight: elapsed / REPLAY_POSE_BLEND_SECONDS };
+    }
+    return { incoming, outgoing: null, incomingWeight: 1 };
+  }
+  const finished = casts.filter((occurrence) => occurrence.castFinish! < cursor
+    && cursor < occurrence.castFinish! + (occurrence.castStart === null ? 2 : 1) * REPLAY_POSE_BLEND_SECONDS).at(-1);
+  if (!finished) return { incoming, outgoing: null, incomingWeight: 1 };
+  const boundary = finished.castFinish! + (finished.castStart === null ? REPLAY_POSE_BLEND_SECONDS : 0);
+  const elapsed = roundReplayTime(cursor - boundary);
+  if (elapsed < 0 || elapsed >= REPLAY_POSE_BLEND_SECONDS) return { incoming, outgoing: null, incomingWeight: 1 };
+  return { incoming, outgoing: createLoggedCastAnimation(finished, boundary),
+    incomingWeight: elapsed / REPLAY_POSE_BLEND_SECONDS };
 }
 
 export function getReplayEffectAnchors(caster: Group, target: Group) {
@@ -465,7 +522,9 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<AnimationController | null>(null);
   const animationModeRef = useRef<AnimationMode>("replay");
-  const replayAnimationRef = useRef<ReplayMotionBlend>({ incoming: resolveLoggedAnimation(replay?.timeline ?? { occurrences: [], auras: [], unmatched: [] }, replay?.cursor ?? 0), outgoing: null, incomingWeight: 1 });
+  const replayAnimationRef = useRef<ReplayMotionBlend>(replay?.timeline
+    ? resolveLoggedMotionBlend(replay.timeline, replay.cursor, replay.events[replay.selectedIndex])
+    : { incoming: resolveLoggedAnimation({ occurrences: [], auras: [], unmatched: [] }, 0), outgoing: null, incomingWeight: 1 });
   const [status, setStatus] = useState<SceneStatus>("loading");
   const [loadedModelCount, setLoadedModelCount] = useState(0);
   const [actorStatusLines, setActorStatusLines] = useState<string[]>([]);
@@ -494,7 +553,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const replayStateRef = useRef(replay);
 
   const replayMotionBlend = replay?.timeline
-    ? { incoming: resolveLoggedAnimation(replay.timeline, replay.cursor), outgoing: null, incomingWeight: 1 }
+    ? resolveLoggedMotionBlend(replay.timeline, replay.cursor, replay.events[replay.selectedIndex])
     : { incoming: { kind: "unavailable" as const, eventLabel: "No combat log", clipName: STAND_CLIP_NAME,
       animationId: STAND_ANIMATION_ID, clipTime: 0, status: "No combat log timing is available for this report; native cast replay is idle." },
       outgoing: null, incomingWeight: 1 };
