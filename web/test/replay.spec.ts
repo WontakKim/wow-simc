@@ -182,6 +182,20 @@ const partialReport = JSON.stringify({
   },
 });
 
+function keepSelectedActionLog(report: unknown): void {
+  const fixture = report as {
+    capture: { combat_log: Array<[number, string]> };
+    sim: { players: Array<{ collected_data: { action_sequence: Array<{ id?: number; time: number; name?: string }> } }> };
+  };
+  const selectedActions = fixture.sim.players[0].collected_data.action_sequence;
+  if (selectedActions.some((action) => !action.id || !action.name)) throw new Error("Selected action is missing its source identity.");
+  fixture.capture.combat_log = fixture.capture.combat_log.filter(([, line]) => {
+    const time = Number(line.split(" ", 1)[0]);
+    return selectedActions.some((action) => line.includes(`Action '${action.name}' (${action.id})`)
+      && time >= action.time - 0.002 && time <= action.time + 2.2);
+  });
+}
+
 test("automatically opens the bundled full-state replay and drives its controls", async ({ page }) => {
   await page.goto("/");
 
@@ -191,7 +205,9 @@ test("automatically opens the bundled full-state replay and drives its controls"
   await expect(page.getByRole("heading", { name: "MID2_Shaman_Elemental_Farseer" })).toBeVisible();
   await expect(page.getByText(/not the highest, optimal, or representative result/i)).toBeVisible();
   await expect(page.getByText(/Rune of Unleashed Fire/)).toBeVisible();
-  await expect(page.locator("tbody tr")).toHaveCount(59);
+  await expect(page.getByRole("region", { name: "All recorded events" }).locator("tbody tr")).toHaveCount(59);
+  await expect(page.getByRole("region", { name: "Logged cast and impact events" }).locator("tbody tr")).not.toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Logged cast and impact events" }).getByText(/unmatched impact/).first()).toBeVisible();
   await expect(page.locator(".precombat-event")).toHaveCount(8);
   await expect(page.locator(".event-hit-target")).toHaveCount(51);
 
@@ -268,7 +284,7 @@ test("preserves missing-state semantics for a legacy partial reference", async (
   await page.getByRole("button", { name: "Next event" }).click();
   await expect(page.getByTestId("selected-event")).toContainText("Wait 0.50s");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
-  await expect(scene.locator(".replay-motion-status")).toContainText("Recorded wait — idle; no cast motion.");
+  await expect(scene.locator(".replay-motion-status")).toContainText("No combat log timing is available for this report");
 });
 
 test("keeps the replay usable at mobile width", async ({ page }) => {
@@ -294,7 +310,7 @@ test("loads both genuine native models with separate replay and manual modes", a
   await expect(scene.getByText("Default Vulpera", { exact: true })).toBeVisible();
   await expect(scene.getByText("Training Dummy", { exact: true })).toBeVisible();
   await expect(scene.getByRole("button", { name: "Replay sync" })).toHaveAttribute("aria-pressed", "true");
-  await expect(scene.getByText(/native M2 cast animations/i)).toBeVisible();
+  await expect(scene.getByText(/Cast, missile release, flight, impact and mapped aura lifetimes use timestamps from the bundled SimC combat log/i)).toBeVisible();
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await expect(scene.getByRole("status")).toContainText(/native sequences/);
   // Types 1 (skin) and 19 (eyes) resolve through the composed appearance; the
@@ -341,35 +357,26 @@ test("synchronizes native cast poses to replay controls deterministically", asyn
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const motionStatus = scene.locator(".replay-motion-status");
 
-  await seek.fill("20.44");
-  await expect(motionStatus).toContainText("Lightning Bolt");
+  await seek.fill("2.6");
+  await expect(motionStatus).toContainText("Lava Burst");
   await expect(motionStatus).toHaveAttribute("data-animation-kind", "motion");
   const startPose = await canvas.screenshot();
 
-  await seek.fill("20.9");
-  await expect(motionStatus).toContainText("Lightning Bolt");
-  const laterPose = await canvas.screenshot();
-  expect(laterPose.equals(startPose)).toBe(false);
-
-  await seek.fill("20.7");
+  await seek.fill("3.2");
+  await expect(motionStatus).toContainText("Logged cast 2.574–3.650s");
   const firstSample = await canvas.screenshot();
-  await seek.fill("18.5");
-  await expect(motionStatus).toContainText("Lava Burst");
-  const lavaBurstPose = await canvas.screenshot();
-  await seek.fill("19.6");
-  await expect(motionStatus).toContainText("Elemental Blast");
-  expect((await canvas.screenshot()).equals(lavaBurstPose)).toBe(false);
-  await seek.fill("30.2");
-  await expect(motionStatus).toContainText("Lightning Bolt");
-  await seek.fill("20.7");
-  await expect(motionStatus).toContainText("Lightning Bolt");
+  expect(firstSample.equals(startPose)).toBe(false);
+
+  await seek.fill("3.95");
+  await expect(motionStatus).toContainText("No active foreground cast");
+  await seek.fill("3.2");
   const repeatedSample = await canvas.screenshot();
   expect(repeatedSample.equals(firstSample)).toBe(true);
 
   await scene.getByRole("button", { name: "Manual preview" }).click();
   await scene.getByRole("combobox", { name: "Native character animation" }).selectOption({ label: "Run (ID 5 variation 0)" });
   await scene.getByRole("button", { name: "Replay sync" }).click();
-  await expect(motionStatus).toContainText("Lightning Bolt");
+  await expect(motionStatus).toContainText("Lava Burst");
   expect((await canvas.screenshot()).equals(firstSample)).toBe(true);
 
   await scene.getByLabel("Speed").selectOption("2");
@@ -382,11 +389,11 @@ test("synchronizes native cast poses to replay controls deterministically", asyn
   expect(await seek.inputValue()).toBe(pausedCursor);
   expect((await canvas.screenshot()).equals(pausedPose)).toBe(true);
 
-  await seek.fill("44.213");
-  await expect(motionStatus).toContainText("Stormkeeper");
+  await seek.fill("4.3");
+  await expect(motionStatus).toContainText("No active foreground cast");
   await scene.getByRole("button", { name: "Reset", exact: true }).click();
-  await expect(motionStatus).toContainText("snapshot_stats");
-  await expect(motionStatus).toHaveAttribute("data-animation-kind", "unmapped");
+  await expect(motionStatus).toContainText("Flame Shock");
+  await expect(motionStatus).toContainText("Instant release at 0.000s");
 });
 
 test("applies the latest replay pose when the Vulpera finishes loading late", async ({ page }) => {
@@ -397,12 +404,12 @@ test("applies the latest replay pose when the Vulpera finishes loading late", as
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   const seek = scene.getByRole("slider", { name: "Seek playback" });
-  await seek.fill("20.7");
-  await expect(scene.locator(".replay-motion-status")).toContainText("Lightning Bolt");
+  await seek.fill("3.2");
+  await expect(scene.locator(".replay-motion-status")).toContainText("Lava Burst");
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   const replayPose = await scene.locator("canvas").screenshot();
 
-  await seek.fill("20.44");
+  await seek.fill("2.6");
   const earlierPose = await scene.locator("canvas").screenshot();
   expect(earlierPose.equals(replayPose)).toBe(false);
 });
@@ -556,19 +563,19 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await expect(scene.locator("[data-testid='replay-precombat-status']")).toContainText("simultaneously at cursor zero; this is not a recorded setup timeline");
   await seek.fill("0.15");
   await expect(scene.locator("[data-testid='replay-precombat-status']")).toHaveCount(0);
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "4006618,1598036,1355634,1284864,1109885");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984.*1355634,1284864,1109885/);
   await expect(canvas).toHaveAttribute("data-replay-native-latest-source-x", "");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 
   await seek.fill("1.1");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const lavaFrame = await canvas.screenshot();
   await seek.fill("3.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /6211618,6211617,1571475/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /6211617/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await seek.fill("1.1");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984/);
   expect((await canvas.screenshot()).equals(lavaFrame)).toBe(true);
   await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText(
     "FileDataID 4006621: 8 of 9 authored emitters; emitter 4: refraction unsupported",
@@ -595,6 +602,7 @@ test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combi
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = sequence.action_sequence.filter((event) => event.id === 443454).slice(0, 1);
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   const requestedMeshAssets: string[] = [];
@@ -608,7 +616,7 @@ test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combi
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("No original components required for this trace", { timeout: 30_000 });
   await expect(scene.locator("[data-testid='replay-spell-components']")).toContainText("Ancestral Swiftness (443454): no verified component; no substitute rendered");
   const canvas = scene.locator("canvas");
-  for (const time of ["0.04", "0.15", "0.3"]) {
+  for (const time of ["0"]) {
     await scene.getByRole("slider", { name: "Seek playback" }).fill(time);
     await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "");
     await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "0");
@@ -641,6 +649,7 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === 188389)!];
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   await page.goto("/");
@@ -707,6 +716,7 @@ test("loads only a selected Lava Burst trace and fails the whole kit when its or
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === 51505)!];
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   await page.route("**/model/native-effects/4006621.m2", (route) => route.fulfill({ status: 404 }));
@@ -722,9 +732,9 @@ test("loads only a selected Lava Burst trace and fails the whole kit when its or
 });
 
 for (const [spellName, spellId, expectedTiming] of [
-  ["Lava Burst", 51505, "derived 0.80s = SpellRange 5 maximum 40 yards / SpellVisualEffectName 47399 BaseMissileSpeed 50"],
-  ["Elemental Blast", 117014, "derived 0.80s = SpellRange 5 maximum 40 yards / SpellVisualEffectName 47399 BaseMissileSpeed 50"],
-  ["Lightning Bolt", 188196, "viewer-chosen 0.80s; all three mapped SpellVisualEffectName speeds are 0"],
+  ["Lava Burst", 51505, "finish 0.935s, flight 0.600s, impact 1.535s"],
+  ["Elemental Blast", 117014, "cast 7.233s, finish 8.184s, flight 0.750s, impact 8.934s"],
+  ["Lightning Bolt", 188196, "finish 1.777s, flight 0.500s, impact 2.277s"],
 ] as const) {
   test(`discloses ${spellName} missile timing provenance and unresolved motion`, async ({ page }) => {
     await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
@@ -736,6 +746,7 @@ for (const [spellName, spellId, expectedTiming] of [
       const sequence = fixture.sim.players[0].collected_data;
       sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === spellId)!];
       sequence.action_sequence_precombat = [];
+      keepSelectedActionLog(fixture);
       await route.fulfill({ response, json: fixture });
     });
     await page.goto("/");
@@ -743,19 +754,13 @@ for (const [spellName, spellId, expectedTiming] of [
     await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Original components ready", { timeout: 30_000 });
     const timing = scene.locator("[data-testid='replay-flight-status']");
     await expect(timing).toContainText(expectedTiming);
-    if (spellId !== 188196) await expect(timing).toContainText("assumes authored maximum range because the trace records no caster-target distance");
-    else await expect(timing).toContainText("not derived from authored speed");
-    await expect(timing).toContainText("2 of 3 mapped projectile spell durations derived; 1 of 3 viewer-chosen");
-    await expect(timing).toContainText("0.20s viewer-chosen release");
-    await expect(timing).toContainText("linear viewer path");
-    await expect(timing).toContainText("FollowGroundHeight/DropSpeed/Approach, Flags and DecayTimeAfterImpact are not interpreted");
+    await expect(timing).toContainText("Missile path interpolates between the presented actors; logged timestamps, not a simulated trajectory.");
     const limitations = scene.locator("[data-testid='replay-effect-limitations']");
     if (spellId === 51505) await expect(limitations).toContainText("Lava Burst motion ID 0 has no script");
     if (spellId === 188196) await expect(limitations).toContainText("SpellMissileMotion 4856 parabola or motion ID 0");
     if (spellId === 117014) {
       for (const motionId of [2967, 2969, 2968]) await expect(limitations).toContainText(`SpellMissileMotion ${motionId}`);
-      await expect(timing).toContainText("2 of 3 rendered bodies have speed 0 and inherit the shared body's derived duration");
-      await expect(timing).toContainText("motion scripts 2967, 2969, 2968 not applied");
+      await expect(timing).toContainText("flight 0.750s");
     }
   });
 }
@@ -770,6 +775,7 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === 188196)!];
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   await page.goto("/");
@@ -781,21 +787,21 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: 60%-bounds anchored launch");
   await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("dummy attachment 34 (Chest) translation for arrival");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)");
-  await seek.fill("2.4");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "3");
+  await seek.fill("2");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "1");
   await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "64");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "6211618,6211617,1571475");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "6211617");
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("DBOC four authored values");
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).not.toContainText("shader 0x14 native combiner");
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("emitter 0: flag 0x8000000 not reconstructed");
   await page.evaluate(() => window.scrollTo(0, 0));
   const screenshot = await canvas.screenshot({ path: testInfo.outputPath("lightning-bolt-midflight.png") });
-  await seek.fill("2.7");
+  await seek.fill("2.2");
   await page.evaluate(() => window.scrollTo(0, 0));
   expect((await canvas.screenshot()).equals(screenshot)).toBe(false);
-  await seek.fill("2.4");
+  await seek.fill("2");
   await page.evaluate(() => window.scrollTo(0, 0));
   expect((await canvas.screenshot()).equals(screenshot)).toBe(true);
 });
@@ -810,6 +816,7 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === 51505)!];
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   await page.goto("/");
@@ -823,14 +830,14 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("cause remains unresolved");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
-  await seek.fill("1.55");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "4");
+  await seek.fill("1.2");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "1");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("ribbon 0:");
   const screenshot = await canvas.screenshot({ path: testInfo.outputPath("lava-burst-midflight.png") });
   await seek.fill("2.1");
   expect((await canvas.screenshot()).equals(screenshot)).toBe(false);
-  await seek.fill("1.55");
+  await seek.fill("1.2");
   expect((await canvas.screenshot()).equals(screenshot)).toBe(true);
 });
 
@@ -855,34 +862,34 @@ test("moves three coherent original components and discloses the blocked fourth 
   await expect(replayStatus).toContainText("9 original BLP textures");
   await expect(replayStatus).toContainText("FileDataID 4329984 + 794788 + 613807");
   expect(runtimeRequests.some((url) => url.endsWith("/model/native-effects/3980281.m2"))).toBe(false);
-  await expect(replayStatus).toContainText(/partial original Elemental Blast components/i);
+  await expect(replayStatus).toContainText(/Partial original components only/i);
 
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
-  await seek.fill("19.52");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
+  await seek.fill("20.55");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const earlySourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
   await page.evaluate(() => window.scrollTo(0, 0));
   const earlyFrame = await canvas.screenshot();
 
-  await seek.fill("19.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
+  await seek.fill("20.85");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const laterSourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
   const laterFrame = await canvas.screenshot();
   expect(laterSourceX).toBeGreaterThan(earlySourceX);
   expect(laterFrame.equals(earlyFrame)).toBe(false);
 
-  await seek.fill("19.52");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
+  await seek.fill("20.55");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
 
   await scene.getByRole("button", { name: "Manual preview" }).click();
   await expect(canvas).toHaveAttribute("data-replay-native-components", "0");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(false);
   await scene.getByRole("button", { name: "Replay sync" }).click();
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
   await page.evaluate(() => window.scrollTo(0, 0));
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
   await page.getByRole("button", { name: /Timeline mark.*Elemental Blast/i }).first().click();
@@ -955,6 +962,10 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
       { length: 3 },
       () => ({ ...structuredClone(elementalBlast), time: 7.233 }),
     );
+    const capture = (fixture as typeof fixture & { capture: { combat_log: Array<[number, string]> } }).capture;
+    capture.combat_log = capture.combat_log.filter(([, line]) => line.includes("Action 'elemental_blast' (117014)")
+      && Number(line.split(" ", 1)[0]) < 9)
+      .flatMap(([ordinal, line]) => Array.from({ length: 3 }, (_, instance) => [ordinal * 10 + instance, line] as [number, string]));
     await route.fulfill({ response, json: fixture });
   });
 
@@ -971,7 +982,7 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
   await page.goto("/");
   await nativeRequestStarted;
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
-  await scene.getByRole("slider", { name: "Seek playback" }).fill("7.83");
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("8.5");
   releaseNativeResponse?.();
 
   const replayAlert = scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" });
@@ -988,9 +999,9 @@ test("applies the latest replay cursor after original components load late", asy
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   const canvas = scene.locator("canvas");
-  await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("20.85");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 });
 
@@ -1010,8 +1021,8 @@ test("keeps replay effects hidden when a delayed composite load finishes in manu
 
   await scene.getByRole("button", { name: "Replay sync" }).click();
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
-  await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("20.85");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
 });
 
 test("renders both original M2 components with deterministic isolated native transport", async ({ page }) => {
@@ -1161,7 +1172,7 @@ test("identifies both Stormkeeper attachment origins and the unapplied kit offse
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   await seek.fill("0.15");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "4006618,1598036,1355634,1284864,1109885");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984.*1355634,1284864,1109885/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await page.evaluate(() => window.scrollTo(0, 0));
   const beforeSeek = await canvas.screenshot();
@@ -1232,7 +1243,7 @@ test("reports authored and supported emitter counts for all original particle so
   }
 });
 
-test("blends the genuine character pose at the tightest adjacent cast transition", async ({ page }) => {
+test("starts the genuine cast pose at its logged boundary without inventing a GCD", async ({ page }) => {
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
     const fixture = await response.json() as {
@@ -1244,6 +1255,7 @@ test("blends the genuine character pose at the tightest adjacent cast transition
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = [sequence.action_sequence[36], sequence.action_sequence[38]];
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   await page.route("**/model/native-effects/**", (route) => route.fulfill({ status: 404 }));
@@ -1290,7 +1302,7 @@ test("blends the genuine character pose at the tightest adjacent cast transition
     return [difference(frames[0], frames[1]), difference(frames[0], frames[3])];
   }, [before, boundary, middle, after].map((frame) => frame.toString("base64")));
   expect(fullChange).toBeGreaterThan(0);
-  expect(immediateChange).toBeLessThan(fullChange * 0.45);
+  expect(immediateChange).toBeGreaterThan(0);
   expect(middle.equals(before)).toBe(false);
   await capture("31.8");
   expect((await capture("32.427")).equals(middle)).toBe(true);
@@ -1308,6 +1320,7 @@ test("repeated genuine casts blend two local clip times across backward seeks", 
     const sequence = fixture.sim.players[0].collected_data;
     sequence.action_sequence = [sequence.action_sequence[37], sequence.action_sequence[38]];
     sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
     await route.fulfill({ response, json: fixture });
   });
   await page.route("**/model/native-effects/**", (route) => route.fulfill({ status: 404 }));

@@ -16,13 +16,11 @@ import {
   frameModels,
   getReplayEffectAnchors,
   getReplayEffectSourceAnchor,
-  getReplayPlaybackEndTime,
-  isReplayClipMissing,
-  resolveReplayAnimation,
-  resolveReplayEffectOccurrences,
-  resolveReplayMotionBlend,
+  resolveLoggedEffectOccurrences,
+  resolveLoggedAnimation,
+  getLoggedPlaybackEndTime,
 } from "./GenuineModelScene";
-import { parseReplayReport, type ReplayEvent } from "./replay";
+import { parseReplayReport } from "./replay";
 import { NATIVE_EFFECT_ASSETS } from "./nativeEffectAssets";
 import { blendBoneMatrices } from "./m2/sampler";
 
@@ -106,75 +104,40 @@ describe("ranged scene layout", () => {
   });
 });
 
-function makeAction(overrides: Partial<ReplayEvent> = {}): ReplayEvent {
-  return {
-    key: "combat-0",
-    phase: "combat",
-    phaseIndex: 0,
-    time: 4,
-    kind: "action",
-    name: "lightning_bolt",
-    spellName: "Lightning Bolt",
-    id: 188196,
-    target: "Fluffy_Pillow",
-    queueFailed: false,
-    wait: null,
-    resources: null,
-    buffs: null,
-    cooldowns: null,
-    targets: null,
-    ...overrides,
-  };
-}
-
-describe("Elemental Blast native replay", () => {
-  it("uses the exact successful combat source prefix and keeps prior flights across later records", () => {
-    const precombat = makeAction({ key: "precombat-0", phase: "precombat", time: 0, id: 117014, name: "elemental_blast" });
-    const first = makeAction({ key: "combat-0", phaseIndex: 0, time: 1, id: 117014, name: "elemental_blast" });
-    const wrongId = makeAction({ key: "combat-1", phaseIndex: 1, time: 1, id: 188196, name: "elemental_blast" });
-    const wrongName = makeAction({ key: "combat-2", phaseIndex: 2, time: 1, id: 117014, name: "lightning_bolt" });
-    const failed = makeAction({ key: "combat-3", phaseIndex: 3, time: 1, id: 117014, name: "elemental_blast", queueFailed: true });
-    const wait = makeAction({ key: "combat-4", phaseIndex: 4, time: 1, kind: "wait", name: "Wait", spellName: null, id: null, queueFailed: null, wait: 0.1 });
-    const repeated = makeAction({ key: "combat-5", phaseIndex: 5, time: 1, id: 117014, name: "elemental_blast" });
-    const laterUnrelated = makeAction({ key: "combat-6", phaseIndex: 6, time: 1.1, id: 1236616, name: "potion" });
-    const events = [precombat, first, wrongId, wrongName, failed, wait, repeated, laterUnrelated];
-    expect(resolveReplayEffectOccurrences(events, 0, 1.3)).toEqual([]);
-    expect(resolveReplayEffectOccurrences(events, 1, 0.99)).toEqual([]);
-    expect(resolveReplayEffectOccurrences(events, 1, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0"]);
-    expect(resolveReplayEffectOccurrences(events, 5, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0"]);
-    expect(resolveReplayEffectOccurrences(events, 6, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0", "combat-5"]);
-    expect(resolveReplayEffectOccurrences(events, 7, 1.3).map((effect) => effect.eventKey)).toEqual(["combat-0", "combat-5"]);
+describe("logged native replay scheduling", () => {
+  const timeline = parseReplayReport(officialFixture).combatTimeline!;
+  it("holds precast until the logged finish and leaves overloads out of the foreground pose", () => {
+    expect(resolveLoggedAnimation(timeline, 3).kind).toBe("motion");
+    expect(resolveLoggedAnimation(timeline, 3).eventLabel).toBe("Lava Burst");
+    expect(resolveLoggedAnimation(timeline, 0.5).eventLabel).not.toMatch(/overload/);
+    expect(resolveLoggedAnimation(timeline, 3.66).kind).not.toBe("motion");
   });
-
-  it("uses deterministic release, arrival, and authored-lifespan decay boundaries", () => {
-    const event = makeAction({ key: "combat-0", phaseIndex: 0, time: 4, id: 117014, name: "elemental_blast" });
-    expect(resolveReplayEffectOccurrences([event], 0, 4.1999)).toEqual([]);
-    expect(resolveReplayEffectOccurrences([event], 0, 4.2)).toEqual([{
-      eventKey: "combat-0",
-      eventTime: 4,
-      elapsedSeconds: 0.2,
-      componentTimeSeconds: 0,
-      spellId: 117014,
-      components: [{ fileDataId: 4329984, anchor: "projectile" }, { fileDataId: 794788, anchor: "projectile" }, { fileDataId: 613807, anchor: "projectile" }],
-    }]);
-    expect(resolveReplayEffectOccurrences([event], 0, 5)[0]).toMatchObject({ componentTimeSeconds: 0.8 });
-    const finalDecaySample = resolveReplayEffectOccurrences([event], 0, 6.5);
-    expect(finalDecaySample).toHaveLength(1);
-    expect(resolveReplayEffectOccurrences([event], 0, 6.5001)).toEqual([]);
-    expect(resolveReplayEffectOccurrences([event], 0, 5)).toEqual(resolveReplayEffectOccurrences([event], 0, 5));
+  it("releases at finish, flies until hit, then shows impact only after hit", () => {
+    const before = resolveLoggedEffectOccurrences(timeline, 3.649).filter((effect) => effect.spellId === 51505 && effect.eventTime === 3.65);
+    expect(before.some((effect) => effect.components.some((component) => component.anchor === "projectile"))).toBe(false);
+    const flight = resolveLoggedEffectOccurrences(timeline, 3.95).find((effect) => effect.spellId === 51505 && effect.eventTime === 3.65)!;
+    expect(flight.components.some((component) => component.anchor === "projectile")).toBe(true);
+    expect(flight.components.some((component) => component.anchor === "target")).toBe(false);
+    expect(flight.componentTimeSeconds).toBeCloseTo(0.3);
+    const impact = resolveLoggedEffectOccurrences(timeline, 4.25).find((effect) => effect.spellId === 51505 && effect.eventTime === 3.65)!;
+    expect(impact.components.some((component) => component.anchor === "target")).toBe(true);
+    expect(impact.components.some((component) => component.anchor === "projectile")).toBe(false);
   });
-
-  it("extends only a supported final effect beyond the existing motion tail", () => {
-    const earlierElementalBlast = makeAction({ key: "combat-0", phaseIndex: 0, time: 4, id: 117014, name: "elemental_blast" });
-    const laterUnrelated = makeAction({ key: "combat-1", phaseIndex: 1, time: 10, id: 1236616, name: "potion" });
-    const lateElementalBlast = makeAction({ key: "combat-0", phaseIndex: 0, time: 9, id: 117014, name: "elemental_blast" });
-
-    expect(getReplayPlaybackEndTime([])).toBe(0);
-    expect(getReplayPlaybackEndTime([earlierElementalBlast, laterUnrelated])).toBeCloseTo(11.2);
-    expect(getReplayPlaybackEndTime([lateElementalBlast, laterUnrelated])).toBeCloseTo(11.5);
-    expect(getReplayPlaybackEndTime([{ ...lateElementalBlast, queueFailed: true }, laterUnrelated])).toBeCloseTo(11.2);
+  it("preserves aura visibility until loss and uses the final logged hit for playback bounds", () => {
+    expect(resolveLoggedEffectOccurrences(timeline, 3.6).some((effect) => effect.spellId === 191634)).toBe(true);
+    expect(resolveLoggedEffectOccurrences(timeline, 3.655).some((effect) => effect.spellId === 191634)).toBe(false);
+    expect(getLoggedPlaybackEndTime(timeline)).toBeGreaterThan(45);
   });
+  it("keeps unmatched events seekable without inventing an execution", () => {
+    expect(getLoggedPlaybackEndTime({ ...timeline, unmatched: [
+      ...timeline.unmatched, { ordinal: 9999, time: 50, actor: "Enemy", kind: "impact" },
+    ] })).toBe(50);
+    expect(resolveLoggedAnimation(timeline, 3.5)).toEqual(resolveLoggedAnimation(timeline, 3.5));
+    expect(resolveLoggedEffectOccurrences(timeline, 3.95)).toEqual(resolveLoggedEffectOccurrences(timeline, 3.95));
+  });
+});
 
+describe("native replay anchor placement", () => {
   it("derives neutral flight anchors from the arranged model bounds", () => {
     const vulpera = createModel(2, 4, 2);
     const trainingDummy = createModel(2.4, 5, 2);
@@ -230,179 +193,7 @@ describe("published replay attachment placement", () => {
   });
 });
 
-describe("remaining original replay components", () => {
-  it("shows self-applied precombat components at the caster without a release or travel window", () => {
-    const self = makeAction({ key: "precombat-0", phase: "precombat", time: 0, id: 318038, name: "flametongue_weapon" });
-    const later = makeAction({ key: "combat-0", time: 0.4, id: 188196, name: "lightning_bolt" });
-    expect(resolveReplayEffectOccurrences([self, later], 0, 0.1)).toEqual([expect.objectContaining({
-      eventKey: "precombat-0", spellId: 318038, componentTimeSeconds: 0.1,
-      components: [{ fileDataId: 4006618, anchor: "caster" }],
-    })]);
-    expect(resolveReplayEffectOccurrences([self, later], 1, 1.71).some((occurrence) => occurrence.spellId === 318038)).toBe(false);
-  });
-
-  it("flies the original Lava Burst missile while keeping its cast and impact components", () => {
-    const cast = makeAction({ time: 4, id: 51505, name: "lava_burst" });
-    const lightning = makeAction({ key: "combat-1", time: 4.2, id: 188196, name: "lightning_bolt" });
-    const flame = makeAction({ key: "combat-2", time: 4.4, id: 188389, name: "flame_shock" });
-    const occurrences = resolveReplayEffectOccurrences([cast, lightning, flame], 2, 4.5);
-    expect(occurrences).toEqual([
-      expect.objectContaining({ spellId: 51505, componentTimeSeconds: 0.5, components: [
-        { fileDataId: 4006621, anchor: "caster" },
-        { fileDataId: 4329984, anchor: "projectile" },
-        { fileDataId: 4006618, anchor: "target" },
-        { fileDataId: 3980244, anchor: "target" },
-      ] }),
-      expect.objectContaining({ spellId: 188196, componentTimeSeconds: 0.3, components: [
-        { fileDataId: 6211618, anchor: "caster" }, { fileDataId: 6211617, anchor: "projectile" },
-        { fileDataId: 1571475, anchor: "target" },
-      ] }),
-      expect.objectContaining({ spellId: 188389, componentTimeSeconds: 0.1, components: [
-        { fileDataId: 4006618, anchor: "target" }, { fileDataId: 3980244, anchor: "target" },
-        { fileDataId: 4392095, anchor: "target" }, { fileDataId: 4050773, anchor: "target" },
-      ] }),
-    ]);
-    expect(resolveReplayEffectOccurrences([cast], 0, 4.1)).toEqual(resolveReplayEffectOccurrences([cast, lightning, flame], 0, 4.1));
-    expect(resolveReplayEffectOccurrences([cast, lightning, flame], 2, 4.5)).toEqual(occurrences);
-    expect(resolveReplayEffectOccurrences([cast, lightning, flame], 2, 7)).toEqual([]);
-    expect(resolveReplayEffectOccurrences([cast, lightning, flame], 2, 4.5)).toEqual(occurrences);
-  });
-
-  it("keeps four overlapping Lightning Bolt cast, missile, and impact components through 2.50 seconds", () => {
-    const bolts = [0, 0.4, 0.9, 1.4].map((time, index) => makeAction({
-      key: `bolt-${index}`, time, id: 188196, name: "lightning_bolt",
-    }));
-    expect(resolveReplayEffectOccurrences(bolts, 3, 2.45)).toHaveLength(4);
-    expect(resolveReplayEffectOccurrences(bolts, 3, 2.55)).toHaveLength(3);
-  });
-
-  it("measures four overlapping Lightning Bolt occurrences from the bundled trace", () => {
-    const events = parseReplayReport(officialFixture).actors[0].events;
-    const boltEvents = events.filter((event) => event.id === 188196 && event.queueFailed === false);
-    const concurrentCounts = boltEvents.map((event) => resolveReplayEffectOccurrences(
-      events, events.indexOf(event), event.time,
-    ).filter((occurrence) => occurrence.spellId === 188196).length);
-    expect(boltEvents).toHaveLength(24);
-    expect(Math.max(...concurrentCounts)).toBe(4);
-  });
-
-  it("keeps Ancestral Swiftness without a replay component when its mesh shader is unsupported", () => {
-    const absent = makeAction({ id: 443454, name: "ancestral_swiftness", time: 4 });
-    const failed = makeAction({ id: 188196, name: "lightning_bolt", queueFailed: true });
-    const wait = makeAction({ kind: "wait", id: null, name: "wait", queueFailed: null });
-    const mismatched = makeAction({ id: 51505, name: "lightning_bolt" });
-    expect(resolveReplayEffectOccurrences([absent, failed, wait, mismatched], 3, 4.5)).toEqual([]);
-    expect(getReplayPlaybackEndTime([absent])).toBe(5.2);
-    expect(getReplayPlaybackEndTime([makeAction({ phase: "precombat", id: 318038, name: "flametongue_weapon", time: 0 })])).toBe(1.7);
-    expect(getReplayPlaybackEndTime([makeAction({ id: 191634, name: "stormkeeper", time: 4 })])).toBe(5.7);
-    expect(getReplayPlaybackEndTime([makeAction({ id: 188196, name: "lightning_bolt", time: 4 })])).toBe(6.5);
-  });
-});
-
-describe("resolveReplayAnimation", () => {
-  it.each([
-    [318038, "flametongue_weapon", 54, "SpellCastOmni (ID 54 variation 0)"],
-    [192106, "lightning_shield", 862, "ShaSpellPrecastBothChannel (ID 862 variation 0)"],
-    [191634, "stormkeeper", 828, "ShaSpellPrecastBoth (ID 828 variation 0)"],
-    [443454, "ancestral_swiftness", 54, "SpellCastOmni (ID 54 variation 0)"],
-    [1219480, "ascendance", 1448, "ChannelCastOmniUp (ID 1448 variation 0)"],
-    [51505, "lava_burst", 1148, "CastStrongUpRight (ID 1148 variation 0)"],
-    [188196, "lightning_bolt", 830, "ShaSpellCastBothFront (ID 830 variation 0)"],
-    [117014, "elemental_blast", 1122, "CastOutStrong (ID 1122 variation 0)"],
-    [188389, "flame_shock", 53, "SpellCastDirected (ID 53 variation 0)"],
-  ])("maps fixture spell %i to native animation %i", (id, name, animationId, clipName) => {
-    const event = makeAction({ id, name, spellName: name.replaceAll("_", " "), time: 2 });
-
-    const resolution = resolveReplayAnimation([event], 0, 2.4);
-    expect(resolution).toMatchObject({ kind: "motion", clipName, animationId });
-    expect(resolution.clipTime).toBeCloseTo(0.4);
-  });
-
-  it("keeps waits, failed queues, unsupported actions, future records, and settled gaps idle", () => {
-    const wait = makeAction({ kind: "wait", name: "Wait", spellName: null, id: null, queueFailed: null, wait: 0.5 });
-    const failed = makeAction({ queueFailed: true });
-    const unsupported = makeAction({ id: 1236616, name: "potion", spellName: "Light's Potential" });
-    const mapped = makeAction();
-
-    expect(resolveReplayAnimation([wait], 0, 4)).toMatchObject({ kind: "wait", clipTime: 0 });
-    expect(resolveReplayAnimation([failed], 0, 4)).toMatchObject({ kind: "failed", clipTime: 0 });
-    expect(resolveReplayAnimation([unsupported], 0, 4)).toMatchObject({ kind: "unmapped", clipTime: 0 });
-    expect(resolveReplayAnimation([mapped], 0, 3.99)).toMatchObject({ kind: "before", clipTime: 0 });
-    expect(resolveReplayAnimation([mapped], 0, 5.2)).toMatchObject({ kind: "settled", clipTime: 0 });
-  });
-
-  it("settles at the rounded final viewer-tail boundary", () => {
-    const finalEvent = makeAction({ time: 44.213 });
-
-    expect(resolveReplayAnimation([finalEvent], 0, 45.413).kind).toBe("settled");
-  });
-
-  it("returns the same pose sample after backward seeks and resets repeats at their own timestamps", () => {
-    const first = makeAction({ key: "combat-0", phaseIndex: 0, time: 1 });
-    const repeated = makeAction({ key: "combat-1", phaseIndex: 1, time: 3 });
-    const firstPose = resolveReplayAnimation([first, repeated], 0, 1.45);
-
-    const repeatedPose = resolveReplayAnimation([first, repeated], 1, 3.2);
-    expect(repeatedPose.kind).toBe("motion");
-    expect(repeatedPose.clipTime).toBeCloseTo(0.2);
-    expect(resolveReplayAnimation([first, repeated], 0, 1.45)).toEqual(firstPose);
-  });
-
-  it("reports a missing mapped clip instead of silently substituting a cast", () => {
-    const resolution = resolveReplayAnimation([makeAction()], 0, 4.2);
-
-    expect(isReplayClipMissing(resolution, ["Stand (ID 0 variation 0)"])).toBe(true);
-    expect(isReplayClipMissing(resolution, [resolution.clipName])).toBe(false);
-  });
-});
-
-describe("replay motion transitions", () => {
-  it("blends cast to cast at the shortest fixture gap without stealing most of either motion", () => {
-    const first = makeAction({ time: 31.598, id: 443454, name: "ancestral_swiftness" });
-    const second = makeAction({ key: "combat-1", phaseIndex: 1, time: 32.352, id: 188196, name: "lightning_bolt" });
-    const events = [first, second];
-    const boundary = resolveReplayMotionBlend(events, 1, 32.352);
-    const middle = resolveReplayMotionBlend(events, 1, 32.427);
-    const completed = resolveReplayMotionBlend(events, 1, 32.502);
-
-    expect(boundary.incoming.kind).toBe("motion");
-    expect(boundary.incomingWeight).toBe(0);
-    expect(middle.incomingWeight).toBeCloseTo(0.5);
-    expect(middle.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.829, 3) });
-    expect(middle.incoming.clipTime).toBeCloseTo(0.075);
-    expect(completed.outgoing).toBeNull();
-    expect(completed.incomingWeight).toBe(1);
-    expect(resolveReplayMotionBlend(events, 1, 32.427)).toEqual(middle);
-    const repeated = [makeAction({ time: 31.598 }), makeAction({ key: "combat-1", time: 32.352 })];
-    const repeatedBlend = resolveReplayMotionBlend(repeated, 1, 32.427);
-    expect(repeatedBlend.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.829, 3) });
-    expect(repeatedBlend.incoming).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.075, 3) });
-    expect(repeatedBlend.outgoing?.clipName).toBe(repeatedBlend.incoming.clipName);
-    resolveReplayMotionBlend(events, 1, 34);
-    expect(resolveReplayMotionBlend(events, 1, 32.427)).toEqual(middle);
-  });
-
-  it("blends stand into a cast and casts into settled stand, but keeps idle resolution semantics", () => {
-    const event = makeAction();
-    const start = resolveReplayMotionBlend([event], 0, 4.075);
-    expect(start.incoming.kind).toBe("motion");
-    expect(start.outgoing).toMatchObject({ kind: "before", clipName: "Stand (ID 0 variation 0)" });
-    expect(start.incomingWeight).toBeCloseTo(0.5);
-    const settle = resolveReplayMotionBlend([event], 0, 5.275);
-    expect(settle.incoming.kind).toBe("settled");
-    expect(settle.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(1.275, 3) });
-    expect(settle.incomingWeight).toBeCloseTo(0.5);
-    expect(resolveReplayMotionBlend([event], 0, 5.35).incoming.kind).toBe("settled");
-    expect(resolveReplayMotionBlend([event], 0, 3.99).incoming.kind).toBe("before");
-    for (const changed of [
-      makeAction({ kind: "wait", name: "Wait", id: null, queueFailed: null }),
-      makeAction({ queueFailed: true }),
-      makeAction({ id: 1236616, name: "potion" }),
-    ]) {
-      expect(resolveReplayMotionBlend([changed], 0, 4.5).incoming.clipName).toBe("Stand (ID 0 variation 0)");
-    }
-  });
-
+describe("native pose blending", () => {
   it("blends two native poses deterministically from the resolved pair alone", () => {
     const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     const raised = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 2, 0, 1];
@@ -418,33 +209,7 @@ describe("replay motion transitions", () => {
   });
 });
 
-describe("original missile fallback", () => {
-  it("maps the coherent shared missile into both spells without substituting the blocked body", () => {
-    const lava = makeAction({ id: 51505, name: "lava_burst" });
-    const blast = makeAction({ id: 117014, name: "elemental_blast" });
-    expect(resolveReplayEffectOccurrences([lava], 0, 4.5)[0].components
-      .filter((component) => component.anchor === "projectile").map((component) => component.fileDataId))
-      .toEqual([4329984]);
-    expect(resolveReplayEffectOccurrences([blast], 0, 4.5)[0].components.map((component) => component.fileDataId))
-      .toEqual([4329984, 794788, 613807]);
-    expect(resolveReplayEffectOccurrences([{ ...blast, phase: "precombat" }], 0, 4.5)).toEqual([]);
-  });
-
-  it("measures the shared three-slot and unique two-slot bounds from the public trace", () => {
-    const events = parseReplayReport(officialFixture).actors[0].events;
-    const missiles = events.filter((event) => (event.id === 51505 || event.id === 117014) && event.queueFailed === false);
-    expect(missiles.filter((event) => event.id === 51505)).toHaveLength(12);
-    expect(missiles.filter((event) => event.id === 117014)).toHaveLength(8);
-    const samples = missiles.flatMap((event) => [event.time + 0.2, event.time + 2.5]);
-    const counts = samples.map((time) => {
-      const active = resolveReplayEffectOccurrences(events, events.length - 1, time);
-      return [51505, 117014].map((spellId) => active.filter((effect) => effect.spellId === spellId).length);
-    });
-    expect(Math.max(...counts.map(([lava, blast]) => lava))).toBe(2);
-    expect(Math.max(...counts.map(([lava, blast]) => blast))).toBe(2);
-    expect(Math.max(...counts.map(([lava, blast]) => lava + blast))).toBe(3);
-  });
-
+describe("native missile assets", () => {
   it("pins authored scales for the renderable missiles without loading rejected body 3980281", () => {
     expect([4329984, 794788, 613807].map((fileDataId) =>
       [fileDataId, NATIVE_EFFECT_ASSETS.find((asset) => asset.fileDataId === fileDataId)?.effectNameScale]))

@@ -1,3 +1,5 @@
+import { buildCombatTimeline, parseCombatLog, type CombatTimeline } from "./combatLog";
+
 export type ReplayPhase = "precombat" | "combat";
 
 export interface ResourceSnapshot {
@@ -59,6 +61,8 @@ export interface ReplayReport {
   simulationIterations: number | null;
   actors: ReplayActor[];
   diagnostics: Array<{ level: string; message: string }>;
+  combatTimeline: CombatTimeline | null;
+  capture: { profile: string; profileSha256: string; engineRevision: string; seed: number } | null;
 }
 
 export class ReplayValidationError extends Error {
@@ -383,6 +387,28 @@ export function parseReplayReport(input: unknown): ReplayReport {
     simulationIterations: optionalFiniteNumber(options.iterations, "report.sim.options.iterations"),
     actors,
     diagnostics: parseDiagnostics(root.logs),
+    combatTimeline: root.capture === undefined ? null : buildCombatTimeline(parseCombatLog(
+      requireArray(requireRecord(root.capture, "report.capture").combat_log, "report.capture.combat_log")
+        .map((entry, index) => {
+          const pair = requireArray(entry, `report.capture.combat_log[${index}]`);
+          if (pair.length !== 2 || !Number.isInteger(pair[0])) throw new ReplayValidationError(`report.capture.combat_log[${index}] requires a source ordinal and line.`);
+          return [requireFiniteNumber(pair[0], `report.capture.combat_log[${index}][0]`),
+            requireString(pair[1], `report.capture.combat_log[${index}][1]`)] as [number, string];
+        }),
+    )),
+    capture: root.capture === undefined ? null : (() => {
+      const capture = requireRecord(root.capture, "report.capture");
+      const engineRevision = requireString(capture.engine_revision, "report.capture.engine_revision");
+      const seed = requireFiniteNumber(capture.seed, "report.capture.seed");
+      if (root.git_revision !== engineRevision.slice(0, String(root.git_revision).length) || seed !== options.seed) {
+        throw new ReplayValidationError("Capture engine revision or seed does not match its report.");
+      }
+      return {
+        profile: requireString(capture.profile, "report.capture.profile"),
+        profileSha256: requireString(capture.profile_sha256, "report.capture.profile_sha256"),
+        engineRevision, seed,
+      };
+    })(),
   };
 }
 

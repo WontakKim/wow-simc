@@ -680,6 +680,21 @@ figcaption {
   content: "";
 }
 
+ .logged-mark {
+  position: absolute;
+  z-index: 2;
+  top: 107px;
+  width: 4px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  background: var(--text-muted);
+  cursor: pointer;
+}
+.logged-mark.logged-cast-start { top: 99px; background: var(--accent); }
+.logged-mark.logged-impact { top: 115px; background: var(--failed); }
+.logged-mark:focus-visible { z-index: 5; outline: 2px solid var(--text); }
+
 .event-hit-target {
   position: absolute;
   z-index: 4;

@@ -4,16 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./GenuineModelScene", () => ({
-  ILLUSTRATIVE_MOTION_WINDOW_SECONDS: 1.2,
-  getReplayPlaybackEndTime: (events: Array<{ phase: string; time: number; kind: string; id: number | null; name: string; queueFailed: boolean | null }>) => {
-    const combatEvents = events.filter((event) => event.phase === "combat");
-    if (combatEvents.length === 0) return 0;
-    const lastCombatTime = Math.max(...combatEvents.map((event) => event.time));
-    const lastEffectEnd = Math.max(0, ...combatEvents
-      .filter((event) => event.kind === "action" && event.id === 117014 && event.name === "elemental_blast" && event.queueFailed === false)
-      .map((event) => event.time + 2.5));
-    return Math.round(Math.max(lastCombatTime + 1.2, lastEffectEnd) * 1_000_000) / 1_000_000;
-  },
+  getLoggedPlaybackEndTime: (timeline: { occurrences: Array<{ castFinish: number | null; impacts: Array<{ time: number }> }> }) =>
+    Math.max(0, ...timeline.occurrences.flatMap((occurrence) => occurrence.impacts.map((impact) => impact.time + 1.5))),
   GenuineModelScene: ({ replay }: {
     replay?: {
       selectedIndex: number;
@@ -284,7 +276,6 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Play" }));
     await act(async () => { nextFrame?.(2000); });
     await act(async () => { nextFrame?.(4000); });
-    await act(async () => { nextFrame?.(5000); });
     expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
     expect(within(screen.getByTestId("selected-event")).getByText("Last Combat")).toBeInTheDocument();
   });
@@ -311,7 +302,7 @@ describe("App", () => {
     expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 1.00s · 2×");
 
     await act(async () => { nextFrame?.(2600); });
-    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Last Combat · 3.20s · 2×");
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Last Combat · 2.00s · 2×");
     expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
 
     await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
@@ -323,13 +314,13 @@ describe("App", () => {
     expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
   });
 
-  it("extends playback by one illustrative motion window after the final record", async () => {
+  it("does not invent a motion tail for a report without combat-log timing", async () => {
     stubFixture(statefulReportFixture());
     render(<App />);
 
     const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
     const seek = await within(scene).findByRole("slider", { name: /seek playback/i });
-    expect(seek).toHaveAttribute("max", "3.2");
+    expect(seek).toHaveAttribute("max", "2");
   });
 
   it.each([

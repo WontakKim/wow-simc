@@ -9,7 +9,8 @@ import {
   ReplayValidationError,
   RecordedDuration,
 } from "./replay";
-import { GenuineModelScene, getReplayPlaybackEndTime, type ReplaySpeed } from "./GenuineModelScene";
+import { GenuineModelScene, getLoggedPlaybackEndTime, type ReplaySpeed } from "./GenuineModelScene";
+import type { CombatTimeline } from "./combatLog";
 import "./styles.css";
 
 function formatNumber(value: number | null, maximumFractionDigits = 0) {
@@ -130,15 +131,18 @@ function StateSnapshot({ event }: { event: ReplayEvent }) {
   );
 }
 
-function Timeline({ actor, selectedIndex, cursor, onSelect }: {
+function Timeline({ actor, timeline, selectedIndex, cursor, onSelect, onSeek }: {
   actor: ReplayActor;
+  timeline: CombatTimeline | null;
   selectedIndex: number;
   cursor: number;
   onSelect: (index: number) => void;
+  onSeek: (time: number) => void;
 }) {
   const combatEvents = actor.events.flatMap((event, index) => event.phase === "combat" ? [{ event, index }] : []);
   const precombatEvents = actor.events.flatMap((event, index) => event.phase === "precombat" ? [{ event, index }] : []);
-  const maxTime = Math.max(0, ...combatEvents.map(({ event }) => event.time));
+  const maxTime = Math.max(0, ...combatEvents.map(({ event }) => event.time),
+    ...(timeline?.occurrences.flatMap((occurrence) => occurrence.impacts.map((impact) => impact.time)) ?? []));
   const plotDuration = Math.max(maxTime, 0.001);
   const ticks = [0, 0.25, 0.5, 0.75, 1];
   const firstPrecombatTime = precombatEvents[0]?.event.time ?? 0;
@@ -158,6 +162,7 @@ function Timeline({ actor, selectedIndex, cursor, onSelect }: {
           <span><i className="key-action" />Action</span>
           <span><i className="key-wait" />Wait</span>
           <span><i className="key-failed" />Queue failed</span>
+          {timeline && <span>Logged cast start / finish / impact</span>}
         </div>
       </div>
 
@@ -212,9 +217,20 @@ function Timeline({ actor, selectedIndex, cursor, onSelect }: {
               </button>
             );
           })}
+          {timeline?.occurrences.flatMap((occurrence) => [
+            ...(occurrence.castStart === null ? [] : [{ kind: "cast start", time: occurrence.castStart }]),
+            ...(occurrence.castFinish === null ? [] : [{ kind: "cast finish", time: occurrence.castFinish }]),
+            ...occurrence.impacts.map((impact) => ({ kind: "impact", time: impact.time })),
+          ].map((moment, index) => (
+            <button type="button" className={`logged-mark logged-${moment.kind.replace(" ", "-")}`}
+              key={`${occurrence.key}-${moment.kind}-${index}`} style={{ left: `${moment.time / plotDuration * 100}%` }}
+              aria-label={`Logged ${moment.kind}: ${occurrence.actionName} at ${formatSeconds(moment.time)} (${occurrence.actorInstance})`}
+              title={`${occurrence.actionName} · ${moment.kind} ${formatSeconds(moment.time)} · ${occurrence.actorInstance}`}
+              onClick={() => onSeek(moment.time)} />
+          )))}
         </div>
       </div>
-      <figcaption>Each mark is a recorded action or wait entry, not inferred damage or a decision explanation.</figcaption>
+      <figcaption>Action marks show JSON snapshots; cast start, finish and impact marks show combat-log timing. No GCD is inferred.</figcaption>
     </figure>
   );
 }
@@ -252,6 +268,36 @@ function EventTable({ actor, selectedIndex, onSelect }: {
   );
 }
 
+function LoggedEventTable({ timeline, onSeek }: { timeline: CombatTimeline; onSeek: (time: number) => void }) {
+  return (
+    <section className="card event-table-card" aria-labelledby="logged-event-title">
+      <div className="card-heading"><div><h2 id="logged-event-title">Logged cast and impact events</h2>
+        <p>SimC text log · occurrences ordered by first source line, with linked impacts grouped · ancestor slots are presentation-only</p></div>
+        <span>{timeline.occurrences.length} occurrences</span></div>
+      <div className="table-wrap"><table>
+        <thead><tr><th>Actor instance</th><th>Action</th><th>Cast start</th><th>Finish</th><th>Flight</th><th>Impact</th></tr></thead>
+        <tbody>{[
+          ...timeline.occurrences.map((occurrence) => ({ ordinal: occurrence.ordinal, occurrence, unmatched: null })),
+          ...timeline.unmatched.map((unmatched) => ({ ordinal: unmatched.ordinal, occurrence: null, unmatched })),
+        ].sort((left, right) => left.ordinal - right.ordinal).map(({ ordinal, occurrence, unmatched }) => occurrence
+          ? <tr key={occurrence.key}>
+            <td>{occurrence.actorInstance}</td><td>{occurrence.actionName} ({occurrence.spellId}){occurrence.isBackground ? " · background" : ""}</td>
+            <td>{occurrence.castStart === null ? "Instant / not logged" : <button type="button" onClick={() => onSeek(occurrence.castStart!)}>{formatSeconds(occurrence.castStart)}</button>}</td>
+            <td>{occurrence.castFinish === null ? "Not logged" : <button type="button" onClick={() => onSeek(occurrence.castFinish!)}>{formatSeconds(occurrence.castFinish)}</button>}</td>
+            <td>{occurrence.travelDuration === null ? "—" : formatSeconds(occurrence.travelDuration)}</td>
+            <td>{occurrence.impacts.map((impact) => <button type="button" key={impact.ordinal} onClick={() => onSeek(impact.time)}>{formatSeconds(impact.time)} · {impact.result}</button>)}</td>
+          </tr>
+          : <tr key={`unmatched-${ordinal}`}>
+            <td>{unmatched!.actor}</td><td>{unmatched!.actionName} ({unmatched!.spellId}) · unmatched {unmatched!.kind} · source #{ordinal}</td>
+            <td>—</td><td>—</td><td>{unmatched!.duration === undefined ? "—" : formatSeconds(unmatched!.duration)}</td>
+            <td><button type="button" onClick={() => onSeek(unmatched!.time)}>{formatSeconds(unmatched!.time)} · {unmatched!.result ?? "not linked"}</button></td>
+          </tr>)}</tbody>
+      </table></div>
+      {timeline.unmatched.length > 0 && <p>{timeline.unmatched.length} unmatched travel/impact records retained in source order; no execution was invented.</p>}
+    </section>
+  );
+}
+
 export function App() {
   const [report, setReport] = useState<ReplayReport | null>(null);
   const [selectedActorId, setSelectedActorId] = useState<string | null>(null);
@@ -267,7 +313,8 @@ export function App() {
 
   const actor = report?.actors.find((candidate) => candidate.id === selectedActorId) ?? null;
   const selectedEvent = actor?.events[selectedIndex] ?? null;
-  const playbackEndTime = getReplayPlaybackEndTime(actor?.events ?? []);
+  const playbackEndTime = report?.combatTimeline ? getLoggedPlaybackEndTime(report.combatTimeline) :
+    Math.max(0, ...(actor?.events.map((event) => event.time) ?? []));
 
   const dpsSampleLabel = useMemo(() => {
     if (!actor || actor.aggregateDpsSamples === null) return "DPS sample count not recorded";
@@ -420,6 +467,7 @@ export function App() {
         <GenuineModelScene
           replay={actor && selectedEvent ? {
             events: actor.events,
+            timeline: report?.combatTimeline ?? null,
             selectedIndex,
             cursor,
             isPlaying,
@@ -437,7 +485,7 @@ export function App() {
           <div>
             <p className="eyebrow">Secondary sampled trace inspector</p>
             <h2 id="trace-inspector-title">Inspect what SimC recorded.</h2>
-            <p>The bundled reference opens automatically and drives the primary scene through one replay clock. Exported motions are illustrative; this tool does not simulate, optimize, infer damage or hit timing, or explain why an action was chosen.</p>
+            <p>The bundled reference opens automatically and drives the scene from one replay clock. Cast, flight, impact and aura times come from the paired SimC combat log; the native M2 motions and original partial visual components are not a complete spell reconstruction. This tool does not simulate or optimize.</p>
           </div>
           <div className="reference-note">
             <strong>Built-in reference</strong>
@@ -491,7 +539,7 @@ export function App() {
               <article className="metric-card"><span>Selected snapshot</span><strong>{formatSeconds(selectedEvent.time)}</strong><small>Playback cursor {formatSeconds(cursor)}</small></article>
             </section>
 
-            <Timeline actor={actor} selectedIndex={selectedIndex} cursor={cursor} onSelect={selectEvent} />
+            <Timeline actor={actor} timeline={report.combatTimeline} selectedIndex={selectedIndex} cursor={cursor} onSelect={selectEvent} onSeek={seek} />
 
             <section className="selected-event card" data-testid="selected-event" aria-labelledby="selected-event-title">
               <div className="event-index"><span>{selectedEvent.phase}</span><strong>{selectedIndex + 1}</strong><small>of {actor.events.length}</small></div>
@@ -517,6 +565,7 @@ export function App() {
             )}
 
             <EventTable actor={actor} selectedIndex={selectedIndex} onSelect={selectEvent} />
+            {report.combatTimeline && <LoggedEventTable timeline={report.combatTimeline} onSeek={seek} />}
           </>
         )}
       </div>

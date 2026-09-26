@@ -19,6 +19,7 @@ import {
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { ReplayEvent } from "./replay";
+import type { CombatTimeline } from "./combatLog";
 import {
   loadNativeParticleEffect,
   type NativeParticleEffect,
@@ -62,27 +63,7 @@ const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
 const STAND_CLIP_NAME = animationOptionLabel(STAND_ANIMATION_ID, 0);
 const CAMERA_FOV = 36;
-export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
-export const REPLAY_MOTION_BLEND_SECONDS = 0.15;
-export const REPLAY_EFFECT_RELEASE_SECONDS = 0.2;
-export const REPLAY_EFFECT_TRAVEL_SECONDS = 0.8;
-// SpellMisc 33331/89780 -> RangeIndex 5 -> SpellRange 5 RangeMax_0/_1 40;
-// SpellVisualMissile 28854/28867 -> SpellVisualEffectName 47399 BaseMissileSpeed 50, build 12.1.0.69933.
-const REPLAY_AUTHORED_MAX_RANGE_YARDS = 40;
-const REPLAY_AUTHORED_MISSILE_SPEED = 50;
-const REPLAY_DERIVED_TRAVEL_SECONDS = REPLAY_AUTHORED_MAX_RANGE_YARDS / REPLAY_AUTHORED_MISSILE_SPEED;
-
-function getReplayEffectTravelSeconds(spellId: number) {
-  return spellId === 51505 || spellId === 117014
-    ? REPLAY_DERIVED_TRAVEL_SECONDS : REPLAY_EFFECT_TRAVEL_SECONDS;
-}
-export const REPLAY_EFFECT_DECAY_SECONDS = 1.5;
-
-function getReplayEffectDurationSeconds(spellId: number) {
-  return REPLAY_EFFECT_RELEASE_SECONDS + getReplayEffectTravelSeconds(spellId) + REPLAY_EFFECT_DECAY_SECONDS;
-}
 const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
-const OTHER_REPLAY_EFFECT_DURATION_SECONDS = 1.7;
 const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
 type ReplayEffectAnchor = "caster" | "target" | "projectile";
 type ReplayComponent = { fileDataId: number; anchor: ReplayEffectAnchor };
@@ -91,7 +72,6 @@ interface ReplaySpellEffect {
   components: ReplayComponent[];
 }
 
-// Bounds are from overlapping 1.7s and 2.5s fixture windows.
 const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
   [318038, { actionName: "flametongue_weapon", components: [{ fileDataId: 4006618, anchor: "caster" }] }],
   [192106, { actionName: "lightning_shield", components: [{ fileDataId: 1598036, anchor: "caster" }] }],
@@ -106,9 +86,9 @@ const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
 
 // Shared component capacities include overlapping occurrences from more than one spell in the public fixture.
 const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
-  [794788, 2], [613807, 2], [4006618, 2], [1598036, 1],
-  [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 2],
-  [3980244, 2], [4329984, 3], [6211617, 4], [6211618, 4], [1571475, 4], [4392095, 1], [4050773, 1],
+  [794788, 2], [613807, 2], [4006618, 16], [1598036, 1],
+  [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 16],
+  [3980244, 16], [4329984, 16], [6211617, 16], [6211618, 16], [1571475, 16], [4392095, 1], [4050773, 1],
 ]);
 // SpellVisualMissile rows 28854 and 28867–28869 and SpellVisualKitModelAttach rows 321812/321824, build 12.1.0.69933.
 // Mapped to native M2 attachment ids on the caster model (21 SpellHandL, 22 SpellHandR, 34 Chest).
@@ -143,6 +123,9 @@ export interface ReplayEffectOccurrence {
   componentTimeSeconds: number;
   spellId: number;
   components: ReplayComponent[];
+  travelDuration?: number;
+  emissionDuration?: number;
+  sourceActor?: string;
 }
 
 export interface ReplayAnimationResolution {
@@ -163,6 +146,7 @@ export interface ReplayMotionBlend {
 
 export interface SceneReplayState {
   events: ReplayEvent[];
+  timeline: CombatTimeline | null;
   selectedIndex: number;
   cursor: number;
   isPlaying: boolean;
@@ -211,48 +195,89 @@ function roundReplayTime(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-export function resolveReplayEffectOccurrences(
-  events: ReplayEvent[],
-  selectedIndex: number,
-  cursor: number,
-): ReplayEffectOccurrence[] {
-  if (selectedIndex < 0 || selectedIndex >= events.length) return [];
-  return events.slice(0, selectedIndex + 1).flatMap((event) => {
-    const spell = getSupportedReplaySpell(event);
-    if (!spell || spell.components.length === 0) return [];
-    const isProjectile = event.id === 117014;
-    const release = isProjectile ? REPLAY_EFFECT_RELEASE_SECONDS : 0;
-    const duration = isProjectile || event.id === 51505 || event.id === 188196
-      ? getReplayEffectDurationSeconds(event.id!) : OTHER_REPLAY_EFFECT_DURATION_SECONDS;
-    const elapsedSeconds = roundReplayTime(cursor - event.time);
-    if (elapsedSeconds < release || elapsedSeconds > duration) return [];
-    return [{
-      eventKey: event.key,
-      eventTime: event.time,
-      elapsedSeconds,
-      componentTimeSeconds: roundReplayTime(elapsedSeconds - release),
-      spellId: event.id!,
-      components: spell.components,
-    }];
-  });
+const LOGGED_EFFECT_DECAY_SECONDS = 1.5;
+
+function getLoggedSpell(actionName: string) {
+  const family = actionName.replace(/(?:_overload)?_asc$|_overload$/, "");
+  return [...REPLAY_SPELL_EFFECTS.values()].find((spell) => spell.actionName === family);
 }
 
-export function getReplayPlaybackEndTime(events: ReplayEvent[]) {
-  const combatEvents = events.filter((event) => event.phase === "combat");
-  const lastCombatTime = Math.max(0, ...combatEvents.map((event) => event.time));
-  const lastEffectEnd = Math.max(
-    0,
-    ...events.map((event) => {
-      const spell = getSupportedReplaySpell(event);
-      if (!spell || spell.components.length === 0) return 0;
-      return event.time + (event.id === 117014 || event.id === 51505 || event.id === 188196
-        ? getReplayEffectDurationSeconds(event.id!) : OTHER_REPLAY_EFFECT_DURATION_SECONDS);
-    }),
-  );
-  return roundReplayTime(Math.max(
-    combatEvents.length > 0 ? lastCombatTime + ILLUSTRATIVE_MOTION_WINDOW_SECONDS : 0,
-    lastEffectEnd,
-  ));
+function getLoggedAssetIds(timeline: CombatTimeline | undefined): Set<number> {
+  return new Set(timeline
+    ? [...timeline.occurrences.filter((occurrence) => !/_ancestor|_elemental|_wolf|_guardian/.test(occurrence.actor))
+      .flatMap((occurrence) => getLoggedSpell(occurrence.actionName)?.components ?? []),
+      ...timeline.auras.flatMap((aura) => getLoggedSpell(aura.name)?.components ?? [])]
+      .map((component) => component.fileDataId)
+    : []);
+}
+
+export function resolveLoggedEffectOccurrences(timeline: CombatTimeline, cursor: number): ReplayEffectOccurrence[] {
+  const effects: ReplayEffectOccurrence[] = [];
+  for (const occurrence of timeline.occurrences) {
+    // No native pet actor is loaded. Do not move pet missiles to the player.
+    if (/_ancestor|_elemental|_wolf|_guardian/.test(occurrence.actor)) continue;
+    const spell = getLoggedSpell(occurrence.actionName);
+    if (!spell) continue;
+    const sourceActor = occurrence.actor;
+    const add = (components: ReplayComponent[], start: number | null, end: number, travelDuration?: number) => {
+      if (!components.length || start === null || cursor < start || cursor >= end) return;
+      effects.push({ eventKey: occurrence.key, eventTime: occurrence.castFinish ?? start,
+        elapsedSeconds: roundReplayTime(cursor - start), componentTimeSeconds: roundReplayTime(cursor - start),
+        spellId: occurrence.spellId, components, travelDuration, sourceActor });
+    };
+    const components = spell.components;
+    const impact = occurrence.impacts[0]?.time ?? null;
+    // Buff visuals follow their aura transitions below, not the execution's arbitrary tail.
+    if ([318038, 192106, 191634, 1219480].includes(occurrence.spellId)) continue;
+    const release = occurrence.castFinish;
+    add(components.filter((component) => component.anchor === "caster"),
+      occurrence.castStart ?? release, (release ?? 0) + 0.2);
+    add(components.filter((component) => component.anchor === "projectile"),
+      occurrence.travelStart, impact ?? (occurrence.travelStart ?? 0) + (occurrence.travelDuration ?? 0), occurrence.travelDuration ?? undefined);
+    if (impact !== null) add(components.filter((component) => component.anchor === "target"), impact, impact + LOGGED_EFFECT_DECAY_SECONDS);
+  }
+  const auraNames = new Set(["stormkeeper", "ascendance", "lightning_shield", "flametongue_weapon"]);
+  const state = new Map<string, { time: number; ordinal: number; spellId: number; name: string }>();
+  for (const aura of timeline.auras) {
+    if (!auraNames.has(aura.name) || aura.time > cursor) continue;
+    if (aura.stacks === 0) state.delete(`${aura.actor}/${aura.name}`);
+    else if (aura.transition === "gain" || aura.transition === "refresh") {
+      state.set(`${aura.actor}/${aura.name}`, { time: aura.time, ordinal: aura.ordinal, spellId: aura.spellId, name: aura.name });
+    }
+  }
+  for (const [actor, aura] of state) {
+    const spell = getLoggedSpell(aura.name);
+    if (!spell) continue;
+    const nextLoss = timeline.auras.find((event) => event.ordinal > aura.ordinal && event.name === aura.name
+      && `${event.actor}/${event.name}` === actor && event.stacks === 0)?.time;
+    effects.push({ eventKey: `aura-${aura.ordinal}`, eventTime: aura.time,
+      elapsedSeconds: roundReplayTime(cursor - aura.time), componentTimeSeconds: roundReplayTime(cursor - aura.time),
+      spellId: aura.spellId, components: spell.components, emissionDuration: (nextLoss ?? 45) - aura.time });
+  }
+  return effects;
+}
+
+export function getLoggedPlaybackEndTime(timeline: CombatTimeline) {
+  return Math.max(0, ...timeline.occurrences.flatMap((occurrence) => occurrence.impacts.map((impact) => impact.time + LOGGED_EFFECT_DECAY_SECONDS)),
+    ...timeline.occurrences.map((occurrence) => occurrence.castFinish ?? occurrence.castStart ?? 0),
+    ...timeline.auras.map((aura) => aura.time),
+    ...timeline.unmatched.map((event) => event.time));
+}
+
+export function resolveLoggedAnimation(timeline: CombatTimeline, cursor: number): ReplayAnimationResolution {
+  const current = timeline.occurrences.filter((occurrence) => !occurrence.isBackground
+    && occurrence.castFinish !== null && (occurrence.castStart ?? occurrence.castFinish) <= cursor
+    && cursor <= occurrence.castFinish).at(-1);
+  const mapped = current && ELEMENTAL_SHAMAN_ANIMATIONS.get(current.spellId);
+  if (!current || !mapped || !current.actionName.startsWith(mapped.actionName)) {
+    return { kind: "settled", eventLabel: "No active foreground cast", clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID, clipTime: 0, status: "Idle between logged casts; background procs do not restart the caster pose." };
+  }
+  return { kind: "motion", eventLabel: current.actionName.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" "),
+    clipName: animationOptionLabel(mapped.animationId, 0), animationId: mapped.animationId,
+    clipTime: cursor - (current.castStart ?? current.castFinish!),
+    status: current.castStart === null ? `Instant release at ${current.castFinish!.toFixed(3)}s (SimC log).`
+      : `Logged cast ${current.castStart.toFixed(3)}–${current.castFinish!.toFixed(3)}s; native pose holds at clip end until release.` };
 }
 
 export function getReplayEffectAnchors(caster: Group, target: Group) {
@@ -304,127 +329,8 @@ function describeReplayComponentAnchor(spellId: number, component: ReplayCompone
   return "60%-bounds anchored at caster (source attachment not established for this component)";
 }
 
-function sampleReplayEffectPath(caster: Vector3, target: Vector3, componentTimeSeconds: number, spellId: number) {
-  const progress = Math.max(0, Math.min(1, componentTimeSeconds / getReplayEffectTravelSeconds(spellId)));
-  return caster.clone().lerp(target, progress);
-}
-
 function threeToNative(value: Vector3): [number, number, number] {
   return threeToNativePoint(value.toArray());
-}
-
-export function resolveReplayAnimation(
-  events: ReplayEvent[],
-  selectedIndex: number,
-  cursor: number,
-): ReplayAnimationResolution {
-  const event = events[selectedIndex];
-  if (!event) {
-    return {
-      kind: "unavailable",
-      eventLabel: "No replay event",
-      clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID,
-      clipTime: 0,
-      status: "Replay sync is unavailable — idle.",
-    };
-  }
-
-  const eventLabel = getEventLabel(event);
-  if (cursor < event.time) {
-    return {
-      kind: "before",
-      eventLabel,
-      clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID,
-      clipTime: 0,
-      status: "The cursor is before this recorded action — idle.",
-    };
-  }
-  if (event.kind === "wait") {
-    return {
-      kind: "wait",
-      eventLabel,
-      clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID,
-      clipTime: 0,
-      status: "Recorded wait — idle; no cast motion.",
-    };
-  }
-  if (event.queueFailed) {
-    return {
-      kind: "failed",
-      eventLabel,
-      clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID,
-      clipTime: 0,
-      status: "Recorded queue failure — idle; no successful cast motion.",
-    };
-  }
-
-  const mappedAnimation = event.id === null ? undefined : ELEMENTAL_SHAMAN_ANIMATIONS.get(event.id);
-  if (!mappedAnimation || mappedAnimation.actionName !== event.name) {
-    return {
-      kind: "unmapped",
-      eventLabel,
-      clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID,
-      clipTime: 0,
-      status: "No supported native cast animation mapping — idle.",
-    };
-  }
-
-  const elapsed = cursor - event.time;
-  if (elapsed >= ILLUSTRATIVE_MOTION_WINDOW_SECONDS - 0.000001) {
-    return {
-      kind: "settled",
-      eventLabel,
-      clipName: STAND_CLIP_NAME,
-      animationId: STAND_ANIMATION_ID,
-      clipTime: 0,
-      status: "Illustrative motion window complete — idle.",
-    };
-  }
-
-  return {
-    kind: "motion",
-    eventLabel,
-    clipName: animationOptionLabel(mappedAnimation.animationId, 0),
-    animationId: mappedAnimation.animationId,
-    clipTime: elapsed,
-    status: "Illustrative native cast motion — not cast duration or hit timing.",
-  };
-}
-
-export function resolveReplayMotionBlend(
-  events: ReplayEvent[],
-  selectedIndex: number,
-  cursor: number,
-): ReplayMotionBlend {
-  const incoming = resolveReplayAnimation(events, selectedIndex, cursor);
-  const event = events[selectedIndex];
-  if (!event || incoming.kind === "before") return { incoming, outgoing: null, incomingWeight: 1 };
-
-  const boundary = incoming.kind === "settled"
-    ? event.time + ILLUSTRATIVE_MOTION_WINDOW_SECONDS
-    : event.time;
-  const elapsed = cursor - boundary;
-  if (elapsed < 0 || elapsed >= REPLAY_MOTION_BLEND_SECONDS) {
-    return { incoming, outgoing: null, incomingWeight: 1 };
-  }
-
-  const outgoingAtBoundary = incoming.kind === "settled"
-    ? resolveReplayAnimation(events, selectedIndex, boundary - 0.000002)
-    : resolveReplayAnimation(events, selectedIndex > 0 ? selectedIndex - 1 : selectedIndex, boundary - 0.000002);
-  const outgoingEvent = incoming.kind === "settled" ? event : events[selectedIndex - 1];
-  const outgoing = outgoingAtBoundary.kind === "motion" && outgoingEvent
-    ? { ...outgoingAtBoundary, clipTime: cursor - outgoingEvent.time }
-    : outgoingAtBoundary;
-  if (outgoing.clipName === incoming.clipName
-    && outgoing.clipTime === incoming.clipTime) {
-    return { incoming, outgoing: null, incomingWeight: 1 };
-  }
-  return { incoming, outgoing, incomingWeight: elapsed / REPLAY_MOTION_BLEND_SECONDS };
 }
 
 export function isReplayClipMissing(
@@ -559,11 +465,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const controllerRef = useRef<AnimationController | null>(null);
   const animationModeRef = useRef<AnimationMode>("replay");
-  const replayAnimationRef = useRef(resolveReplayMotionBlend(
-    replay?.events ?? [],
-    replay?.selectedIndex ?? -1,
-    replay?.cursor ?? 0,
-  ));
+  const replayAnimationRef = useRef<ReplayMotionBlend>({ incoming: resolveLoggedAnimation(replay?.timeline ?? { occurrences: [], auras: [], unmatched: [] }, replay?.cursor ?? 0), outgoing: null, incomingWeight: 1 });
   const [status, setStatus] = useState<SceneStatus>("loading");
   const [loadedModelCount, setLoadedModelCount] = useState(0);
   const [actorStatusLines, setActorStatusLines] = useState<string[]>([]);
@@ -591,11 +493,11 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const loadedNativeFileDataIdRef = useRef<number | null>(null);
   const replayStateRef = useRef(replay);
 
-  const replayMotionBlend = resolveReplayMotionBlend(
-    replay?.events ?? [],
-    replay?.selectedIndex ?? -1,
-    replay?.cursor ?? 0,
-  );
+  const replayMotionBlend = replay?.timeline
+    ? { incoming: resolveLoggedAnimation(replay.timeline, replay.cursor), outgoing: null, incomingWeight: 1 }
+    : { incoming: { kind: "unavailable" as const, eventLabel: "No combat log", clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID, clipTime: 0, status: "No combat log timing is available for this report; native cast replay is idle." },
+      outgoing: null, incomingWeight: 1 };
   const replayAnimation = replayMotionBlend.incoming;
   replayAnimationRef.current = replayMotionBlend;
   replayStateRef.current = replay;
@@ -607,8 +509,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     : null;
   const selectedReplayEvent = replay?.events[replay.selectedIndex];
   const selectedReplaySpell = selectedReplayEvent ? getSupportedReplaySpell(selectedReplayEvent) : null;
-  const replayAssetIds = new Set((replay?.events ?? []).flatMap((event) =>
-    getSupportedReplaySpell(event)?.components.map((component) => component.fileDataId) ?? []));
+  const replayAssetIds = getLoggedAssetIds(replay?.timeline ?? undefined);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -728,8 +629,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
     const updateReplayEffects = () => {
       const replayState = replayStateRef.current;
-      const requiredIds = new Set((replayState?.events ?? []).flatMap((event) =>
-        getSupportedReplaySpell(event)?.components.map((component) => component.fileDataId) ?? []));
+      const requiredIds = getLoggedAssetIds(replayState?.timeline ?? undefined);
       if (animationModeRef.current !== "replay"
         || !replayState
         || !replayAnchors
@@ -750,11 +650,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         ?? effectTranslationMatrix(targetAnchor);
       const sampleCasterAttachment = (attachmentId: number) =>
         sampleAttachmentWorldPosition(vulperaActor!, vulperaMount!, attachmentId);
-      const occurrences = resolveReplayEffectOccurrences(
-        replayState.events,
-        replayState.selectedIndex,
-        replayState.cursor,
-      );
+      const occurrences = replayState.timeline
+        ? resolveLoggedEffectOccurrences(replayState.timeline, replayState.cursor) : [];
       let particleCount = 0;
       let meshTriangles = 0;
       const activeFileDataIds: number[] = [];
@@ -772,14 +669,15 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             const casterTransform = attachmentId === undefined ? null
               : sampleAttachmentEffectTransform(vulperaActor!, attachmentId);
             return {
-              timeSeconds: occurrence.componentTimeSeconds - (occurrence.spellId !== 117014 && (component.fileDataId === 4329984 || component.fileDataId === 6211617) ? REPLAY_EFFECT_RELEASE_SECONDS : 0),
-              emissionEndSeconds: component.anchor === "projectile"
-                ? getReplayEffectTravelSeconds(occurrence.spellId) : OTHER_REPLAY_EMISSION_SECONDS,
+              timeSeconds: occurrence.componentTimeSeconds,
+              emissionEndSeconds: occurrence.emissionDuration ?? (component.anchor === "projectile"
+                ? occurrence.travelDuration ?? 0 : OTHER_REPLAY_EMISSION_SECONDS),
               modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
               occurrenceSeed: occurrence.eventKey,
               sourceTransformAtTime: (timeSeconds) => component.anchor === "projectile"
-                ? effectTranslationMatrix(sampleReplayEffectPath(source, targetAnchor, timeSeconds, occurrence.spellId))
+                ? effectTranslationMatrix(source.clone().lerp(targetAnchor,
+                  Math.max(0, Math.min(1, timeSeconds / (occurrence.travelDuration ?? 1)))))
                 : component.anchor === "caster" ? casterTransform ?? effectTranslationMatrix(source) : targetTransform,
             };
           });
@@ -806,12 +704,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       canvas.dataset.replayNativeFileDataIds = activeFileDataIds.join(",");
       const latestProjectile = occurrences.filter((occurrence) => occurrence.spellId === 117014).at(-1);
       canvas.dataset.replayNativeLatestSourceX = latestProjectile
-        ? sampleReplayEffectPath(
-            getReplayEffectSourceAnchor(latestProjectile.spellId, 4329984, sampleCasterAttachment, anchors.caster),
-            targetAnchor,
-            latestProjectile.componentTimeSeconds,
-            latestProjectile.spellId,
-          ).x.toFixed(6)
+        ? getReplayEffectSourceAnchor(latestProjectile.spellId, 4329984, sampleCasterAttachment, anchors.caster)
+            .lerp(targetAnchor, Math.max(0, Math.min(1, latestProjectile.componentTimeSeconds / (latestProjectile.travelDuration ?? 1)))).x.toFixed(6)
         : "";
       return true;
     };
@@ -1021,8 +915,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           const generation = ++replayEffectGeneration;
           for (const { effect } of replayEffects) effect.dispose();
           replayEffects = [];
-          const requiredIds = new Set((replayStateRef.current?.events ?? []).flatMap((event) =>
-            getSupportedReplaySpell(event)?.components.map((component) => component.fileDataId) ?? []));
+          const requiredIds = getLoggedAssetIds(replayStateRef.current?.timeline ?? undefined);
           const assets = NATIVE_EFFECT_ASSETS.filter((asset) => requiredIds.has(asset.fileDataId));
           const missing = [...requiredIds].filter((fileDataId) => !assets.some((asset) => asset.fileDataId === fileDataId));
           if (missing.length > 0) throw new Error(`Missing pinned replay FileDataID ${missing.join(", ")}. No substitute effect was rendered.`);
@@ -1296,18 +1189,15 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               {replayAssetIds.has(4329984) && <span> · Shared Lava Burst / Elemental Blast missile: 6 of 10 emitters + 3 of 3 original ribbons (partially reconstructed) · FileDataID 4329984</span>}
               {replayAssetIds.has(794788) && <span> · Elemental Blast: 12 of 12 authored emitters ready in its two additional bodies · 9 original BLP textures · FileDataID 4329984 + 794788 + 613807</span>}
               <span> · Trace FileDataIDs: {[...replayAssetIds].join(", ") || "none"}</span>
-              <small> · {replayAssetIds.has(794788) ? "Partial original Elemental Blast components and partial other spell components" : "Partial source-linked components only"}, not complete spells or verified native timing.</small>
+              <small> · Partial original components only; combat-log timestamps drive cast, travel and impact (native VFX fidelity is not verified).</small>
             </p>
           )}
-          {selectedReplaySpell && (selectedReplayEvent?.id === 51505 || selectedReplayEvent?.id === 117014 || selectedReplayEvent?.id === 188196) && (
+          {selectedReplaySpell?.components.some((component) => component.anchor === "projectile") && replay?.timeline && (
             <p data-testid="replay-flight-status">
-              {selectedReplayEvent.id === 188196
-                ? "Lightning Bolt: viewer-chosen 0.80s; all three mapped SpellVisualEffectName speeds are 0 (not derived from authored speed)."
-                : `${selectedReplayEvent.id === 51505 ? "Lava Burst" : "Elemental Blast"}: derived ${getReplayEffectTravelSeconds(selectedReplayEvent.id).toFixed(2)}s = SpellRange 5 maximum 40 yards / SpellVisualEffectName 47399 BaseMissileSpeed 50 (SpellMisc row ${selectedReplayEvent.id === 51505 ? 33331 : 89780} RangeIndex 5); assumes authored maximum range because the trace records no caster-target distance.`}
-              {selectedReplayEvent.id === 117014 && " 2 of 3 rendered bodies have speed 0 and inherit the shared body's derived duration; motion scripts 2967, 2969, 2968 not applied."}
-              {selectedReplayEvent.id === 188196 && " Branch motion 4856 parabola versus 0 unresolved; no arc applied."}
-              {selectedReplayEvent.id === 51505 && " Motion ID 0 has no authored script."}
-              {" 2 of 3 mapped projectile spell durations derived; 1 of 3 viewer-chosen. 0.20s viewer-chosen release; linear viewer path across 8 presentation units, not game yards; at most 1.50s source particle decay. Positioner 712 impact (Elemental Blast) and 513 cast (Lightning Bolt) have unresolved coordinate semantics; blocked FileDataID 3980281 has source attachment -1 and no cast/impact positioner (0/0), so its source origin remains unresolved. Missile FollowGroundHeight/DropSpeed/Approach, Flags and DecayTimeAfterImpact are not interpreted."}
+              {selectedReplayEvent?.spellName ?? selectedReplayEvent?.name}: {replay.timeline.occurrences.filter((occurrence) =>
+                occurrence.actionName === selectedReplayEvent?.name && occurrence.spellId === selectedReplayEvent?.id &&
+                !occurrence.actor.includes("_ancestor") && (Math.abs((occurrence.castStart ?? -1) - selectedReplayEvent!.time) < 0.002 || Math.abs((occurrence.castFinish ?? -1) - selectedReplayEvent!.time) < 0.002))
+                .map((occurrence) => `cast ${occurrence.castStart === null ? "instant" : `${occurrence.castStart.toFixed(3)}s`}, finish ${occurrence.castFinish?.toFixed(3)}s, flight ${occurrence.travelDuration?.toFixed(3) ?? "not logged"}s, impact ${occurrence.impacts[0]?.time.toFixed(3) ?? "not logged"}s`).join("; ") || "no matching logged occurrence"}. Missile path interpolates between the presented actors; logged timestamps, not a simulated trajectory.
             </p>
           )}
           {selectedReplaySpell && (
@@ -1320,7 +1210,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           )}
           {selectedReplaySpell && (
             <p data-testid="replay-spell-components">
-              {replayAnimation.eventLabel} ({selectedReplayEvent?.id}): {selectedReplaySpell.components.length > 0
+              {selectedReplayEvent ? getEventLabel(selectedReplayEvent) : replayAnimation.eventLabel} ({selectedReplayEvent?.id}): {selectedReplaySpell.components.length > 0
                 ? `mapped original FileDataIDs ${selectedReplaySpell.components.map((component) => component.fileDataId).join(", ")} · partial components when loaded, not complete spell visuals`
                 : "no verified component; no substitute rendered"}.
             </p>
@@ -1502,9 +1392,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         </ul>
       )}
 
+      {animationMode === "replay" && !replay?.timeline && <p>No combat-log timing in this report; native replay remains idle rather than estimating casts or hits.</p>}
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples native M2 cast animations (0.15s pose blend) and original source-linked particle components for mapped successful actions, with mapped caster components anchored at authored native M2 attachment positions (including two Stormkeeper kit components) and target endpoints at the dummy's authored chest attachment (34) where available, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Missiles for these three spells use a viewer-chosen 0.20s release and linear path; Lava Burst and Elemental Blast use a 0.80s maximum-range-derived duration (40 yards / BaseMissileSpeed 50), while Lightning Bolt retains a viewer-chosen 0.80s flight because its mapped speeds are 0. The effect API accepts translations only, so attachment orientation and scale are not forwarded. Unapplied motion scripts and positioners are counted in selected status and per-component limitations. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets or the Stormkeeper 1284864 kit offset, sound, damage, hit reaction, or VFX parity is claimed."
+          ? "Cast, missile release, flight, impact and mapped aura lifetimes use timestamps from the bundled SimC combat log. Native M2 pose and original partial VFX are presentation, not complete spell visuals; projectile positions interpolate between the presented actors, not recorded coordinates. Ancestor casts are listed in the logged event table but their missiles are intentionally omitted: no native ancestor model or unambiguous pet identity is available. No inferred GCD, exact historical attachment transforms, hit reaction, sound or complete VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}
