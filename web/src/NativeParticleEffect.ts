@@ -209,7 +209,7 @@ export class NativeParticleEffect {
   readonly meshTriangleCount: number;
   readonly animationSequenceIndex: number;
   readonly unsupportedMeshBatches: string[];
-  private readonly meshBatches: Array<{ geometry: BufferGeometry; material: MeshBasicMaterial; mesh: Mesh; textureWeightIndex: number; colorIndex: number }>;
+  private readonly meshBatches: Array<{ geometry: BufferGeometry; material: MeshBasicMaterial; mesh: Mesh; textureWeightIndex: number; colorIndex: number; instanceIndex: number }>;
   private readonly skin: NativeSkinProfile | undefined;
   private readonly maximumInstanceCount: number;
 
@@ -223,9 +223,11 @@ export class NativeParticleEffect {
       throw new Error(`FileDataID ${model.fileDataId}: native instance capacity must be a positive integer.`);
     }
     this.model = model;
-    this.animationSequenceIndex = model.fileDataId === 4290517 ? 2 : 0;
-    if (model.fileDataId === 4290517 && model.sequenceIds[2] !== 213) {
-      throw new Error(`FileDataID ${model.fileDataId}: expected authored mesh animation 213 at sequence 2.`);
+    this.animationSequenceIndex = skin ? model.sequenceIds.findIndex((_, sequenceIndex) =>
+      skin.batches.some((batch) => batch.colorIndex < 0
+        || model.colors[batch.colorIndex]?.alpha.sequences[sequenceIndex]?.values.some((alpha) => alpha > 0))) : 0;
+    if (this.animationSequenceIndex < 0) {
+      throw new Error(`FileDataID ${model.fileDataId}: no authored mesh animation sequence has visible alpha.`);
     }
     this.skin = skin;
     if (model.vertices.length > 0 && !skin) throw new Error(`FileDataID ${model.fileDataId}: authored mesh requires a pinned SKIN profile.`);
@@ -316,9 +318,9 @@ export class NativeParticleEffect {
       for (const [index, batch] of skin.batches.entries()) {
         const section = skin.sections[batch.sectionIndex];
         const material = model.materials[batch.materialIndex];
-        if (!material || material.blendMode !== 2 || (material.flags & ~0x1095) !== 0
-          || (material.flags & 0x15) !== 0x15 || (material.flags & 0x80) === 0 || (material.flags & 0x1000) === 0
-          || batch.shaderId !== 0x4014 || batch.flags !== 0x80 || batch.textureCount !== 2) {
+        if (!material || (material.blendMode !== 2 && material.blendMode !== 4) || (material.flags & ~0x11d5) !== 0
+          || (material.flags & 0x15) !== 0x15 || (material.flags & 0x1000) === 0
+          || (batch.shaderId !== 0x4014 && batch.shaderId !== 0x14) || batch.flags !== 0x80 || batch.textureCount !== 2) {
           throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} material, flags or shader cannot be rendered with the verified primary-only path.`);
         }
         const textureIndices = Array.from({ length: batch.textureCount }, (_, unit) => model.textureLookup[batch.textureComboIndex + unit]);
@@ -327,11 +329,8 @@ export class NativeParticleEffect {
           || transformIndices.some((transformIndex) => transformIndex === undefined || transformIndex >= model.textureTransforms.length)) {
           throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture or transform lookup is outside the original data.`);
         }
-        if (!model.textureTransforms[transformIndices[1]]?.translation.sequences.some((sequence) => sequence.values.length > 1)) {
-          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} secondary UV transform has no validated animation track.`);
-        }
-        if (transformIndices[0] !== -1 || transformIndices[1] < 0) {
-          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} has an unverified primary UV transform or missing secondary animation.`);
+        if (transformIndices.some((transformIndex) => transformIndex < -1)) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} has an invalid UV transform lookup.`);
         }
         if (model.textureCoordinates.length !== 0) {
           throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture coordinate lookup is not supported.`);
@@ -355,21 +354,32 @@ export class NativeParticleEffect {
         if ((textureFlags & ~3) !== 0) throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture wrapping flags are unsupported.`);
         sourceTexture.wrapS = (textureFlags & 1) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
         sourceTexture.wrapT = (textureFlags & 2) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
-        const geometry = new BufferGeometry();
-        geometry.setAttribute("position", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
-        geometry.setAttribute("normal", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
-        geometry.setAttribute("uv", new BufferAttribute(new Float32Array(skin.vertexLookup.flatMap((vertexIndex) => model.vertices[vertexIndex].uv[0])), 2));
-        geometry.setIndex(skin.indices);
-        geometry.setDrawRange(section.indexStart, section.indexCount);
-        const meshMaterial = new MeshBasicMaterial({ map: sourceTexture, transparent: true, blending: NormalBlending,
-          side: DoubleSide, depthTest: true, depthWrite: true, fog: false });
-        const mesh = new Mesh(geometry, meshMaterial);
-        mesh.frustumCulled = false;
-        mesh.renderOrder = 100 + batch.priorityPlane;
-        this.group.add(mesh);
-        this.meshBatches.push({ geometry, material: meshMaterial, mesh,
-          textureWeightIndex, colorIndex: batch.colorIndex });
-        this.unsupportedMeshBatches.push(`batch ${index}: ${batch.textureCount - 1} secondary texture unit (animated UV transform) not combined; shader 0x${batch.shaderId.toString(16)}; material flags 0x80 and 0x1000 and batch flag 0x80 have unverified shadow/render semantics`);
+        for (let instanceIndex = 0; instanceIndex < maximumInstanceCount; instanceIndex += 1) {
+          const geometry = new BufferGeometry();
+          geometry.setAttribute("position", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
+          geometry.setAttribute("normal", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
+          geometry.setAttribute("uv", new BufferAttribute(new Float32Array(skin.vertexLookup.flatMap((vertexIndex) => model.vertices[vertexIndex].uv[0])), 2));
+          geometry.setIndex(skin.indices);
+          geometry.setDrawRange(section.indexStart, section.indexCount);
+          const meshMaterial = new MeshBasicMaterial({ map: sourceTexture, transparent: true,
+            blending: material.blendMode === 4 ? AdditiveBlending : NormalBlending,
+            side: DoubleSide, depthTest: (material.flags & 0x8) === 0, depthWrite: (material.flags & 0x10) !== 0, fog: false });
+          const mesh = new Mesh(geometry, meshMaterial);
+          mesh.visible = false;
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 100 + batch.priorityPlane;
+          this.group.add(mesh);
+          this.meshBatches.push({ geometry, material: meshMaterial, mesh,
+            textureWeightIndex, colorIndex: batch.colorIndex, instanceIndex });
+        }
+        const missingUvUnits = transformIndices.flatMap((transformIndex, unit) => transformIndex >= 0 ? [unit] : []);
+        const uvLimit = missingUvUnits.length > 0
+          ? `; ${missingUvUnits.map((unit) => unit === 0 ? "primary" : "secondary").join(" and ")} UV transform${missingUvUnits.length > 1 ? "s" : ""} for unit${missingUvUnits.length > 1 ? "s" : ""} ${missingUvUnits.join(", ")} not applied`
+          : "";
+        const unknownMaterialFlags = [0x40, 0x80, 0x100, 0x1000]
+          .filter((flag) => (material.flags & flag) !== 0)
+          .map((flag) => `0x${flag.toString(16)}`).join(", ");
+        this.unsupportedMeshBatches.push(`batch ${index}: shader 0x${batch.shaderId.toString(16)} native combiner for ${batch.textureCount - 1} secondary texture unit not implemented; original primary texture only${uvLimit}; material flags ${unknownMaterialFlags} and batch flag 0x80 have unverified shadow/render semantics`);
       }
     }
     this.group.name = `Native M2 FileDataID ${model.fileDataId}`;
@@ -505,13 +515,13 @@ export class NativeParticleEffect {
 
   private renderMesh(instances: NativeParticleRenderInstance[]) {
     if (!this.skin) return;
-    if (instances.length > 1) {
-      throw new Error(`FileDataID ${this.model.fileDataId}: ${instances.length} simultaneous mesh instances exceed the 1-instance LOD0 skinning bound.`);
+    if (instances.length > this.maximumInstanceCount) {
+      throw new Error(`FileDataID ${this.model.fileDataId}: ${instances.length} simultaneous mesh instances exceed the ${this.maximumInstanceCount}-instance LOD0 skinning bound.`);
     }
-    const instance = instances[0];
     for (const batch of this.meshBatches) {
-      batch.mesh.visible = Boolean(instance);
-      if (!instance) continue;
+      const instance = instances[batch.instanceIndex];
+      batch.mesh.visible = Boolean(instance && instance.timeSeconds >= 0);
+      if (!batch.mesh.visible || !instance) continue;
       const timeMs = instance.timeSeconds * 1000;
       const sequenceDurationMs = this.model.sequenceDurationsMs[this.animationSequenceIndex];
       const positions = batch.geometry.getAttribute("position") as BufferAttribute;

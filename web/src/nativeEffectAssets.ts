@@ -17,6 +17,25 @@ export interface NativeEffectAsset {
 
 export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
   {
+    fileDataId: 6211617,
+    label: "Original Lightning Bolt missile 6211617",
+    filename: "FileDataID 6211617.m2",
+    sha256: "d91b89a45b37e1abbb2aa9782df0c1430fa6659157c93deba143d543948c811a",
+    expectedEmitterCount: 5,
+    effectNameScale: 1,
+    skin: { fileDataId: 6212146, sha256: "3295f2804872c9f36bd75c6c1b5f39ab6052199c00e5ed25551b69c4ff3bfe0a" },
+    textures: [
+      { fileDataId: 5319151, sha256: "bd0ca4434b1e5dad5a1bd62305e5efca1c792ffe428b036c0f44f45fdf3d37e1" },
+      { fileDataId: 4390762, sha256: "803d965fe2e6de1146be1b1d82e6d3b4919564d517c7081b081b6aaa7c6e9f2c" },
+      { fileDataId: 5319142, sha256: "1f9f2451cf3adce7b103dc8678d5adff2342c57d882282283e68143ae30ad86a" },
+      { fileDataId: 2429626, sha256: "e8bc63dd8bcfd2ba1de27bc47b8c3cf24b9d12e91dd5f38c585ab25003a63ad1" },
+      { fileDataId: 2138647, sha256: "04222d4103e9429686a92b91eb16ac104c2162fed7bf65e8e27354d2eaeb1a5c" },
+      { fileDataId: 1929233, sha256: "161bef15a547a58f46ded7be5395f3540d7c9a18f97f420cb3eecc096b090827" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 3165045, sha256: "e3040cbc05a75dc88a50be3fdd54c190d0cd7a89b868bd1583522c7bd4b15deb" },
+    ],
+  },
+  {
     fileDataId: 4329984,
     label: "Original Lava Burst missile 4329984",
     filename: "FileDataID 4329984.m2",

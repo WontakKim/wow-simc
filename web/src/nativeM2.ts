@@ -132,6 +132,7 @@ export interface NativeM2Model {
   sequenceIds: number[];
   globalSequenceDurationsMs: number[];
   extensionChunks: string[];
+  dboc?: { floats: [number, number]; integers: [number, number] };
   textureControlEntries: Array<[number, number]>;
   sequenceDurationMs: number;
   textureFileDataIds: number[];
@@ -163,7 +164,7 @@ const PARTICLE_STRIDE = 0x1ec;
 const BONE_STRIDE = 0x58;
 const RIBBON_STRIDE = 0xb0;
 const SUPPORTED_PARTICLE_FLAGS =
-  0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400 | 0x8000 | 0x10000 | 0x20000 | 0x80000 | 0x100000 | 0x200000 | 0x800000 | 0x2000000 | 0x4000000 | 0x10000000 | 0x20000000 | 0x40000000;
+  0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400 | 0x8000 | 0x10000 | 0x20000 | 0x80000 | 0x100000 | 0x200000 | 0x800000 | 0x2000000 | 0x4000000 | 0x8000000 | 0x10000000 | 0x20000000 | 0x40000000;
 
 function fourCc(source: Uint8Array, offset: number) {
   return String.fromCharCode(...source.subarray(offset, offset + 4));
@@ -192,7 +193,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     }
     if (chunks.has(tag)) throw new Error(`${label}: duplicate ${tag} chunk.`);
     if (tag !== "MD21" && tag !== "SFID" && tag !== "TXID"
-      && tag !== "TXAC" && tag !== "EXP2" && tag !== "PGD1" && tag !== "LDV1" && tag !== "DETL") {
+      && tag !== "TXAC" && tag !== "EXP2" && tag !== "PGD1" && tag !== "LDV1" && tag !== "DETL" && tag !== "DBOC") {
       throw new Error(`${label}: unsupported ${tag} chunk.`);
     }
     chunks.set(tag, { offset: payloadOffset, size });
@@ -567,6 +568,12 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   if (lodChunk && lodChunk.size !== 16) throw new Error(`${label}: LDV1 has unsupported size ${lodChunk.size}.`);
   const detailChunk = chunks.get("DETL");
   if (detailChunk && detailChunk.size % 16 !== 0) throw new Error(`${label}: DETL light data has invalid size.`);
+  const dbocChunk = chunks.get("DBOC");
+  if (dbocChunk && dbocChunk.size !== 16) throw new Error(`${label}: DBOC has unsupported size ${dbocChunk.size}.`);
+  const dboc = dbocChunk ? {
+    floats: [source.getFloat32(dbocChunk.offset, true), source.getFloat32(dbocChunk.offset + 4, true)] as [number, number],
+    integers: [source.getUint32(dbocChunk.offset + 8, true), source.getUint32(dbocChunk.offset + 12, true)] as [number, number],
+  } : undefined;
   readChunkArray("EXP2", 0, 28, particleRecords.count);
   checkArray(particleRecords, PARTICLE_STRIDE, "particle emitters");
   if (particleRecords.count > 256) throw new Error(`${label}: particle emitter count ${particleRecords.count} is unreasonable.`);
@@ -705,6 +712,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     sequenceIds,
     globalSequenceDurationsMs,
     extensionChunks: [...chunks.keys()].filter((tag) => !["MD21", "SFID", "TXID"].includes(tag)),
+    dboc,
     textureControlEntries,
     textureFileDataIds,
     textureFlags,

@@ -57,6 +57,38 @@ describe("original Lava Burst ribbon rendering", () => {
   });
 });
 
+describe("original Lightning Bolt missile rendering", () => {
+  it("scrubs four overlapping additive LOD0 meshes and all five genuine particle emitters", () => {
+    const model = parseNativeM2(loadAsset(6211617, "m2"), 6211617);
+    const skin = parseNativeSkin(loadAsset(6212146, "skin"), 6212146, model.vertices.length);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures, 4, skin);
+    expect(effect.renderedEmitterCount).toBe(5);
+    expect(effect.meshTriangleCount).toBe(64);
+    expect(effect.animationSequenceIndex).toBe(0);
+    expect(effect.unsupportedMeshBatches.join(" ")).toContain("primary and secondary UV transforms for units 0, 1 not applied");
+    expect(effect.unsupportedMeshBatches.join(" ")).not.toContain("material flags 0x80");
+    expect(effect.group.children).toHaveLength(9);
+    const meshes = effect.group.children.slice(5) as Mesh<BufferGeometry, MeshBasicMaterial>[];
+    expect(meshes.every((mesh) => mesh.material.blending === AdditiveBlending && mesh.material.map !== null)).toBe(true);
+    const camera = new PerspectiveCamera();
+    const instance = (timeSeconds: number, start: number) => ({ timeSeconds, emissionEndSeconds: 0.8,
+      modelScale: 0.38, sourceTranslationAtTime: (time: number): [number, number, number] => [start + time * 10, 0, 0] });
+    const instances = [instance(0.45, -4), instance(0.3, -3), instance(0.15, -2), instance(0.05, 1)];
+    effect.setReplayInstances(instances, camera);
+    expect(meshes.every((mesh) => mesh.visible && mesh.geometry.drawRange.count === 192)).toBe(true);
+    expect(new Set(meshes.map((mesh) => mesh.position.x)).size).toBe(4);
+    const positions = meshes.map((mesh) => Array.from(mesh.geometry.getAttribute("position").array));
+    effect.setReplayInstances([instance(0.75, 2)], camera);
+    effect.setReplayInstances(instances, camera);
+    expect(meshes.map((mesh) => Array.from(mesh.geometry.getAttribute("position").array))).toEqual(positions);
+    expect(() => effect.setReplayInstances([...instances, instance(0.01, 3)], camera)).toThrow(/FileDataID 6211617.*5 simultaneous.*4-instance/i);
+    effect.clearInstances();
+    expect(meshes.every((mesh) => !mesh.visible)).toBe(true);
+    effect.dispose();
+  });
+});
+
 describe("NativeParticleEffect source rendering", () => {
   it.each([794788, 613807])("uses authored blend modes and shader-safe scaled billboards for FileDataID %i", (fileDataId) => {
     const model = parseNativeM2(loadAsset(fileDataId, "m2"), fileDataId);
@@ -191,7 +223,11 @@ describe("original mesh component rendering", () => {
     const effect = new NativeParticleEffect(model, textures, 1, skin);
     expect(effect.group.children).toHaveLength(5);
     expect(effect.meshTriangleCount).toBe(900);
-    expect(effect.unsupportedMeshBatches).toEqual(["batch 0: 1 secondary texture unit (animated UV transform) not combined; shader 0x4014; material flags 0x80 and 0x1000 and batch flag 0x80 have unverified shadow/render semantics"]);
+    expect(effect.unsupportedMeshBatches.join(" ")).toContain("shader 0x4014 native combiner for 1 secondary texture unit not implemented");
+    expect(effect.unsupportedMeshBatches.join(" ")).toContain("secondary UV transform for unit 1 not applied");
+    const renamedModel = new NativeParticleEffect({ ...model, fileDataId: 9999 }, textures, 1, skin);
+    expect(renamedModel.animationSequenceIndex).toBe(2);
+    renamedModel.dispose();
     const mesh = effect.group.children[4] as Mesh;
     expect(mesh.geometry.getAttribute("position").count).toBe(612);
     expect(mesh.geometry.index?.count).toBe(2700);

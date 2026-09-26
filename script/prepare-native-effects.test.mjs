@@ -203,3 +203,15 @@ test("validates three real 0xb0-byte Lava Burst ribbon records at their measured
     ...asset, sha256: createHash("sha256").update(tampered).digest("hex"),
   }), /FileDataID 4329984.*ribbon 1.*0xb0-byte record stride/);
 });
+
+test("validates the pinned Lightning Bolt missile M2 and LOD0 SKIN without substituting bytes", async () => {
+  for (const [fileDataId, extension] of [[6211617, "m2"], [6212146, "skin"]]) {
+    const bytes = await readFile(new URL(`../web/public/model/native-effects/${fileDataId}.${extension}`, import.meta.url));
+    const asset = NATIVE_EFFECT_DOWNLOADS.find((entry) => entry.fileDataId === fileDataId);
+    assert.ok(asset);
+    assert.equal(validateNativeEffectAsset(bytes, asset).length, asset.byteSize);
+    const altered = Buffer.from(bytes);
+    altered[altered.length - 1] ^= 1;
+    assert.throws(() => validateNativeEffectAsset(altered, asset), new RegExp(`FileDataID ${fileDataId}.*SHA-256 mismatch`));
+  }
+});

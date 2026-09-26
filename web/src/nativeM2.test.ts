@@ -416,6 +416,25 @@ describe("eleven pinned particle-only sources", () => {
 });
 
 
+describe("Lightning Bolt DBOC extension", () => {
+  it("accepts the bounded four-field chunk without assigning undocumented semantics", () => {
+    const original = readFileSync(resolve(process.cwd(), "public/model/native-effects/6211618.m2"));
+    const chunk = new Uint8Array(24);
+    const view = new DataView(chunk.buffer);
+    chunk.set(new TextEncoder().encode("DBOC"));
+    view.setUint32(4, 16, true);
+    view.setFloat32(8, 0.6667, true);
+    view.setFloat32(12, 1.5, true);
+    const source = new Uint8Array(original.length + chunk.length);
+    source.set(original);
+    source.set(chunk, original.length);
+    expect(parseNativeM2(source.buffer, 6211618).dboc).toEqual({ floats: [expect.closeTo(0.6667), 1.5], integers: [0, 0] });
+    const shortSource = source.slice(0, -4);
+    new DataView(shortSource.buffer).setUint32(original.length + 4, 12, true);
+    expect(() => parseNativeM2(shortSource.buffer, 6211618)).toThrow(/FileDataID 6211618.*DBOC.*size/i);
+  });
+});
+
 describe("original skin profile", () => {
   it("resolves triangle indices through the skin vertex lookup and assigns the authored batch", () => {
     const source = new ArrayBuffer(0xb0);
@@ -465,6 +484,23 @@ describe("pinned Ancestral Swiftness mesh", () => {
     expect(skin.vertexLookup).toHaveLength(612);
     expect(skin.indices).toHaveLength(2700);
     expect(skin.batches).toEqual([expect.objectContaining({ shaderId: 0x4014, textureCount: 2, materialIndex: 0 })]);
+  });
+});
+
+describe("original Lightning Bolt missile source", () => {
+  it("parses the five emitters, DBOC fields, LOD0 triangles and additive material from pinned bytes", () => {
+    const read = (id: number, extension: string) => {
+      const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${id}.${extension}`));
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    };
+    const model = parseNativeM2(read(6211617, "m2"), 6211617);
+    const skin = nativeM2.parseNativeSkin(read(6212146, "skin"), 6212146, model.vertices.length);
+    expect(model).toMatchObject({ version: 274, skinFileDataIds: [6212146],
+      materials: [{ flags: 0x1155, blendMode: 4 }], dboc: { floats: [expect.closeTo(2 / 3), 1.5], integers: [0, 0] } });
+    expect(model.emitters).toHaveLength(5);
+    expect(model.vertices).toHaveLength(50);
+    expect(skin.batches).toEqual([expect.objectContaining({ shaderId: 0x14, textureCount: 2, materialIndex: 0 })]);
+    expect(skin.indices).toHaveLength(192);
   });
 });
 

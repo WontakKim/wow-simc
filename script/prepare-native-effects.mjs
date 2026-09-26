@@ -11,6 +11,14 @@ const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, "..");
 const DEFAULT_OUTPUT_DIRECTORY = join(REPOSITORY_ROOT, "web/public/model/native-effects");
 
 export const NATIVE_EFFECT_DOWNLOADS = [
+  { fileDataId: 6211617, extension: "m2", byteSize: 15056, sha256: "d91b89a45b37e1abbb2aa9782df0c1430fa6659157c93deba143d543948c811a", textureFileDataIds: [5319151, 4390762, 5319142, 2429626, 2138647, 1929233, 982938, 3165045], skinFileDataIds: [6212146], version: 274, expectedBoneCount: 8, expectedEmitterCount: 5, expectedVertexCount: 50 },
+  { fileDataId: 6212146, extension: "skin", byteSize: 848, sha256: "3295f2804872c9f36bd75c6c1b5f39ab6052199c00e5ed25551b69c4ff3bfe0a", expectedVertexCount: 50 },
+  { fileDataId: 5319151, extension: "blp", byteSize: 2797412, sha256: "bd0ca4434b1e5dad5a1bd62305e5efca1c792ffe428b036c0f44f45fdf3d37e1" },
+  { fileDataId: 4390762, extension: "blp", byteSize: 1284, sha256: "803d965fe2e6de1146be1b1d82e6d3b4919564d517c7081b081b6aaa7c6e9f2c" },
+  { fileDataId: 5319142, extension: "blp", byteSize: 5593604, sha256: "1f9f2451cf3adce7b103dc8678d5adff2342c57d882282283e68143ae30ad86a" },
+  { fileDataId: 2429626, extension: "blp", byteSize: 88580, sha256: "e8bc63dd8bcfd2ba1de27bc47b8c3cf24b9d12e91dd5f38c585ab25003a63ad1" },
+  { fileDataId: 1929233, extension: "blp", byteSize: 23044, sha256: "161bef15a547a58f46ded7be5395f3540d7c9a18f97f420cb3eecc096b090827" },
+  { fileDataId: 3165045, extension: "blp", byteSize: 23044, sha256: "e3040cbc05a75dc88a50be3fdd54c190d0cd7a89b868bd1583522c7bd4b15deb" },
   { fileDataId: 4329984, extension: "m2", byteSize: 24058, sha256: "b704ed8b2f6c69349f79653b03d1186bb1ce64bd867636c6591c5b2f87292580", textureFileDataIds: [3982249, 4007016, 4007017, 3722811, 3308414, 4007018, 4007019, 4007020, 983668, 1715203, 982938, 4007021, 4007022, 4007023, 4007024], skinFileDataIds: [4329994], version: 274, expectedBoneCount: 17, expectedEmitterCount: 10, expectedRibbonCount: 3, expectedVertexCount: 0 },
   { fileDataId: 4007021, extension: "blp", byteSize: 1399300, sha256: "b413c3adad9b3cf87aa8ec3c13759a35aa77f2536bc696109d2128fa77998f81" },
   { fileDataId: 4007022, extension: "blp", byteSize: 44900, sha256: "df1c54fd6ff26abdb78452174d330a5c61474bda96d2f78e06619c0641e8eb47" },

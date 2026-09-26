@@ -14,6 +14,7 @@ import {
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { describe, expect, it } from "vitest";
+import officialFixture from "../public/fixture/elemental-shaman-replay.json";
 import {
   arrangeCombatants,
   configureVulperaMaterials,
@@ -25,7 +26,7 @@ import {
   resolveReplayEffectOccurrences,
   resolveReplayMotionBlend,
 } from "./GenuineModelScene";
-import type { ReplayEvent } from "./replay";
+import { parseReplayReport, type ReplayEvent } from "./replay";
 
 describe("configureVulperaMaterials", () => {
   it("uses the exported alpha channel only for the Vulpera eye reflection", () => {
@@ -233,7 +234,8 @@ describe("remaining original replay components", () => {
         { fileDataId: 3980244, anchor: "target" },
       ] }),
       expect.objectContaining({ spellId: 188196, componentTimeSeconds: 0.3, components: [
-        { fileDataId: 6211618, anchor: "caster" }, { fileDataId: 1571475, anchor: "target" },
+        { fileDataId: 6211618, anchor: "caster" }, { fileDataId: 6211617, anchor: "projectile" },
+        { fileDataId: 1571475, anchor: "target" },
       ] }),
       expect.objectContaining({ spellId: 188389, componentTimeSeconds: 0.1, components: [
         { fileDataId: 4006618, anchor: "target" }, { fileDataId: 3980244, anchor: "target" },
@@ -246,6 +248,24 @@ describe("remaining original replay components", () => {
     expect(resolveReplayEffectOccurrences([cast, lightning, flame], 2, 4.5)).toEqual(occurrences);
   });
 
+  it("keeps four overlapping Lightning Bolt cast, missile, and impact components through 2.50 seconds", () => {
+    const bolts = [0, 0.4, 0.9, 1.4].map((time, index) => makeAction({
+      key: `bolt-${index}`, time, id: 188196, name: "lightning_bolt",
+    }));
+    expect(resolveReplayEffectOccurrences(bolts, 3, 2.45)).toHaveLength(4);
+    expect(resolveReplayEffectOccurrences(bolts, 3, 2.55)).toHaveLength(3);
+  });
+
+  it("measures four overlapping Lightning Bolt occurrences from the bundled trace", () => {
+    const events = parseReplayReport(officialFixture).actors[0].events;
+    const boltEvents = events.filter((event) => event.id === 188196 && event.queueFailed === false);
+    const concurrentCounts = boltEvents.map((event) => resolveReplayEffectOccurrences(
+      events, events.indexOf(event), event.time,
+    ).filter((occurrence) => occurrence.spellId === 188196).length);
+    expect(boltEvents).toHaveLength(24);
+    expect(Math.max(...concurrentCounts)).toBe(4);
+  });
+
   it("keeps Ancestral Swiftness without a replay component when its mesh shader is unsupported", () => {
     const absent = makeAction({ id: 443454, name: "ancestral_swiftness", time: 4 });
     const failed = makeAction({ id: 188196, name: "lightning_bolt", queueFailed: true });
@@ -255,7 +275,7 @@ describe("remaining original replay components", () => {
     expect(getReplayPlaybackEndTime([absent])).toBe(5.2);
     expect(getReplayPlaybackEndTime([makeAction({ phase: "precombat", id: 318038, name: "flametongue_weapon", time: 0 })])).toBe(1.7);
     expect(getReplayPlaybackEndTime([makeAction({ id: 191634, name: "stormkeeper", time: 4 })])).toBe(5.7);
-    expect(getReplayPlaybackEndTime([makeAction({ id: 188196, name: "lightning_bolt", time: 4 })])).toBe(5.7);
+    expect(getReplayPlaybackEndTime([makeAction({ id: 188196, name: "lightning_bolt", time: 4 })])).toBe(6.5);
   });
 });
 
