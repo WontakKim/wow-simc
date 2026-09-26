@@ -25,6 +25,13 @@ These are research findings, not a final architecture decision. See the [source 
 | [data/snapshots/raidbots-live-metadata.2026-09-25.json](data/snapshots/raidbots-live-metadata.2026-09-25.json) | Small, complete metadata snapshot; no character data |
 | [evaluation/implementation-options.md](evaluation/implementation-options.md) | Implementation choices, recommended first experiment, and open questions |
 | [examples/README.md](examples/README.md) | Official-profile smoke input and reusable encounter overlay |
+| [rendering/README.md](rendering/README.md) | WoW rendering, spell-visual, and SimC-sync research index (2026-09-26) |
+| [rendering/m2-format-and-rendering.md](rendering/m2-format-and-rendering.md) | Native-M2 decision, MD21/SKIN/ANIM/SKEL layouts, shader and combiner catalog, blend table, lighting, color-space policy |
+| [rendering/particles-and-ribbons.md](rendering/particles-and-ribbons.md) | Particle emitter layout and flags, generators, RNG, integration, multitexture/TXAC/EXP2, ribbon ring buffer |
+| [rendering/character-customization.md](rendering/character-customization.md) | Customization DB2 joins, geoset selection, atlas compositing, replaceable texture types |
+| [rendering/spell-visuals.md](rendering/spell-visuals.md) | Spell-visual DB2 graph, kit-effect catalog, missiles and impact timing, build-specific component inventory |
+| [rendering/simc-synchronization.md](rendering/simc-synchronization.md) | Real log-line formats, occurrence matching, overloads, ancestors, auras, GCD caveat, capture options |
+| [rendering/current-implementation-gaps.md](rendering/current-implementation-gaps.md) | Verified defect list in `web/src/` at `ab42fc8` and the M0–M9 milestone plan |
 | [sources/README.md](sources/README.md) | Primary sources, inspected commits, verification, and limitations |
 
 ## Status and boundaries
@@ -32,6 +39,7 @@ These are research findings, not a final architecture decision. See the [source 
 - Completed: public documentation research, relevant source checks, three public metadata GET requests, a pinned macOS ARM64 CLI build, and an official Frost Mage smoke simulation with JSON-v2/HTML output.
 - Reusable build and smoke helpers now provide the fixed official-sample workflow. Generated binaries, logs, and reports remain under ignored `.local/`.
 - A [local browser replay prototype](../README.md#browser-genuine-model-proof) now inspects sampled JSON-v2 action/state snapshots without running a backend simulation or uploading character data.
+- Completed 2026-09-26: rendering/spell-visual/SimC-sync deep research ([rendering/](rendering/README.md)). Reference implementations inspected at pinned commits (wow.export, WebWowViewerCpp), log facts re-verified against a full local 45 s run, and nineteen concrete defects verified in `web/src/` with file:line evidence plus an M0–M9 remediation plan. The synthesized research report itself is registered as a secondary source; nothing in it is treated as client truth without its own evidence class.
 - One user-supplied character export subsequently completed a private manual baseline, with active talents and equipped-item details checked. No character identity, input, or output is versioned. Arbitrary-character support, profileset comparisons, and performance/mechanics benchmarks remain unverified.
 - No authenticated/paid Raidbots requests or hosted application implementation were performed. The manual character workflow is separate from the fixed official-profile smoke helper.
 - All documents are in English to follow the repository's coding/documentation instructions.

@@ -89,6 +89,22 @@ Use the pinned links below to reproduce the source review rather than assuming `
 | C6 | [JSON changelog](https://github.com/simulationcraft/simc/blob/1e0751c16d04df565bea9d7c4ac228f9cc4b0e46/engine/report/json/Changelog.md) | Unreleased version-3 schema and profileset changes |
 | C7 | [Version-3 schema file](https://github.com/simulationcraft/simc/blob/1e0751c16d04df565bea9d7c4ac228f9cc4b0e46/engine/report/json/schema/3.0.0.schema.json) | Available schema reference; not used to claim validation of an actual engine report |
 
+## Rendering and spell-visual research sources (access date 2026-09-26)
+
+Sources for the [rendering/](../rendering/README.md) documents. Both reference repositories were inspected at the pinned commits below via local clones; cited `file:line` references resolve at those commits on GitHub, and their `master` branches are mutable — re-pin before vendoring.
+
+| ID | Source at the inspected commit | Use and limitations |
+| --- | --- | --- |
+| G1 | ChatGPT Pro deep-research report, 2026-09-26 (private session; not a public URL) | Secondary **synthesized** source that organized the deep research. Every fact drawn from it is re-labeled with its own evidence class in the rendering documents; statements resting only on G1 are marked as build evidence or unresolved. Not treated as primary evidence. |
+| W1 | [wow.export](https://github.com/Kruithne/wow_export) at commit [`c2fd7bde36a712be78a5da896c995b84fbfa2545`](https://github.com/Kruithne/wow_export/commit/c2fd7bde36a712be78a5da896c995b84fbfa2545) (MIT) | M2/SKIN/ANIM/SKEL loading, shader-selection tables, pixel combiners, blend/EGx tables, render flags, character-customization joins and atlas compositing. Implements no M2 particle/ribbon path. |
+| W2 | [WebWowViewerCpp](https://github.com/Deamon87/WebWowViewerCpp) at commit [`1a8cccbeffc46231c6497e6b3f5bfbf3507d8071`](https://github.com/Deamon87/WebWowViewerCpp/commit/1a8cccbeffc46231c6497e6b3f5bfbf3507d8071) | Particle and ribbon simulation (generators, RNG, integration, flags), compressed gravity, multitexture/EXP2, M2 lighting model. Contains no spell-visual/missile logic. Its attachment helper is demonstrably faulty and is cited only for the matrix relationship it encodes. |
+| W3 | [wowdev wiki](https://wowdev.wiki/) (M2 and related pages) | Community format documentation for chunk layouts and record structures. The research browser could not retrieve the wiki pages during the pass, so format statements rest on the reference loaders plus the report; treat as corroboration target, not verified reading. |
+| W4 | [WoWDBDefs](https://github.com/wowdev/WoWDBDefs) | DB2 schema definitions, including build-69933 layouts and `SpellVisualKitEffect` type comments. Schema shape, not runtime semantics. |
+| W5 | SimulationCraft at the existing pinned commit `1e0751c16d04df565bea9d7c4ac228f9cc4b0e46` (see C1–C7) | Log-line emitters (`performs`, `schedules execute`, `schedules travel` in `engine/action/action.cpp`), `log_spell_id` option registration, GCD debug logging. |
+| L1 | Local run log `.local/results/log-demo/log.txt` (ignored `.local/`, seed 20260925, 45.000 s, 2117 lines) | **Live local evidence**: every timing fact in [simc-synchronization.md](../rendering/simc-synchronization.md) was re-verified against this file by grep, with line numbers. The build-specific spell/component inventory additionally rests on the project's 2026-09-25 asset audit relayed via G1 and is labeled build evidence there. |
+
+Not performed for the rendering research: no wowdev wiki page was successfully fetched, no Wago build CSV or CASC product download was made, no retail client was disassembled or captured, and the reference GLSL was not GPU-compiled.
+
 ## Verification boundaries
 
 Performed:
@@ -98,6 +114,7 @@ Performed:
 - Fetch metadata using three documented selectors and compare their parsed content and raw checksums.
 - Preserve the small metadata snapshot as research evidence; downloaded application bundles are not versioned. Engine source is now separately pinned through the `simc/` submodule.
 - Check local document links, code-fence balance, shell-example syntax, metadata shape/checksum, encounter-option registration, and whitespace/diff consistency.
+- For the 2026-09-26 rendering research: re-verify every cited log fact by grep against the local run log; verify every `web/src/` defect claim by reading the file at the cited lines; record reference-repository commit SHAs; check relative markdown links, absence of machine-local absolute paths, and diff whitespace.
 
 Follow-up local execution:
 
