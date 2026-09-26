@@ -85,6 +85,62 @@ async function analyzeModelRegions(page: Page, screenshot: Buffer): Promise<Mode
   }, `data:image/png;base64,${screenshot.toString("base64")}`);
 }
 
+interface CasterChromaAnalysis {
+  litPixels: number;
+  chromaticFraction: number;
+  averageRed: number;
+  averageGreen: number;
+  averageBlue: number;
+}
+
+/**
+ * Chroma statistics for the caster half of the scene, above the dark
+ * background. A composed appearance renders warm fur, so most lit pixels are
+ * chromatic; the placeholder-grey actor was near-achromatic.
+ */
+async function analyzeCasterChroma(page: Page, screenshot: Buffer): Promise<CasterChromaAnalysis> {
+  return page.evaluate(async (imageUrl) => {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+    const sample = document.createElement("canvas");
+    sample.width = image.width;
+    sample.height = image.height;
+    const context = sample.getContext("2d");
+    if (!context) throw new Error("Could not inspect the WebGL screenshot.");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    let litPixels = 0;
+    let chromaticPixels = 0;
+    let redSum = 0;
+    let greenSum = 0;
+    let blueSum = 0;
+    for (let y = Math.floor(sample.height * 0.14); y < Math.floor(sample.height * 0.78); y += 1) {
+      for (let x = 0; x < Math.floor(sample.width * 0.5); x += 1) {
+        const offset = (y * sample.width + x) * 4;
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const maximum = Math.max(red, green, blue);
+        const minimum = Math.min(red, green, blue);
+        if (maximum < 60) continue;
+        litPixels += 1;
+        if (maximum - minimum > 18) chromaticPixels += 1;
+        redSum += red;
+        greenSum += green;
+        blueSum += blue;
+      }
+    }
+    return {
+      litPixels,
+      chromaticFraction: chromaticPixels / litPixels,
+      averageRed: redSum / litPixels,
+      averageGreen: greenSum / litPixels,
+      averageBlue: blueSum / litPixels,
+    };
+  }, `data:image/png;base64,${screenshot.toString("base64")}`);
+}
+
 const partialReport = JSON.stringify({
   report_version: "2.0.0",
   version: "1210-01",
@@ -241,8 +297,16 @@ test("loads both genuine native models with separate replay and manual modes", a
   await expect(scene.getByText(/native M2 cast animations/i)).toBeVisible();
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await expect(scene.getByRole("status")).toContainText(/native sequences/);
-  await expect(scene.getByTestId("native-actor-status")).toContainText(/Vulpera customization textures \(types .+\) pending/);
-  await expect(scene.locator("canvas")).toHaveAttribute("data-actor-pending-texture-types", /.+/);
+  // Types 1 (skin) and 19 (eyes) resolve through the composed appearance; the
+  // still-pending types only occur on sections the geoset rules keep hidden.
+  await expect(scene.getByTestId("native-actor-status")).toContainText(
+    "Vulpera customization textures (types 2, 15, 18) pending",
+  );
+  await expect(scene.locator("canvas")).toHaveAttribute("data-actor-pending-texture-types", "2,15,18");
+  const casterChroma = await analyzeCasterChroma(page, await scene.locator("canvas").screenshot());
+  expect(casterChroma.litPixels).toBeGreaterThan(300);
+  expect(casterChroma.chromaticFraction).toBeGreaterThan(0.5);
+  expect(casterChroma.averageRed).toBeGreaterThan(casterChroma.averageBlue);
   await expect(scene.locator("canvas")).toBeVisible();
 
   await scene.getByRole("button", { name: "Play", exact: true }).click();

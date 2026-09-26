@@ -1,0 +1,322 @@
+{
+  "build": "12.1.0.69933",
+  "chrModelId": 69,
+  "charComponentTextureLayoutId": 145,
+  "choices": [
+    {
+      "optionId": 406,
+      "optionName": "Face",
+      "choiceId": 3313,
+      "choiceName": "",
+      "source": "default"
+    },
+    {
+      "optionId": 331,
+      "optionName": "Fur Color",
+      "choiceId": 3304,
+      "choiceName": "",
+      "source": "default"
+    },
+    {
+      "optionId": 407,
+      "optionName": "Hair Style",
+      "choiceId": 3319,
+      "choiceName": "",
+      "source": "default"
+    },
+    {
+      "optionId": 336,
+      "optionName": "Ears",
+      "choiceId": 3323,
+      "choiceName": "Compact",
+      "source": "explicit"
+    },
+    {
+      "optionId": 338,
+      "optionName": "Snout",
+      "choiceId": 3335,
+      "choiceName": "Long",
+      "source": "default"
+    },
+    {
+      "optionId": 852,
+      "optionName": "Eye Color",
+      "choiceId": 9541,
+      "choiceName": "",
+      "source": "explicit"
+    },
+    {
+      "optionId": 854,
+      "optionName": "Earrings",
+      "choiceId": 9581,
+      "choiceName": "Unpierced",
+      "source": "explicit"
+    },
+    {
+      "optionId": 408,
+      "optionName": "Pattern",
+      "choiceId": 3332,
+      "choiceName": "Desert",
+      "source": "default"
+    }
+  ],
+  "geosets": {
+    "enabledMeshPartIds": [
+      19,
+      100,
+      203,
+      3500,
+      4102
+    ],
+    "families": [
+      {
+        "optionId": 407,
+        "selectedChoiceId": 3319,
+        "meshPartIds": [
+          19
+        ],
+        "selectedMeshPartIds": [
+          19
+        ]
+      },
+      {
+        "optionId": 336,
+        "selectedChoiceId": 3323,
+        "meshPartIds": [
+          100,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207
+        ],
+        "selectedMeshPartIds": [
+          100,
+          203
+        ]
+      },
+      {
+        "optionId": 338,
+        "selectedChoiceId": 3335,
+        "meshPartIds": [
+          4102,
+          4103,
+          4104,
+          4105,
+          4106,
+          4107
+        ],
+        "selectedMeshPartIds": [
+          4102
+        ]
+      },
+      {
+        "optionId": 852,
+        "selectedChoiceId": 9541,
+        "meshPartIds": [
+          1701,
+          1702,
+          1703,
+          1704,
+          1705,
+          3300,
+          5100
+        ],
+        "selectedMeshPartIds": []
+      },
+      {
+        "optionId": 854,
+        "selectedChoiceId": 9581,
+        "meshPartIds": [
+          3500,
+          3501,
+          3502,
+          3503,
+          3504,
+          3505,
+          3506
+        ],
+        "selectedMeshPartIds": [
+          3500
+        ]
+      }
+    ]
+  },
+  "atlasOperations": [
+    {
+      "elementId": 15550,
+      "choiceId": 3304,
+      "materialId": 13474,
+      "targetId": 1,
+      "relatedChoiceId": null,
+      "sourceFileDataId": 1940014,
+      "textureType": 1,
+      "layer": 0,
+      "blendMode": 1,
+      "destination": {
+        "x": 0,
+        "y": 0,
+        "width": 2048,
+        "height": 1024
+      }
+    },
+    {
+      "elementId": 15577,
+      "choiceId": 3313,
+      "materialId": 13501,
+      "targetId": 5,
+      "relatedChoiceId": 3304,
+      "sourceFileDataId": 1939950,
+      "textureType": 1,
+      "layer": 4,
+      "blendMode": 15,
+      "destination": {
+        "x": 1024,
+        "y": 0,
+        "width": 1024,
+        "height": 1024
+      }
+    },
+    {
+      "elementId": 15551,
+      "choiceId": 3304,
+      "materialId": 13475,
+      "targetId": 13,
+      "relatedChoiceId": null,
+      "sourceFileDataId": 1939998,
+      "textureType": 1,
+      "layer": 6,
+      "blendMode": 15,
+      "destination": {
+        "x": 512,
+        "y": 384,
+        "width": 512,
+        "height": 256
+      }
+    }
+  ],
+  "atlasSizes": [
+    {
+      "textureType": 1,
+      "width": 2048,
+      "height": 1024
+    },
+    {
+      "textureType": 6,
+      "width": 512,
+      "height": 256
+    },
+    {
+      "textureType": 19,
+      "width": 256,
+      "height": 128
+    }
+  ],
+  "skippedMaterials": [
+    {
+      "materialId": 13476,
+      "reason": "no ChrModelTextureLayer for layout 145 target 14",
+      "relatedChoiceId": null
+    },
+    {
+      "materialId": 13502,
+      "reason": "related choice 3305 is not part of the selection",
+      "relatedChoiceId": 3305
+    },
+    {
+      "materialId": 13503,
+      "reason": "related choice 3306 is not part of the selection",
+      "relatedChoiceId": 3306
+    },
+    {
+      "materialId": 13504,
+      "reason": "related choice 3307 is not part of the selection",
+      "relatedChoiceId": 3307
+    },
+    {
+      "materialId": 13505,
+      "reason": "related choice 3308 is not part of the selection",
+      "relatedChoiceId": 3308
+    },
+    {
+      "materialId": 13506,
+      "reason": "related choice 3309 is not part of the selection",
+      "relatedChoiceId": 3309
+    },
+    {
+      "materialId": 13507,
+      "reason": "related choice 3310 is not part of the selection",
+      "relatedChoiceId": 3310
+    },
+    {
+      "materialId": 13508,
+      "reason": "related choice 3311 is not part of the selection",
+      "relatedChoiceId": 3311
+    },
+    {
+      "materialId": 13509,
+      "reason": "related choice 3312 is not part of the selection",
+      "relatedChoiceId": 3312
+    }
+  ],
+  "directTextures": [
+    {
+      "elementId": 48861,
+      "choiceId": 9541,
+      "materialId": 24865,
+      "targetId": 25,
+      "relatedChoiceId": null,
+      "sourceFileDataId": 3635066,
+      "textureType": 19
+    }
+  ],
+  "sources": {
+    "db2": [
+      {
+        "table": "ChrModel",
+        "sha256": "5302354cd9a09350dd0e69b8b9305ecc7941cf289823536ee913be2d9d3a3eee"
+      },
+      {
+        "table": "ChrRaceXChrModel",
+        "sha256": "97b90fb5ad993310f034686ffa39978b4978217f5542dbe741896b2588d24e2f"
+      },
+      {
+        "table": "ChrCustomizationOption",
+        "sha256": "a8ab3604b30857ea895ce49708d178f344fcf7649b61bd5b350e9a8aca2f1bc9"
+      },
+      {
+        "table": "ChrCustomizationChoice",
+        "sha256": "6c5568e9d3cd1789fc99857e8a82b04d1a486789d9e3d572349046e2541d2940"
+      },
+      {
+        "table": "ChrCustomizationElement",
+        "sha256": "32537cc3a8c16e798d53e9fe920a8426de1f91a72c207f8be14b01e65e4688e5"
+      },
+      {
+        "table": "ChrCustomizationMaterial",
+        "sha256": "4d0685b3113ef04507bcb8c9a14241a34cee3b22816ac38beb3a81457230261e"
+      },
+      {
+        "table": "ChrCustomizationGeoset",
+        "sha256": "719ee6ae22931dd63e7a15d924ee696ef39812020af7e4dc867baa5bee2f8b04"
+      },
+      {
+        "table": "ChrModelTextureLayer",
+        "sha256": "25f89f4358132d6fd30f37ef9bed21999d6956315024e19adf8156e0dc4fc720"
+      },
+      {
+        "table": "ChrModelMaterial",
+        "sha256": "69dc885863a56ee4c50d19f4fe028557d26ebd6a6da388c31461f75651561209"
+      },
+      {
+        "table": "CharComponentTextureSections",
+        "sha256": "ce294d3f65d2bc3325a0e2a060a2d765f9c84c18b013ff3336f89ec99848738a"
+      },
+      {
+        "table": "TextureFileData",
+        "sha256": "994acf3471ab118fe8e7913d1d8777da778d464f7e897caac69b7b052c0df3f8"
+      }
+    ]
+  }
+}

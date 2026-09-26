@@ -26,7 +26,9 @@ import {
 } from "./NativeParticleEffect";
 import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
 import nativeModelManifest from "./nativeModelManifest.json";
-import { loadNativeActorBundle, type NativeModelManifest } from "./m2/actorLoader";
+import appearanceJson from "./vulperaAppearance.json";
+import { loadAppearanceTextures, loadNativeActorBundle, type NativeModelManifest } from "./m2/actorLoader";
+import { compileGeosetVisibility } from "./m2/appearance";
 import { NATIVE_TO_THREE_BASIS } from "./m2/coordinates";
 import { STAND_ANIMATION_ID, animationOptionLabel } from "./m2/animations";
 import {
@@ -863,11 +865,21 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       if (isStopped) return;
       setLoadedModelCount(2);
 
+      // Prepared customization appearance: composited body atlas, direct
+      // eye-colour texture and the geoset visibility of the tracked choices.
+      const appearance = await loadAppearanceTextures(appearanceJson, manifest);
+      if (isStopped) return;
+
       vulperaActor = createNativeM2Actor({
         model: vulperaBundle.model,
         skin: vulperaBundle.skin,
         label: ACTOR_ASSETS.vulpera.label,
         textures: vulperaBundle.textures,
+        replaceableTextures: appearance.textures,
+        geosetVisibility: compileGeosetVisibility(
+          vulperaBundle.skin.sections.map((section) => section.meshPartId),
+          appearanceJson,
+        ),
       });
       dummyActor = createNativeM2Actor({
         model: dummyBundle.model,
@@ -881,7 +893,11 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       replayAnchors = getReplayEffectAnchors(vulperaMount, dummyMount);
       scene.add(vulperaMount, dummyMount);
       canvas.dataset.actorPendingTextureTypes = vulperaActor.pendingTextureTypes.join(",");
-      setActorStatusLines([...vulperaActor.statusLines, ...dummyActor.statusLines]);
+      setActorStatusLines([
+        ...appearance.diagnostics,
+        ...vulperaActor.statusLines,
+        ...dummyActor.statusLines,
+      ]);
 
       modelBounds = new Box3()
         .setFromObject(vulperaMount)

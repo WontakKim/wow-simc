@@ -54,6 +54,8 @@ export interface NativeM2ActorOptions {
   textures: Map<number, Texture>;
   /** Replaceable-slot bindings keyed by texture type (character customization). */
   replaceableTextures?: Map<number, Texture>;
+  /** Prepared-appearance mesh part visibility; falls back to the exporter base rule. */
+  geosetVisibility?: Map<number, boolean>;
   lightPreset?: M2LightPreset;
 }
 
@@ -261,7 +263,7 @@ export function createNativeM2Actor(options: NativeM2ActorOptions): NativeM2Acto
     const mesh = new Mesh(geometries.get(section.index)!, shaderMaterial);
     mesh.name = `${label}-batch-${batch.index}`;
     mesh.frustumCulled = false;
-    mesh.visible = isGeosetVisibleByDefault(section.meshPartId);
+    mesh.visible = options.geosetVisibility?.get(section.meshPartId) ?? isGeosetVisibleByDefault(section.meshPartId);
     mesh.renderOrder = renderOrder.get(index) ?? index;
     root.add(mesh);
     batches.push({ batch, section, mesh, material: shaderMaterial });

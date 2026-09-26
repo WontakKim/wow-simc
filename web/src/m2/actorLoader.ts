@@ -17,6 +17,7 @@ import {
 } from "three";
 import { NoColorSpace } from "three";
 import { decodeNativeBlp } from "../nativeBlp";
+import { compositeCharacterAtlas, type AtlasOperation, type AtlasSourceImage, type VulperaAppearance } from "./appearance";
 import { parseM2File, parseSkinFile, type M2Model, type M2Skin } from "./model";
 
 const ASSET_ROOT = "/model/native-models";
@@ -55,7 +56,7 @@ async function sha256(source: ArrayBuffer) {
   return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-async function fetchPinnedAsset(asset: ManifestAsset) {
+export async function fetchPinnedAsset(asset: ManifestAsset) {
   const extension = asset.kind === "m2" ? "m2" : asset.kind === "skin" ? "skin" : "blp";
   const response = await fetch(`${ASSET_ROOT}/${asset.fileDataId}.${extension}`);
   if (!response.ok) {
@@ -69,7 +70,7 @@ async function fetchPinnedAsset(asset: ManifestAsset) {
   return source;
 }
 
-function createDisplayDomainTexture(decoded: ReturnType<typeof decodeNativeBlp>) {
+export function createDisplayDomainTexture(decoded: { width: number; height: number; pixels: Uint8Array }) {
   const texture = new DataTexture(decoded.pixels, decoded.width, decoded.height, RGBAFormat, UnsignedByteType);
   texture.colorSpace = NoColorSpace;
   texture.flipY = true;
@@ -110,4 +111,56 @@ export async function loadNativeActorBundle(manifest: NativeModelManifest, name:
   }));
 
   return { model, skin, textures, animationIds: actor.animationIds };
+}
+
+export interface AppearanceTextureBundle {
+  /** Composited/direct textures keyed by M2 replaceable texture type. */
+  textures: Map<number, Texture>;
+  diagnostics: string[];
+}
+
+/**
+ * Builds the replaceable-slot textures for a prepared appearance: every
+ * composited texture type is atlased at its DB dimensions, non-skin types bind
+ * their source directly, and the skin-extra type 8 falls back to the type 1
+ * atlas when the appearance provides none of its own.
+ */
+export async function loadAppearanceTextures(
+  appearance: VulperaAppearance,
+  manifest: NativeModelManifest,
+): Promise<AppearanceTextureBundle> {
+  const sources = new Map<number, AtlasSourceImage>();
+  const loadSource = async (fileDataId: number): Promise<AtlasSourceImage> => {
+    const cached = sources.get(fileDataId);
+    if (cached) return cached;
+    const asset = manifest.assets.find((entry) => entry.kind === "blp" && entry.fileDataId === fileDataId);
+    if (!asset) {
+      throw new Error(`Appearance FileDataID ${fileDataId} is not pinned in nativeModelManifest.json. Run node script/prepare-vulpera-appearance.mjs.`);
+    }
+    const decoded = decodeNativeBlp(await fetchPinnedAsset(asset), fileDataId);
+    const image = { width: decoded.width, height: decoded.height, pixels: decoded.pixels };
+    sources.set(fileDataId, image);
+    return image;
+  };
+
+  const textures = new Map<number, Texture>();
+  const diagnostics: string[] = [];
+  const operationsByType = new Map<number, AtlasOperation[]>();
+  for (const operation of appearance.atlasOperations) {
+    if (!operationsByType.has(operation.textureType)) operationsByType.set(operation.textureType, []);
+    operationsByType.get(operation.textureType)!.push(operation);
+  }
+  for (const [textureType, operations] of operationsByType) {
+    const size = appearance.atlasSizes.find((entry) => entry.textureType === textureType);
+    if (!size) throw new Error(`Appearance texture type ${textureType} has atlas operations but no ChrModelMaterial size.`);
+    for (const operation of operations) await loadSource(operation.sourceFileDataId);
+    const composite = compositeCharacterAtlas(size, operations, sources);
+    for (const diagnostic of composite.diagnostics) diagnostics.push(`appearance type ${textureType}: ${diagnostic}`);
+    textures.set(textureType, createDisplayDomainTexture({ width: size.width, height: size.height, pixels: composite.pixels }));
+  }
+  for (const direct of appearance.directTextures) {
+    textures.set(direct.textureType, createDisplayDomainTexture(await loadSource(direct.sourceFileDataId)));
+  }
+  if (!textures.has(8) && textures.has(1)) textures.set(8, textures.get(1)!);
+  return { textures, diagnostics };
 }

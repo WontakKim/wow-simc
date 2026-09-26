@@ -64,7 +64,7 @@ The browser loads both native models only from ignored local files. It does not 
 
 Both actors are rendered by the native M2 renderer in `web/src/m2/`: one three.js draw per SKIN batch, per-batch shader selection (the indexed `0x8000` 36-row table plus the legacy fallback), the 37-combiner M2 pixel pipeline, blend modes 0–7 with separate alpha factors, render flags (unlit/unfogged/two-sided/depth-test/depth-write), alpha-key discard, per-texture wrap flags, texture weight/transform and mesh color tracks, priority-plane/material-layer ordering, default geoset visibility from the full `meshPartId`, and GPU skinning from the model's own bone tracks (216 bones on the Vulpera, up to four weights per vertex). The native Z-up to three.js Y-up conversion is applied exactly once at each actor root. Lighting is the WoW model formula, not PBR: `C = sqrt((D·(ambient + sun·NdotL))² + D²·local) + unlitAdd`, with the exterior ambient split into sky/horizon/ground terms blended by the surface normal, a recorded, named preview preset supplying the sun and ambient values, and the unlit render flag bypassing the term. Color-domain policy: BLP bytes are display-domain; actor and particle textures bind without an sRGB internal format so the M2 combiners sample the authored bytes and write them to the canvas without a second encode, and no tonemapping is applied to the model shaders. Vertex shaders 15/16/18 and pixel shader 34 are gated as unsupported: a batch that selects them renders visibly flagged (unsupported batches would tint magenta) and is named in a status line rather than silently approximated.
 
-The Vulpera's customization (replaceable) texture slots have no pinned component BLPs yet; they bind a neutral mid-grey placeholder and the scene shows a named status line listing the pending texture types. The dummy is fully textured from its own body BLP.
+The Vulpera's customization is composed in the browser from the tracked appearance manifest `web/src/vulperaAppearance.json`. Texture type 1 (skin; the type-8 skin-extra slot falls back to it) is composited at its DB atlas size of 2048×1024 from the base copy, the fur-palette overlay, and the snout section rect, in texture-target-id order (wow.export's compositing order) with each layer's own blend equation (copy, multiply, source-threshold overlay, screen, alpha); texture type 19 (eyes) binds directly from its BLP. Every source BLP is pinned by SHA-256 in the manifest. Mesh-part visibility extends the default geoset rule with the selected choice of each option family (Compact ears, long snout, Desert pattern, …), so competing alternatives are never visible at once. The remaining replaceable types (2, 15, 18) still bind the neutral mid-grey placeholder and stay named in a status line; each occurs only on sections the geoset rules keep hidden, so the placeholder itself is not visible. The dummy is fully textured from its own body BLP.
 
 The ranged presentation keeps the character and dummy centers at a fixed 8 scene-unit separation (`x = -4` and `x = 4`) while they face each other, both at uniform native scale. These coordinates are presentation units, not in-game yards; the viewer does not provide a distance control or a game-range conversion.
 
@@ -72,7 +72,7 @@ Replay sync is the default scene mode. One replay cursor drives event selection 
 
 The public fixture's precombat records all share timestamp zero: their mapped particle components begin simultaneously at cursor zero, not along a recorded setup timeline. The scene labels a selected precombat record accordingly. The recorded timestamps select source action records; they are not hit times and do not provide exact cast or per-hit damage windows. Each mapped record starts a fixed 1.20-second **illustrative viewer motion window** that a later record can interrupt. The viewer blends between resolved stand and cast poses over 0.15 seconds using replay-cursor-derived weights (matrix blends of the two sampled native poses), including interrupted casts and the return to stand. This is presentation smoothing between sampled native poses, not verified native blend scheduling or verified cast timing; sequences shorter than the illustrative window hold their final pose before returning to stand. The 0.15-second interval occupies less than one fifth of the fixture’s shortest adjacent combat gap (0.754 seconds) and one quarter of its shortest mapped animation (0.600 seconds). Playback keeps the existing 1.20-second viewer tail after the final combat record and extends it through the viewer effect window for supported final spells, including precombat-only traces; records with no verified component add no effect tail. This window can outlast the authored particle lifespan. These viewer windows are not fabricated trace events or reported combat duration. Backward seeks resample the same native pose and native particles from the replay cursor, so pause, speed, previous/next, exact source-prefix selection, reset, and arbitrary seek all use the same clock.
 
-The character's native sequence selector remains available under the explicitly separate **Manual preview** mode. It lists every in-file M2 sequence by animation ID and variation with a minimal name table (`Stand (ID 0 variation 0)`, `SpellCastOmni (ID 54 variation 0)`, …). Only that mode advances animation from wall-clock time; it never competes with replay sync. The proof uses the bare model without character-customization texture choices, equipment, or transmog.
+The character's native sequence selector remains available under the explicitly separate **Manual preview** mode. It lists every in-file M2 sequence by animation ID and variation with a minimal name table (`Stand (ID 0 variation 0)`, `SpellCastOmni (ID 54 variation 0)`, …). Only that mode advances animation from wall-clock time; it never competes with replay sync. The proof uses the model with its composed customization appearance, but no equipment or transmog.
 
 ### Acquire the local actor models
 
@@ -87,6 +87,20 @@ The helper resolves each actor's dependency closure from the model's own SFID (L
 The pinned set is eight files, 18,547,180 bytes total: Training Dummy — M2 `125259` (82,878 B), LOD0 SKIN `478820` (6,352 B), body BLP `1378206` (1,399,300 B); Vulpera male — M2 `1890761` (16,315,502 B), LOD0 SKIN `1893903` (324,480 B), BLPs `3552542` (44,900 B), `4531035` (350,724 B), `5210139` (23,044 B). Both actors carry all replay animation data in-file (sequence flag `0x20`), so the closure resolves no SKEL or `.anim` files. The browser renders these native files directly: the primary scene builds its three.js geometry, batch materials, and animation sampling from them.
 
 wow.export's license covers the exporter, not Blizzard's game assets. The downloaded models remain subject to Blizzard's rights and terms; do not commit or redistribute them. `.gitignore` excludes both `.local/` and `web/public/model/`.
+
+### Compose the Vulpera customization appearance
+
+The Vulpera's appearance is resolved against the live DB2 tables once and committed as data:
+
+```sh
+node script/prepare-vulpera-appearance.mjs
+```
+
+The helper downloads the eleven DB2 tables it joins (ChrModel, ChrCustomizationOption, ChrCustomizationChoice, ChrCustomizationElement, ChrCustomizationMaterial, ChrCustomizationGeoset, ChrModelTextureLayer, ChrModelMaterial, CharComponentTextureSections, TextureFileData) as CSVs from the pinned wago.tools build `12.1.0.69933`, caching them under the ignored `web/public/model/db2/`. The tracked choice manifest inside the script fixes three options explicitly — ears `336 → 3323 "Compact"`, `852 → 9541`, and `854 → 9581 "Unpierced"` — while every other option takes its lowest-OrderIndex choice that is not flagged `0x20`. The emitted `web/src/vulperaAppearance.json` records each choice's source (`explicit` or `default`), the resolved geoset families, the atlas operations (texture target, layer, blend mode, source FileDataID, destination rect), and every table's SHA-256; later runs verify their CSV cache against those pins. Referenced BLPs download from the same pinned CASC endpoint as the models, validate as BLPs, and append size/SHA-256 pins to `web/src/nativeModelManifest.json`; the browser re-verifies those pins at load time.
+
+Two caveats are recorded rather than papered over. The repository's option labels for 852 and 854 disagree with the CSV names — in the CSV 852 is "Eye Color" and 854 is "Earrings" — and the CSV names are authoritative here. And two material groups are skipped with reasons in the JSON: the one material targeting texture target 14 has no ChrModelTextureLayer row for it, and eight fur-palette materials are gated on related fur choices that were not selected.
+
+The browser compositor that consumes this JSON (`web/src/m2/appearance.ts`) ports its blend equations and compositing order from wow.export's character-material compositor, under the MIT license note above.
 
 ### Acquire the original native particle components
 
@@ -232,12 +246,13 @@ npm run typecheck
 npm test
 node ../script/prepare-native-effects.test.mjs
 node ../script/prepare-native-models.test.mjs
+node ../script/prepare-vulpera-appearance.test.mjs
 npm run build
 PLAYWRIGHT_BROWSERS_PATH=../.local/playwright npx playwright install chromium
 PLAYWRIGHT_BROWSERS_PATH=../.local/playwright npm run test:browser
 ```
 
-The browser download and all generated build/test outputs remain ignored. Browser tests cover automatic reference loading and retry, genuine model loading, replay/manual/native mode separation, both original six-emitter components and their nine BLPs, source-linked Elemental Blast movement and overlap, deterministic seek/pause/reset/mode restore, delayed and failed native loads, real character pose changes, animation and camera controls, actionable model/WebGL failure states, the bundled full-state fixture, a legacy partial report, navigation, playback, diagnostics, and desktop/mobile overflow.
+The browser download and all generated build/test outputs remain ignored. Browser tests cover automatic reference loading and retry, genuine model loading, the composed Vulpera customization appearance (resolved texture types and textured caster pixels), replay/manual/native mode separation, both original six-emitter components and their nine BLPs, source-linked Elemental Blast movement and overlap, deterministic seek/pause/reset/mode restore, delayed and failed native loads, real character pose changes, animation and camera controls, actionable model/WebGL failure states, the bundled full-state fixture, a legacy partial report, navigation, playback, diagnostics, and desktop/mobile overflow.
 
 ## Generated outputs
 
