@@ -25,11 +25,12 @@ import {
   type NativeParticleRenderInstance,
 } from "./NativeParticleEffect";
 import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
+import { selectParticlePixelShader } from "./nativeM2Blend";
 import nativeModelManifest from "./nativeModelManifest.json";
 import appearanceJson from "./vulperaAppearance.json";
 import { loadAppearanceTextures, loadNativeActorBundle, type NativeModelManifest } from "./m2/actorLoader";
 import { compileGeosetVisibility } from "./m2/appearance";
-import { NATIVE_TO_THREE_BASIS } from "./m2/coordinates";
+import { NATIVE_TO_THREE_BASIS, threeToNativePoint } from "./m2/coordinates";
 import { STAND_ANIMATION_ID, animationOptionLabel } from "./m2/animations";
 import {
   blendBoneMatrices,
@@ -298,7 +299,7 @@ function describeReplayComponentAnchor(spellId: number, component: ReplayCompone
     return "60%-bounds anchored launch (source attachment 19 Base or -1 with positioner 513, Lightning Bolt branch unresolved) · dummy attachment 34 (Chest) translation for arrival";
   }
   if (component.anchor === "target") {
-    return "native dummy attachment 34 (Chest) translation · orientation and scale not passed by the effect API";
+    return "native dummy attachment 34 (Chest) transform from the current pose; historical orientation not reconstructed";
   }
   return "60%-bounds anchored at caster (source attachment not established for this component)";
 }
@@ -309,7 +310,7 @@ function sampleReplayEffectPath(caster: Vector3, target: Vector3, componentTimeS
 }
 
 function threeToNative(value: Vector3): [number, number, number] {
-  return [value.x, value.z, -value.y];
+  return threeToNativePoint(value.toArray());
 }
 
 export function resolveReplayAnimation(
@@ -451,6 +452,21 @@ function sampleAttachmentWorldPosition(actor: NativeM2Actor, mount: Group, attac
   return actor.root.localToWorld(new Vector3(nativeMatrix[12], nativeMatrix[13], nativeMatrix[14]));
 }
 
+function sampleAttachmentEffectTransform(actor: NativeM2Actor, attachmentId: number) {
+  const nativeMatrix = actor.sampleAttachment(attachmentId);
+  if (!nativeMatrix) return null;
+  actor.root.updateWorldMatrix(true, false);
+  // Convert from three.js world coordinates back to native effect space. The
+  // attachment matrix is already native column-major and includes bone motion.
+  return NATIVE_BASIS.clone().invert().multiply(actor.root.matrixWorld)
+    .multiply(new Matrix4().fromArray(nativeMatrix)).toArray();
+}
+
+function effectTranslationMatrix(worldPosition: Vector3) {
+  const [x, y, z] = threeToNative(worldPosition);
+  return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+}
+
 function placeModel(root: Group, x: number, rotationY: number) {
   root.rotation.y = rotationY;
   root.updateWorldMatrix(true, true);
@@ -507,12 +523,19 @@ export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, 
 function describeNativeEffectLimitations(effect: NativeParticleEffect) {
   return [
     ...effect.unsupportedEmitters,
+    ...(effect.model.emitters.some((emitter) => {
+      const control = effect.model.particleTextureControls[emitter.index];
+      const value = control ? control[0] | (control[1] << 8) : 0;
+      return selectParticlePixelShader(emitter.flags, value) === 3;
+    }) ? ["reference PS3 color equation; TXAC UV behavior not reconstructed"] : []),
     ...effect.unsupportedMeshBatches,
     ...(effect.model.fileDataId === 4329984 ? ["SpellMissileMotion 2967 (Elemental Blast) has authored transAngle/transMag/transFront/scale script but its runtime coordinate frame is unverified; not applied; Lava Burst motion ID 0 has no script"] : []),
     ...(effect.model.fileDataId === 794788 ? ["SpellMissileMotion 2969 script coordinate frame unverified; not applied; BaseMissileSpeed 0 inherits shared 4329984 flight duration"] : []),
     ...(effect.model.fileDataId === 613807 ? ["SpellMissileMotion 2968 script coordinate frame unverified; not applied; BaseMissileSpeed 0 inherits shared 4329984 flight duration"] : []),
     ...(effect.model.fileDataId === 6211617 ? ["Lightning Bolt branch has SpellMissileMotion 4856 parabola or motion ID 0; branch unresolved; no arc applied; BaseMissileSpeed 0"] : []),
     ...effect.ribbonLimitations,
+    "caster attachment rotation sampled at the displayed pose (past pose unavailable); projectile source paths translate only",
+    "128-entry deterministic twinkle table replaces unrecoverable client std::rand entries; variable emission-rate variation is held per occurrence",
     ...(effect.meshTriangleCount > 0
       ? [`authored animation sequence ${effect.animationSequenceIndex} (ID ${effect.model.sequenceIds[effect.animationSequenceIndex]}) sampled for the mesh and emitters; retail spell sequence scheduling not verified`]
       : []),
@@ -525,10 +548,6 @@ function describeNativeEffectLimitations(effect: NativeParticleEffect) {
       (emitter.flags & 0x1) !== 0 ? [`emitter ${emitter.index} flag 0x1 particle shading not reconstructed (unlit billboard)`] : []),
     ...effect.model.emitters.flatMap((emitter) =>
       (emitter.flags & 0x20) !== 0 ? [`emitter ${emitter.index} flag 0x20 particle bone-scale size inheritance not reconstructed`] : []),
-    ...effect.model.emitters.flatMap((emitter) =>
-      (emitter.flags & 0x8000) !== 0 ? [`emitter ${emitter.index} flag 0x8000 squirt burst emission not reproduced; continuous-rate sampling only`] : []),
-    ...effect.model.emitters.flatMap((emitter) =>
-      (emitter.flags & 0x40) !== 0 ? [`emitter ${emitter.index} parent-particle velocity inheritance not modeled`] : []),
     ...effect.model.emitters.flatMap((emitter) =>
       (emitter.flags & 0x20000000) !== 0
         ? [`emitter ${emitter.index}: Modx4 color flag not applied (no invented multiply rule)`]
@@ -725,8 +744,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         throw new Error("Replay caster model is unavailable.");
       }
       // Target endpoint from the dummy's authored chest attachment; the bounds
-      // anchor remains the fallback. The effect API takes translations only.
+      // anchor remains the fallback.
       const targetAnchor = sampleAttachmentWorldPosition(dummyActor, dummyMount, 34) ?? anchors.target;
+      const targetTransform = sampleAttachmentEffectTransform(dummyActor, 34)
+        ?? effectTranslationMatrix(targetAnchor);
       const sampleCasterAttachment = (attachmentId: number) =>
         sampleAttachmentWorldPosition(vulperaActor!, vulperaMount!, attachmentId);
       const occurrences = resolveReplayEffectOccurrences(
@@ -745,15 +766,21 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             .map((component) => ({ occurrence, component })));
           const instances: NativeParticleRenderInstance[] = matching.map(({ occurrence, component }) => {
             const source = getReplayEffectSourceAnchor(occurrence.spellId, component.fileDataId, sampleCasterAttachment, anchors.caster);
+            const attachmentId = REPLAY_SOURCE_ATTACHMENTS[occurrence.spellId]?.[component.fileDataId];
+            // The pose sampler currently supplies the attachment's rotation at
+            // the displayed frame; past caster rotations are not reconstructed.
+            const casterTransform = attachmentId === undefined ? null
+              : sampleAttachmentEffectTransform(vulperaActor!, attachmentId);
             return {
               timeSeconds: occurrence.componentTimeSeconds - (occurrence.spellId !== 117014 && (component.fileDataId === 4329984 || component.fileDataId === 6211617) ? REPLAY_EFFECT_RELEASE_SECONDS : 0),
               emissionEndSeconds: component.anchor === "projectile"
                 ? getReplayEffectTravelSeconds(occurrence.spellId) : OTHER_REPLAY_EMISSION_SECONDS,
               modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
-              sourceTranslationAtTime: (timeSeconds) => threeToNative(component.anchor === "projectile"
-                ? sampleReplayEffectPath(source, targetAnchor, timeSeconds, occurrence.spellId)
-                : component.anchor === "caster" ? source : targetAnchor),
+              occurrenceSeed: occurrence.eventKey,
+              sourceTransformAtTime: (timeSeconds) => component.anchor === "projectile"
+                ? effectTranslationMatrix(sampleReplayEffectPath(source, targetAnchor, timeSeconds, occurrence.spellId))
+                : component.anchor === "caster" ? casterTransform ?? effectTranslationMatrix(source) : targetTransform,
             };
           });
           particleCount += effect.setReplayInstances(instances, camera);

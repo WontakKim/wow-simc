@@ -21,11 +21,12 @@ import {
   Vector2,
   Vector3,
 } from "three";
+import { nativeToThreePoint as nativeToThree } from "./m2/coordinates";
 import { decodeNativeBlp } from "./nativeBlp";
 import type { NativeEffectAsset } from "./nativeEffectAssets";
 import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticleEmitter, type NativeRibbonEmitter, type NativeSkinProfile, type Vector3Tuple } from "./nativeM2";
 import { m2BlendParams, m2ParticleAlphaThreshold, m2RenderFlags, selectParticlePixelShader } from "./nativeM2Blend";
-import { applyBonePoint, sampleNativeEmitter, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeParticleSample } from "./nativeParticles";
+import { sampleNativeEmitter, sampleNativeRibbonEdges, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeMatrix, type NativeParticleSample } from "./nativeParticles";
 
 const ASSET_ROOT = "/model/native-effects";
 const SETUP_COMMAND = "node script/prepare-native-effects.mjs";
@@ -34,7 +35,8 @@ export interface NativeParticleRenderInstance {
   timeSeconds: number;
   emissionEndSeconds: number;
   modelScale: number;
-  sourceTranslationAtTime: (timeSeconds: number) => Vector3Tuple;
+  sourceTransformAtTime: (timeSeconds: number) => NativeMatrix;
+  occurrenceSeed?: string;
 }
 
 interface RibbonBatch {
@@ -58,11 +60,9 @@ interface EmitterBatch {
   alphaCutoffs: InstancedBufferAttribute;
   uvScrolls1: InstancedBufferAttribute;
   uvScrolls2: InstancedBufferAttribute;
+  ages: InstancedBufferAttribute;
+  isTail: boolean;
   capacity: number;
-}
-
-function nativeToThree(value: Vector3Tuple): Vector3Tuple {
-  return [value[0], -value[2], value[1]];
 }
 
 function maximumTrackValue(track: { sequences: Array<{ values: number[] }> }) {
@@ -72,7 +72,9 @@ function maximumTrackValue(track: { sequences: Array<{ values: number[] }> }) {
 function emitterCapacity(emitter: NativeParticleEmitter) {
   const maximumRate = maximumTrackValue(emitter.emissionRate) + Math.abs(emitter.emissionRateVariation);
   const maximumLifespan = maximumTrackValue(emitter.lifespan) + Math.abs(emitter.lifespanVariation);
-  return Math.max(8, Math.min(1024, Math.ceil(maximumRate * (maximumLifespan + 0.1)) + 8));
+  const capacity = Math.max(8, Math.ceil(maximumRate * (maximumLifespan + 0.1)) + 8);
+  if (!Number.isSafeInteger(capacity)) throw new Error(`Emitter ${emitter.index}: authored particle capacity is not a safe integer.`);
+  return capacity;
 }
 
 function createTexture(decoded: ReturnType<typeof decodeNativeBlp>) {
@@ -94,16 +96,17 @@ function createTexture(decoded: ReturnType<typeof decodeNativeBlp>) {
 function createEmitterBatch(
   emitter: NativeParticleEmitter,
   textures: DataTexture[],
-  pixelShader: 0 | 1 | 2,
+  pixelShader: 0 | 1 | 2 | 3,
   maximumInstanceCount: number,
+  isTail = false,
 ): EmitterBatch {
   const capacity = emitterCapacity(emitter) * maximumInstanceCount;
   const geometry = new InstancedBufferGeometry();
   geometry.setAttribute("position", new BufferAttribute(new Float32Array([
-    -0.5, -0.5, 0,
-    0.5, -0.5, 0,
-    0.5, 0.5, 0,
-    -0.5, 0.5, 0,
+    -1, -1, 0,
+    1, -1, 0,
+    1, 1, 0,
+    -1, 1, 0,
   ]), 3));
   geometry.setAttribute("uv", new BufferAttribute(new Float32Array([
     0, 0,
@@ -122,6 +125,7 @@ function createEmitterBatch(
   const alphaCutoffs = new InstancedBufferAttribute(new Float32Array(capacity), 1).setUsage(DynamicDrawUsage);
   const uvScrolls1 = new InstancedBufferAttribute(new Float32Array(capacity * 2), 2).setUsage(DynamicDrawUsage);
   const uvScrolls2 = new InstancedBufferAttribute(new Float32Array(capacity * 2), 2).setUsage(DynamicDrawUsage);
+  const ages = new InstancedBufferAttribute(new Float32Array(capacity), 1).setUsage(DynamicDrawUsage);
   geometry.setAttribute("instanceOffset", offsets);
   geometry.setAttribute("instanceSize", sizes);
   geometry.setAttribute("instanceColor", colors);
@@ -131,13 +135,14 @@ function createEmitterBatch(
   geometry.setAttribute("instanceAlphaCutoff", alphaCutoffs);
   geometry.setAttribute("instanceUvScroll1", uvScrolls1);
   geometry.setAttribute("instanceUvScroll2", uvScrolls2);
+  geometry.setAttribute("instanceAge", ages);
   geometry.instanceCount = 0;
 
   const velocityOriented = (emitter.flags & 0x4) !== 0;
   // PS1 (2ColorTex_3AlphaTex) and PS2 (3ColorTex_3AlphaTex) sample all three
   // authored textures; the flipbook rect keeps applying to the primary UV only.
   const usesMultiTexture = pixelShader > 0;
-  const combiner = pixelShader === 2
+  const combiner = pixelShader === 2 || pixelShader === 3
     ? "vec4 combined = tex1 * tex2 * tex3 * particleColor;"
     : pixelShader === 1
       ? `vec4 combined = vec4(tex1.rgb * tex2.rgb * particleColor.rgb,
@@ -170,6 +175,7 @@ function createEmitterBatch(
       attribute float instanceAlphaCutoff;
       attribute vec2 instanceUvScroll1;
       attribute vec2 instanceUvScroll2;
+      attribute float instanceAge;
       uniform float uMultiTexScale1;
       uniform float uMultiTexScale2;
       varying float particleAlphaCutoff;
@@ -191,7 +197,16 @@ function createEmitterBatch(
         float sine = sin(angle);
         vec2 rotated = vec2(local.x * cosine - local.y * sine, local.x * sine + local.y * cosine);
         vec4 center = modelViewMatrix * vec4(instanceOffset, 1.0);
-        gl_Position = projectionMatrix * (center + vec4(rotated, 0.0, 0.0));
+        ${isTail ? `
+          vec3 viewTrail = -(modelViewMatrix * vec4(instanceVelocity, 0.0)).xyz
+            * ${(emitter.flags & 0x400) !== 0 ? `min(instanceAge, ${emitter.tailLength.toFixed(8)})` : emitter.tailLength.toFixed(8)};
+          float screenLength = length(viewTrail.xy);
+          vec3 halfTrail = screenLength > 0.01 ? viewTrail * 0.5 : vec3(instanceSize.x * 0.05, 0.0, 0.0);
+          vec3 halfWidth = screenLength > 0.01
+            ? vec3(-viewTrail.y, viewTrail.x, 0.0) * (instanceSize.y * viewScale.y / screenLength)
+            : vec3(0.0, instanceSize.y * 0.05, 0.0);
+          gl_Position = projectionMatrix * (center + vec4(halfTrail + position.x * halfTrail + position.y * halfWidth, 0.0));
+        ` : "gl_Position = projectionMatrix * (center + vec4(rotated, 0.0, 0.0));"}
         particleUv = instanceUvRect.xy + uv * instanceUvRect.zw;
         ${usesMultiTexture ? "particleUv2 = uv * uMultiTexScale1 + instanceUvScroll1;\n        particleUv3 = uv * uMultiTexScale2 + instanceUvScroll2;" : ""}
         particleColor = instanceColor;
@@ -231,7 +246,7 @@ function createEmitterBatch(
     fog: false,
   });
 
-  return { emitter, geometry, material, offsets, sizes, colors, rotations, uvRects, velocities, alphaCutoffs, uvScrolls1, uvScrolls2, capacity };
+  return { emitter, geometry, material, offsets, sizes, colors, rotations, uvRects, velocities, alphaCutoffs, uvScrolls1, uvScrolls2, ages, isTail, capacity };
 }
 
 function squaredDistance(sample: NativeParticleSample, cameraPosition: Vector3) {
@@ -276,20 +291,15 @@ export class NativeParticleEffect {
     this.skin = skin;
     if (model.vertices.length > 0 && !skin) throw new Error(`FileDataID ${model.fileDataId}: authored mesh requires a pinned SKIN profile.`);
     if (model.vertices.length === 0 && skin) throw new Error(`FileDataID ${model.fileDataId}: SKIN supplied without authored vertices.`);
-    // Reference pixel-shader selection: flags and the particle TXAC entry pick a
-    // combiner per emitter; the nonzero-TXAC UV variant (PS3) and refraction
-    // (PS4) are diagnosed instead of rendered.
+    // PS3 has the PS2 color equation; only its TXAC UV behavior remains unknown.
+    // PS4 refraction remains omitted.
     this.unsupportedEmitters = [];
-    const renderedPixelShaders: Array<0 | 1 | 2> = [];
+    const renderedPixelShaders: Array<0 | 1 | 2 | 3> = [];
     const renderedEmitters: NativeParticleEmitter[] = [];
     for (const emitter of model.emitters) {
       const control = model.particleTextureControls[emitter.index];
       const textureControlValue = control ? control[0] | (control[1] << 8) : 0;
       const pixelShader = selectParticlePixelShader(emitter.flags, textureControlValue);
-      if (pixelShader === 3) {
-        this.unsupportedEmitters.push(`emitter ${emitter.index}: nonzero TXAC UV shader unsupported`);
-        continue;
-      }
       if (pixelShader === 4) {
         this.unsupportedEmitters.push(`emitter ${emitter.index}: refraction unsupported`);
         continue;
@@ -303,14 +313,17 @@ export class NativeParticleEffect {
     this.renderedEmitterCount = renderedEmitters.length;
     this.maximumInstanceCount = maximumInstanceCount;
     this.textures = decodedTextures.map(createTexture);
-    this.batches = renderedEmitters.map((emitter, batchIndex) => {
+    this.batches = renderedEmitters.flatMap((emitter, batchIndex) => {
       const textureCount = renderedPixelShaders[batchIndex] > 0 ? emitter.textureIndices.length : 1;
       for (const textureIndex of emitter.textureIndices.slice(0, textureCount)) {
         if (!this.textures[textureIndex]) {
           throw new Error(`FileDataID ${model.fileDataId}: emitter ${emitter.index} texture is unavailable.`);
         }
       }
-      return createEmitterBatch(emitter, this.textures, renderedPixelShaders[batchIndex], maximumInstanceCount);
+      return [
+        ...((emitter.flags & 0x20000) !== 0 ? [createEmitterBatch(emitter, this.textures, renderedPixelShaders[batchIndex], maximumInstanceCount)] : []),
+        ...((emitter.flags & 0x40000) !== 0 ? [createEmitterBatch(emitter, this.textures, renderedPixelShaders[batchIndex], maximumInstanceCount, true)] : []),
+      ];
     });
 
     for (const batch of this.batches) {
@@ -320,15 +333,12 @@ export class NativeParticleEffect {
       this.group.add(mesh);
     }
     this.ribbonLimitations = model.ribbons.flatMap((ribbon) => [
-      ...(ribbon.materialIndices.length > 1 ? [`ribbon ${ribbon.index}: ${ribbon.materialIndices.length - 1} secondary materials not combined; first M2BLEND material only`] : []),
-      ...(ribbon.textureIndices.length > 1 ? [`ribbon ${ribbon.index}: ${ribbon.textureIndices.length - 1} secondary texture slots not combined; original primary texture only`] : []),
-      ...(ribbon.gravity !== 0 ? [`ribbon ${ribbon.index}: authored gravity ${ribbon.gravity} edge behavior not reconstructed`] : []),
       ...(ribbon.textureTransformLookupIndex !== 0 ? [`ribbon ${ribbon.index}: texture transform lookup ${ribbon.textureTransformLookupIndex} not applied`] : []),
       ...(ribbon.colorIndex !== 0 ? [`ribbon ${ribbon.index}: color index ${ribbon.colorIndex} not applied`] : []),
-      ...((model.materials[ribbon.materialIndices[0]].flags & 0x140) !== 0 ? [`ribbon ${ribbon.index}: material flags 0x40 and 0x100 have unverified shadow/render semantics`] : []),
+      ...(ribbon.materialIndices.some((index) => (model.materials[index].flags & 0x140) !== 0) ? [`ribbon ${ribbon.index}: material flags 0x40 and 0x100 have unverified shadow/render semantics`] : []),
     ]);
-    this.ribbonBatches = model.ribbons.map((ribbon) => {
-      const materialSource = model.materials[ribbon.materialIndices[0]];
+    this.ribbonBatches = model.ribbons.flatMap((ribbon) => ribbon.materialIndices.map((materialIndex, passIndex) => {
+      const materialSource = model.materials[materialIndex];
       if ((materialSource.flags & ~0x15d) !== 0) {
         throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} material flags 0x${materialSource.flags.toString(16)} contain unsupported bits.`);
       }
@@ -337,8 +347,10 @@ export class NativeParticleEffect {
       if (!(ribbon.edgesPerSecond > 0) || !(ribbon.edgeLifetime > 0) || !Number.isFinite(ribbon.edgesPerSecond * ribbon.edgeLifetime)) {
         throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} invalid authored edge rate or lifetime.`);
       }
-      const capacity = (Math.ceil(ribbon.edgesPerSecond * ribbon.edgeLifetime) + 3) * maximumInstanceCount;
-      if (capacity > 2048) throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} exceeds the 2048-edge resource bound.`);
+      const capacity = (Math.ceil(Math.ceil(ribbon.edgesPerSecond) * Math.max(ribbon.edgeLifetime, 0.25)) + 2) * maximumInstanceCount;
+      if (!Number.isSafeInteger(capacity) || capacity * 2 > 65535) {
+        throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} requires more than the 16-bit index resource bound.`);
+      }
       const geometry = new BufferGeometry();
       geometry.setAttribute("position", new BufferAttribute(new Float32Array(capacity * 6), 3).setUsage(DynamicDrawUsage));
       geometry.setAttribute("uv", new BufferAttribute(new Float32Array(capacity * 4), 2).setUsage(DynamicDrawUsage));
@@ -346,8 +358,8 @@ export class NativeParticleEffect {
       const indices = new Uint16Array((capacity - maximumInstanceCount) * 6);
       geometry.setIndex(new BufferAttribute(indices, 1));
       geometry.setDrawRange(0, 0);
-      const texture = this.textures[ribbon.textureIndices[0]];
-      if (!texture) throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} primary texture is unavailable.`);
+      const texture = this.textures[ribbon.textureIndices[passIndex]];
+      if (!texture) throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} pass ${passIndex} texture is unavailable.`);
       const material = new ShaderMaterial({
         uniforms: {
           map: { value: texture },
@@ -377,7 +389,7 @@ export class NativeParticleEffect {
       mesh.renderOrder = 100 + ribbon.priorityPlane;
       this.group.add(mesh);
       return { ribbon, geometry, material, mesh, capacity };
-    });
+    }));
     this.meshBatches = [];
     this.unsupportedMeshBatches = [];
     this.meshTriangleCount = skin ? skin.batches.reduce((total, batch) => total + skin.sections[batch.sectionIndex].indexCount / 3, 0) : 0;
@@ -516,58 +528,26 @@ export class NativeParticleEffect {
       let edgeCount = 0;
       let triangleCount = 0;
       for (const instance of instances) {
-        if (instance.timeSeconds < 0) continue;
-        const headTime = Math.min(instance.timeSeconds, instance.emissionEndSeconds);
-        const oldestTime = Math.max(0, instance.timeSeconds - ribbon.edgeLifetime);
-        if (headTime <= oldestTime) continue;
-        let previousEdge = -1;
-        const sampleTimes: number[] = [];
-        for (let time = headTime; time >= oldestTime; time -= 1 / ribbon.edgesPerSecond) sampleTimes.push(time);
-        if (sampleTimes.at(-1)! > oldestTime) sampleTimes.push(oldestTime);
-        for (const sampleTime of sampleTimes) {
-          const timeMs = sampleTime * 1000;
-          const enabled = sampleNativeTrack(ribbon.enabled, timeMs, duration, 1,
-            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-          if (enabled === 0) { previousEdge = -1; continue; }
-          if (edgeCount >= batch.capacity) throw new Error(`FileDataID ${this.model.fileDataId}: ribbon ${ribbon.index} exceeds its ${batch.capacity}-edge resource bound.`);
-          const position = ribbon.position;
-          const above = sampleNativeTrack(ribbon.heightAbove, timeMs, duration, 0,
-            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-          const below = sampleNativeTrack(ribbon.heightBelow, timeMs, duration, 0,
-            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-          const translate = instance.sourceTranslationAtTime(sampleTime);
-          const bone = this.model.bones[ribbon.boneIndex];
-          for (const [side, height] of [above, -below].entries()) {
-            const point = applyBonePoint([position[0], position[1], position[2] + height], bone,
-              timeMs, duration, this.model.globalSequenceDurationsMs, this.model.bones, this.animationSequenceIndex);
-            const converted = nativeToThree([translate[0] + point[0] * instance.modelScale,
-              translate[1] + point[1] * instance.modelScale, translate[2] + point[2] * instance.modelScale]);
-            positions.setXYZ(edgeCount * 2 + side, ...converted);
-          }
-          const color = sampleNativeTrack(ribbon.color, timeMs, duration, [1, 1, 1] as Vector3Tuple,
-            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-          const alpha = sampleNativeTrack(ribbon.alpha, timeMs, duration, 1,
-            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-          const slot = sampleNativeTrack(ribbon.textureSlot, timeMs, duration, 0,
-            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-          const frame = Math.max(0, Math.min(ribbon.rows * ribbon.columns - 1, slot));
-          const column = frame % ribbon.columns;
-          const row = Math.floor(frame / ribbon.columns);
-          const u = column / ribbon.columns;
-          const v = 1 - (row + 1) / ribbon.rows;
-          const along = (headTime - sampleTime) / ribbon.edgeLifetime;
-          uvs.setXY(edgeCount * 2, u + along / ribbon.columns, v);
-          uvs.setXY(edgeCount * 2 + 1, u + along / ribbon.columns, v + 1 / ribbon.rows);
-          for (const side of [0, 1]) colors.setXYZW(edgeCount * 2 + side, color[0], color[1], color[2], alpha);
-          if (previousEdge >= 0) {
+        const edges = sampleNativeRibbonEdges(ribbon, this.model.bones[ribbon.boneIndex], duration, instance.timeSeconds,
+          { ...instance, bones: this.model.bones, globalSequenceDurationsMs: this.model.globalSequenceDurationsMs,
+            sequenceIndex: this.animationSequenceIndex });
+        if (edgeCount + edges.length > batch.capacity) {
+          throw new Error(`FileDataID ${this.model.fileDataId}: ribbon ${ribbon.index} exceeds its ${batch.capacity}-edge resource bound.`);
+        }
+        for (const [index, edge] of edges.entries()) {
+          positions.setXYZ(edgeCount * 2, ...nativeToThree(edge.above));
+          positions.setXYZ(edgeCount * 2 + 1, ...nativeToThree(edge.below));
+          uvs.setXY(edgeCount * 2, edge.u, edge.v);
+          uvs.setXY(edgeCount * 2 + 1, edge.u, edge.v + 1 / ribbon.rows);
+          for (const side of [0, 1]) colors.setXYZW(edgeCount * 2 + side, ...edge.color, edge.alpha);
+          if (index > 0) {
+            const previous = (edgeCount - 1) * 2;
             const next = edgeCount * 2;
-            const previous = previousEdge * 2;
             for (const [offset, vertex] of [previous, previous + 1, next, previous + 1, next + 1, next].entries()) {
               indices.setX(triangleCount * 3 + offset, vertex);
             }
             triangleCount += 2;
           }
-          previousEdge = edgeCount;
           edgeCount += 1;
         }
       }
@@ -610,12 +590,14 @@ export class NativeParticleEffect {
         batch.sizes.setXY(index, particle.size[0], particle.size[1]);
         batch.colors.setXYZW(index, particle.color[0], particle.color[1], particle.color[2], particle.alpha);
         batch.rotations.setX(index, particle.rotation);
-        const column = particle.uvFrame % batch.emitter.columns;
-        const row = Math.floor(particle.uvFrame / batch.emitter.columns);
+        const frame = batch.isTail ? particle.tailUvFrame : particle.uvFrame;
+        const column = frame % batch.emitter.columns;
+        const row = Math.floor(frame / batch.emitter.columns);
         const width = 1 / batch.emitter.columns;
         const height = 1 / batch.emitter.rows;
         batch.uvRects.setXYZW(index, column * width, 1 - (row + 1) * height, width, height);
         batch.velocities.setXYZ(index, ...velocity);
+        batch.ages.setX(index, particle.age);
         batch.alphaCutoffs.setX(index, particle.alphaCutoff);
         batch.uvScrolls1.setXY(index, ...(particle.uvScrollOffsets?.[0] ?? [0, 0]));
         batch.uvScrolls2.setXY(index, ...(particle.uvScrollOffsets?.[1] ?? [0, 0]));
@@ -628,6 +610,7 @@ export class NativeParticleEffect {
       batch.rotations.needsUpdate = true;
       batch.uvRects.needsUpdate = true;
       batch.velocities.needsUpdate = true;
+      batch.ages.needsUpdate = true;
       batch.alphaCutoffs.needsUpdate = true;
       batch.uvScrolls1.needsUpdate = true;
       batch.uvScrolls2.needsUpdate = true;
@@ -657,7 +640,8 @@ export class NativeParticleEffect {
       });
       positions.needsUpdate = true;
       normals.needsUpdate = true;
-      const source = nativeToThree(instance.sourceTranslationAtTime(instance.timeSeconds));
+      const transform = instance.sourceTransformAtTime(instance.timeSeconds);
+      const source = nativeToThree([transform[12], transform[13], transform[14]]);
       batch.mesh.position.set(...source);
       batch.mesh.scale.setScalar(instance.modelScale);
       let opacity = 1;
@@ -688,7 +672,9 @@ export class NativeParticleEffect {
 
   setTime(timeSeconds: number, camera: Camera) {
     const instances = [{ timeSeconds, emissionEndSeconds: Number.POSITIVE_INFINITY,
-      modelScale: 1, sourceTranslationAtTime: () => [0, 0, 0] as Vector3Tuple }];
+      modelScale: 1, sourceTransformAtTime: () => [
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+      ] }];
     this.renderMesh(instances);
     return this.renderInstances(instances, camera);
   }

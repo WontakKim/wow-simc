@@ -24,6 +24,10 @@ import { m2BlendParams } from "./nativeM2Blend";
 import { NativeParticleEffect } from "./NativeParticleEffect";
 import * as particleSampling from "./nativeParticles";
 
+function translationMatrix(x: number, y: number, z: number) {
+  return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+}
+
 function loadAsset(fileDataId: number, extension: "m2" | "blp" | "skin") {
   const path = resolve(process.cwd(), `public/model/native-effects/${fileDataId}.${extension}`);
   const bytes = readFileSync(path);
@@ -44,10 +48,10 @@ describe("original Lava Burst ribbon rendering", () => {
       [SrcAlphaFactor, OneMinusSrcAlphaFactor, OneFactor, OneMinusSrcAlphaFactor],
     ]);
     const instance = { timeSeconds: 0.415, emissionEndSeconds: 0.8, modelScale: 0.38,
-      sourceTranslationAtTime: (time: number): [number, number, number] => [-4 + time * 10, 0, 0] };
+      sourceTransformAtTime: (time: number) => translationMatrix(-4 + time * 10, 0, 0) };
     const camera = new PerspectiveCamera();
     effect.setReplayInstances([instance], camera);
-    expect(ribbons.every((mesh) => mesh.geometry.drawRange.count > 0)).toBe(true);
+    expect(ribbons.slice(1).every((mesh) => mesh.geometry.drawRange.count > 0)).toBe(true);
     expect(Array.from(ribbons[1].geometry.index!.array).slice(0, 12)).toEqual([0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4]);
     const first = ribbons.map((mesh) => ({ count: mesh.geometry.drawRange.count,
       positions: Array.from(mesh.geometry.getAttribute("position").array),
@@ -100,7 +104,7 @@ describe("original Lightning Bolt missile rendering", () => {
       && mesh.material.vertexShader.includes("secondaryCoordinates = uv"))).toBe(true);
     const camera = new PerspectiveCamera();
     const instance = (timeSeconds: number, start: number) => ({ timeSeconds, emissionEndSeconds: 0.8,
-      modelScale: 0.38, sourceTranslationAtTime: (time: number): [number, number, number] => [start + time * 10, 0, 0] });
+      modelScale: 0.38, sourceTransformAtTime: (time: number) => translationMatrix(start + time * 10, 0, 0) });
     const instances = [instance(0.45, -4), instance(0.3, -3), instance(0.15, -2), instance(0.05, 1)];
     effect.setReplayInstances(instances, camera);
     expect(meshes.every((mesh) => mesh.visible && mesh.geometry.drawRange.count === 192)).toBe(true);
@@ -141,22 +145,17 @@ describe("NativeParticleEffect source rendering", () => {
     effect.dispose();
   });
 
-  it("uses original blend 7 premultiplied factors and skips nonzero-TXAC and refraction emitters", () => {
+  it("uses original blend 7 premultiplied factors and skips only refraction emitters", () => {
     const model = parseNativeM2(loadAsset(4006621, "m2"), 4006621);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const effect = new NativeParticleEffect(model, textures);
-    expect(effect.renderedEmitterCount).toBe(5);
-    expect(effect.unsupportedEmitters).toEqual([
-      "emitter 0: nonzero TXAC UV shader unsupported",
-      "emitter 2: nonzero TXAC UV shader unsupported",
-      "emitter 4: refraction unsupported",
-      "emitter 6: nonzero TXAC UV shader unsupported",
-    ]);
-    expect(effect.group.children).toHaveLength(5);
-    // Rendered children keep emitter order [e1, e3, e5, e7, e8]; e3 is the first blend-7 emitter.
+    expect(effect.renderedEmitterCount).toBe(8);
+    expect(effect.unsupportedEmitters).toEqual(["emitter 4: refraction unsupported"]);
+    expect(effect.group.children).toHaveLength(8);
+    // Rendered children keep emitter order except e4; e3 is the first blend-7 emitter.
     const blendSeven = model.emitters.findIndex((emitter) => emitter.blendingType === 7);
     expect(blendSeven).toBe(3);
-    const material = (effect.group.children[1] as Mesh<InstancedBufferGeometry, ShaderMaterial>).material;
+    const material = (effect.group.children[3] as Mesh<InstancedBufferGeometry, ShaderMaterial>).material;
     expect(material.blending).toBe(CustomBlending);
     expect(material.blendSrc).toBe(OneFactor);
     expect(material.blendDst).toBe(OneMinusSrcAlphaFactor);
@@ -235,8 +234,8 @@ describe("NativeParticleEffect source rendering", () => {
     const geometry = (effect.group.children[0] as Mesh<InstancedBufferGeometry, ShaderMaterial>).geometry;
     const offsetAttribute = geometry.getAttribute("instanceOffset");
     effect.setReplayInstances([
-      { timeSeconds: 0.4, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [0, 0, 0] },
-      { timeSeconds: 0.2, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [1, 0, 0] },
+      { timeSeconds: 0.4, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(0, 0, 0) },
+      { timeSeconds: 0.2, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(1, 0, 0) },
     ], camera);
 
     expect(geometry.getAttribute("instanceOffset")).toBe(offsetAttribute);
@@ -244,17 +243,16 @@ describe("NativeParticleEffect source rendering", () => {
     effect.clearInstances();
     expect(geometry.instanceCount).toBe(0);
     expect(() => effect.setReplayInstances([
-      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [0, 0, 0] },
-      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [1, 0, 0] },
-      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTranslationAtTime: () => [2, 0, 0] },
+      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(0, 0, 0) },
+      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(1, 0, 0) },
+      { timeSeconds: 0.1, emissionEndSeconds: 0.8, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(2, 0, 0) },
     ], camera)).toThrow(/3 simultaneous component instances.*2-instance resource bound/);
     effect.dispose();
   });
 });
 
 
-describe("mesh bone weighting", () => {
-  it("blends authored vertex weights through recursively composed parent transforms", () => {
+describe("mesh bone weighting", () => {  it("blends authored vertex weights through recursively composed parent transforms", () => {
     const model = parseNativeM2(loadAsset(4290517, "m2"), 4290517);
     const track = (value: [number, number, number]) => ({
       interpolation: 0 as const, globalSequence: -1,
@@ -280,14 +278,10 @@ describe("original mesh component rendering", () => {
     const skin = parseNativeSkin(loadAsset(4291424, "skin"), 4291424, model.vertices.length);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const effect = new NativeParticleEffect(model, textures, 1, skin);
-    // Emitters 0 and 3 use the nonzero-TXAC UV combiner; they stay diagnosed, so
-    // children are [emitter 1, emitter 2, mesh].
-    expect(effect.renderedEmitterCount).toBe(2);
-    expect(effect.unsupportedEmitters).toEqual([
-      "emitter 0: nonzero TXAC UV shader unsupported",
-      "emitter 3: nonzero TXAC UV shader unsupported",
-    ]);
-    expect(effect.group.children).toHaveLength(3);
+    // PS3-selected emitters 0 and 3 render with the reference PS2 color equation.
+    expect(effect.renderedEmitterCount).toBe(4);
+    expect(effect.unsupportedEmitters).toEqual([]);
+    expect(effect.group.children).toHaveLength(5);
     expect(effect.meshTriangleCount).toBe(900);
     expect(skin.batches[0].shaderId).toBe(0x4014);
     expect(skin.batches[0].textureCount).toBe(2);
@@ -297,7 +291,7 @@ describe("original mesh component rendering", () => {
     const renamedModel = new NativeParticleEffect({ ...model, fileDataId: 9999 }, textures, 1, skin);
     expect(renamedModel.animationSequenceIndex).toBe(2);
     renamedModel.dispose();
-    const mesh = effect.group.children[2] as Mesh;
+    const mesh = effect.group.children[4] as Mesh;
     expect(mesh.geometry.getAttribute("position").count).toBe(612);
     expect(mesh.geometry.index?.count).toBe(2700);
     const material = mesh.material as ShaderMaterial;
@@ -326,12 +320,12 @@ describe("original mesh component rendering", () => {
     effect.setTime(0.15, new PerspectiveCamera());
     expect(material.uniforms.secondaryUvTranslation.value.x).toBeCloseTo(0.15, 2);
     effect.setReplayInstances([{ timeSeconds: 0.04, emissionEndSeconds: 0.2, modelScale: 0.38,
-      sourceTranslationAtTime: () => [-4, 0, 1] }], new PerspectiveCamera());
-    expect(mesh.position.toArray()).toEqual([-4, -1, 0]);
+      sourceTransformAtTime: () => translationMatrix(-4, 2, 1) }], new PerspectiveCamera());
+    expect(mesh.position.toArray()).toEqual([-4, 1, -2]);
     expect(mesh.scale.x).toBe(0.38);
     expect(() => effect.setReplayInstances([
-      { timeSeconds: 0.04, emissionEndSeconds: 0.2, modelScale: 0.38, sourceTranslationAtTime: () => [0, 0, 0] },
-      { timeSeconds: 0.15, emissionEndSeconds: 0.2, modelScale: 0.38, sourceTranslationAtTime: () => [0, 0, 0] },
+      { timeSeconds: 0.04, emissionEndSeconds: 0.2, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(0, 0, 0) },
+      { timeSeconds: 0.15, emissionEndSeconds: 0.2, modelScale: 0.38, sourceTransformAtTime: () => translationMatrix(0, 0, 0) },
     ], new PerspectiveCamera())).toThrow(/simultaneous mesh instances exceed the 1-instance/i);
     effect.clearInstances();
     expect(mesh.visible).toBe(false);
@@ -343,5 +337,116 @@ describe("original mesh component rendering", () => {
     material.uniforms.primaryMap.value.addEventListener("dispose", () => { textureDisposals += 1; });
     effect.dispose();
     expect([geometryDisposals, materialDisposals, textureDisposals]).toEqual([1, 1, 1]);
+  });
+});
+
+
+describe("reference simulation semantics (M0b)", () => {
+  it("builds quad corners at the full ±1 extent", () => {
+    const model = parseNativeM2(loadAsset(794788, "m2"), 794788);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    for (const child of effect.group.children) {
+      const mesh = child as Mesh<InstancedBufferGeometry, ShaderMaterial>;
+      const corners = Array.from(mesh.geometry.getAttribute("position").array as Float32Array);
+      const xComponents = corners.filter((_, index) => index % 3 === 0).map(Math.abs);
+      const yComponents = corners.filter((_, index) => index % 3 === 1).map(Math.abs);
+      expect(Math.max(...xComponents)).toBeCloseTo(1, 5);
+      expect(Math.max(...yComponents)).toBeCloseTo(1, 5);
+    }
+    effect.dispose();
+  });
+
+  it("dispatches authored head and tail quads with velocity-trail age clamping", () => {
+    const original = parseNativeM2(loadAsset(794788, "m2"), 794788);
+    const emitter = { ...original.emitters[0], flags: original.emitters[0].flags | 0x40000 | 0x400,
+      tailLength: 0.3 };
+    const model = { ...original, emitters: [emitter] };
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    expect(effect.renderedEmitterCount).toBe(1);
+    expect(effect.group.children).toHaveLength(2);
+    const [head, tail] = effect.group.children as Mesh<InstancedBufferGeometry, ShaderMaterial>[];
+    expect(head.material.vertexShader).not.toContain("viewTrail");
+    expect(tail.material.vertexShader).toContain("viewTrail");
+    expect(tail.material.vertexShader).toContain("min(instanceAge, 0.30000000)");
+    effect.setTime(0.4, new PerspectiveCamera());
+    expect(tail.geometry.instanceCount).toBe(head.geometry.instanceCount);
+    effect.dispose();
+  });
+
+  it("renders PS3-selected emitters with the reference color equation", () => {
+    const model = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    expect(effect.renderedEmitterCount).toBe(10);
+    expect(effect.unsupportedEmitters).toEqual([]);
+    expect(effect.group.children).toHaveLength(13);
+    // Emitter 0 selects pixel shader 3; it renders with the PS2 combiner line.
+    const ps3 = effect.group.children[0] as Mesh<InstancedBufferGeometry, ShaderMaterial>;
+    expect(ps3.material.uniforms.uPixelShader.value).toBe(3);
+    expect(ps3.material.fragmentShader).toContain("tex1 * tex2 * tex3 * particleColor");
+    effect.dispose();
+  });
+
+  it("renders the nonzero-TXAC emitters of 4006621 and 4290517 instead of skipping them", () => {
+    const lava = parseNativeM2(loadAsset(4006621, "m2"), 4006621);
+    const lavaTextures = lava.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const lavaEffect = new NativeParticleEffect(lava, lavaTextures);
+    expect(lavaEffect.renderedEmitterCount).toBe(8);
+    expect(lavaEffect.unsupportedEmitters).toEqual(["emitter 4: refraction unsupported"]);
+    expect(lavaEffect.group.children).toHaveLength(8);
+    lavaEffect.dispose();
+
+    const ancestral = parseNativeM2(loadAsset(4290517, "m2"), 4290517);
+    const ancestralTextures = ancestral.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const skin = parseNativeSkin(loadAsset(4291424, "skin"), 4291424, ancestral.vertices.length);
+    const ancestralEffect = new NativeParticleEffect(ancestral, ancestralTextures, 1, skin);
+    expect(ancestralEffect.renderedEmitterCount).toBe(4);
+    expect(ancestralEffect.unsupportedEmitters).toEqual([]);
+    ancestralEffect.dispose();
+  });
+
+  it("renders one ribbon pass per authored material with its corresponding texture", () => {
+    const original = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
+    const ribbon = { ...original.ribbons[1], materialIndices: [
+      original.ribbons[1].materialIndices[0], original.ribbons[2].materialIndices[0],
+    ], textureIndices: original.ribbons[1].textureIndices.slice(0, 2) };
+    const model = { ...original, emitters: [], ribbons: [ribbon] };
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    expect(effect.group.children).toHaveLength(2);
+    const [first, second] = effect.group.children as Mesh<BufferGeometry, ShaderMaterial>[];
+    expect(first.material.uniforms.map.value.image.data).toBe(textures[ribbon.textureIndices[0]].pixels);
+    expect(second.material.uniforms.map.value.image.data).toBe(textures[ribbon.textureIndices[1]].pixels);
+    effect.setTime(0.4, new PerspectiveCamera());
+    expect(first.geometry.drawRange.count).toBeGreaterThan(0);
+    expect(second.geometry.drawRange.count).toBe(first.geometry.drawRange.count);
+    effect.dispose();
+  });
+
+  it("keeps ribbon edges drawing and aging after emission stops", () => {
+    const model = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures, 1);
+    const ribbons = effect.group.children.slice(-3) as Mesh<BufferGeometry, ShaderMaterial>[];
+    const camera = new PerspectiveCamera();
+    const instance = (timeSeconds: number) => ({ timeSeconds, emissionEndSeconds: 0.8, modelScale: 0.38,
+      occurrenceSeed: "cast-1", sourceTransformAtTime: (time: number) => translationMatrix(-4 + time * 10, 0, 0) });
+
+    effect.setReplayInstances([instance(0.5)], camera);
+    expect(ribbons.slice(1).every((mesh) => mesh.geometry.drawRange.count > 0)).toBe(true);
+    const midFrame = ribbons.map((mesh) => Array.from((mesh.geometry.getAttribute("position") as BufferAttribute).array));
+
+    // 0.24 s past the emission end the remaining edges still draw and have sagged further.
+    effect.setReplayInstances([instance(1.04)], camera);
+    expect(ribbons.slice(1).every((mesh) => mesh.geometry.drawRange.count > 0)).toBe(true);
+    const lateFrame = ribbons.map((mesh) => Array.from((mesh.geometry.getAttribute("position") as BufferAttribute).array));
+    expect(JSON.stringify(lateFrame)).not.toBe(JSON.stringify(midFrame));
+
+    // After every edge exceeds its lifetime the ribbons are empty again.
+    effect.setReplayInstances([instance(1.4)], camera);
+    expect(ribbons.every((mesh) => mesh.geometry.drawRange.count === 0)).toBe(true);
+    effect.dispose();
   });
 });

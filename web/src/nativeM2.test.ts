@@ -23,6 +23,7 @@ function buildM2Fixture(options: {
   textureIds?: number[];
   materialCount?: number;
   txacPairs?: Array<[number, number]>;
+  compressedGravity?: [number, number, number];
 } = {}) {
   const emitterCount = options.emitterCount ?? 6;
   const payload = new ArrayBuffer(0x3000);
@@ -131,7 +132,7 @@ function buildM2Fixture(options: {
     writeFloatTrack(offset + 0x48, 0.5);
     writeFloatTrack(offset + 0x5c, 0.25);
     writeFloatTrack(offset + 0x70, Math.PI * 2);
-    writeFloatTrack(offset + 0x84, 0, [0, 0, -163]);
+    writeFloatTrack(offset + 0x84, 0, options.compressedGravity ?? [0, 0, -163]);
     writeFloatTrack(offset + 0x98, 1.5);
     writeFloat32(offset + 0xac, 0.2);
     writeFloatTrack(offset + 0xb0, 12);
@@ -250,6 +251,16 @@ describe("parseNativeM2", () => {
     expect(model.emitters[0].alpha.values[0]).toBeCloseTo(16384 / 32767);
     expect(model.emitters[0].scale.values[1]).toEqual([1, 1.25]);
     expect(model.emitters[0].headUv).toEqual({ timestamps: [0, 32767], values: [1, 3] });
+  });
+
+  it("decodes compressed gravity with off-axis direction and negative magnitude", () => {
+    // x=64/128=0.5, y=0, z=sqrt(1-0.25); magnitude -200*0.04238648 negates z.
+    const model = parseNativeM2(buildM2Fixture({ compressedGravity: [64, 0, -200] }), 42);
+    const [x, y, z] = model.emitters[0].gravity.sequences[0].values[0];
+    const magnitude = 200 * 0.04238648;
+    expect(x).toBeCloseTo(0.5 * magnitude, 3);
+    expect(y).toBeCloseTo(0, 5);
+    expect(z).toBeCloseTo(-Math.sqrt(0.75) * magnitude, 3);
   });
 
   it("rejects malformed, missing, and unsupported required source data with FileDataID context", () => {

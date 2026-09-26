@@ -571,11 +571,7 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
   expect((await canvas.screenshot()).equals(lavaFrame)).toBe(true);
   await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText(
-    "FileDataID 4006621: 5 of 9 authored emitters; "
-      + "emitter 0: nonzero TXAC UV shader unsupported, "
-      + "emitter 2: nonzero TXAC UV shader unsupported, "
-      + "emitter 4: refraction unsupported, "
-      + "emitter 6: nonzero TXAC UV shader unsupported",
+    "FileDataID 4006621: 8 of 9 authored emitters; emitter 4: refraction unsupported",
   );
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("emitter 1: Modx4 color flag not applied");
@@ -622,8 +618,8 @@ test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combi
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4290517");
   const nativeStatus = scene.locator("[data-testid='native-effect-status']");
-  await expect(nativeStatus).toContainText("2 of 4 authored emitters ready", { timeout: 30_000 });
-  await expect(nativeStatus).toContainText("emitter 0: nonzero TXAC UV shader unsupported");
+  await expect(nativeStatus).toContainText("4 of 4 authored emitters ready", { timeout: 30_000 });
+  await expect(nativeStatus).toContainText("reference PS3 color equation; TXAC UV behavior not reconstructed");
   await expect(nativeStatus).toContainText("LOD0 mesh 1 of 1 batches, 900 triangles");
   await expect(nativeStatus).toContainText("two original textures combined (shader 0x4014, UV0/UV1)");
   await expect(nativeStatus).not.toContainText("primary texture only");
@@ -804,7 +800,7 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   expect((await canvas.screenshot()).equals(screenshot)).toBe(true);
 });
 
-test("renders and scrubs the original Lava Burst ribbon missile mid-flight", async ({ page }) => {
+test("renders and scrubs the original Lava Burst ribbon missile mid-flight", async ({ page }, testInfo) => {
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
     const fixture = await response.json() as { sim: { players: Array<{ collected_data: {
@@ -831,7 +827,7 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   await expect(canvas).toHaveAttribute("data-replay-native-components", "4");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("ribbon 0:");
-  const screenshot = await canvas.screenshot({ path: "/private/tmp/claude-501/-Users-wontak-Desktop-project-wow-sim/97be1d9b-4b69-45f8-adf6-d63036334aa9/scratchpad/replay-12/lava-burst-midflight.png" });
+  const screenshot = await canvas.screenshot({ path: testInfo.outputPath("lava-burst-midflight.png") });
   await seek.fill("2.1");
   expect((await canvas.screenshot()).equals(screenshot)).toBe(false);
   await seek.fill("1.55");
@@ -1177,16 +1173,16 @@ test("identifies both Stormkeeper attachment origins and the unapplied kit offse
   expect((await canvas.screenshot()).equals(beforeSeek)).toBe(true);
 });
 
-test("loads a version 274 original component and reports its unsupported TXAC emitter", async ({ page }) => {
+test("loads a version 274 original component with PS3 color and TXAC UV caveat", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4006618");
   await expect(scene.locator("[data-testid='native-effect-status']"))
-    .toContainText("2 of 3 authored emitters ready", { timeout: 30_000 });
+    .toContainText("3 of 3 authored emitters ready", { timeout: 30_000 });
   await expect(scene.locator("[data-testid='native-effect-status']"))
-    .toContainText("emitter 0: nonzero TXAC UV shader unsupported");
+    .toContainText("reference PS3 color equation; TXAC UV behavior not reconstructed");
 });
 
 
@@ -1197,11 +1193,11 @@ test("reports every unsupported emitter without dropping its original component"
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4006621");
   await expect(scene.locator("[data-testid='native-effect-status']"))
-    .toContainText("5 of 9 authored emitters ready", { timeout: 30_000 });
+    .toContainText("8 of 9 authored emitters ready", { timeout: 30_000 });
   await expect(scene.locator("[data-testid='native-effect-status']"))
     .toContainText("emitter 4: refraction unsupported");
   await expect(scene.locator("[data-testid='native-effect-status']"))
-    .toContainText("emitter 0: nonzero TXAC UV shader unsupported");
+    .toContainText("reference PS3 color equation; TXAC UV behavior not reconstructed");
 });
 
 
@@ -1213,9 +1209,9 @@ test("reports authored and supported emitter counts for all original particle so
   const selector = scene.getByRole("combobox", { name: "Original M2 component" });
   const status = scene.locator("[data-testid='native-effect-status']");
   for (const [fileDataId, rendered, authored] of [
-    [4006618, 2, 3], [3980244, 3, 6], [1598036, 4, 4], [1355634, 2, 2],
-    [1284864, 11, 11], [1109885, 6, 6], [4006621, 5, 9], [6211617, 5, 5], [6211618, 3, 4],
-    [1571475, 2, 2], [4392095, 2, 4], [4050773, 4, 7],
+    [4006618, 3, 3], [3980244, 6, 6], [1598036, 4, 4], [1355634, 2, 2],
+    [1284864, 11, 11], [1109885, 6, 6], [4006621, 8, 9], [6211617, 5, 5], [6211618, 4, 4],
+    [1571475, 2, 2], [4392095, 4, 4], [4050773, 7, 7],
   ]) {
     await selector.selectOption(String(fileDataId));
     await expect(status).toContainText(`${rendered} of ${authored} authored emitters ready`, { timeout: 30_000 });
@@ -1225,7 +1221,7 @@ test("reports authored and supported emitter counts for all original particle so
       await expect(status).toContainText("DBOC four authored values");
     }
     if (fileDataId === 1109885) {
-      await expect(status).toContainText("emitter 3 parent-particle velocity inheritance not modeled");
+      await expect(status).not.toContainText("parent-particle velocity inheritance not modeled");
     }
     if (fileDataId === 1598036) {
       await expect(status).toContainText("emitter 0: Modx4 color flag not applied (no invented multiply rule)");
