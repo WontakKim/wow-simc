@@ -52,11 +52,21 @@ export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
 export const REPLAY_MOTION_BLEND_SECONDS = 0.15;
 export const REPLAY_EFFECT_RELEASE_SECONDS = 0.2;
 export const REPLAY_EFFECT_TRAVEL_SECONDS = 0.8;
+// SpellMisc 33331/89780 -> RangeIndex 5 -> SpellRange 5 RangeMax_0/_1 40;
+// SpellVisualMissile 28854/28867 -> SpellVisualEffectName 47399 BaseMissileSpeed 50, build 12.1.0.69933.
+const REPLAY_AUTHORED_MAX_RANGE_YARDS = 40;
+const REPLAY_AUTHORED_MISSILE_SPEED = 50;
+const REPLAY_DERIVED_TRAVEL_SECONDS = REPLAY_AUTHORED_MAX_RANGE_YARDS / REPLAY_AUTHORED_MISSILE_SPEED;
+
+function getReplayEffectTravelSeconds(spellId: number) {
+  return spellId === 51505 || spellId === 117014
+    ? REPLAY_DERIVED_TRAVEL_SECONDS : REPLAY_EFFECT_TRAVEL_SECONDS;
+}
 export const REPLAY_EFFECT_DECAY_SECONDS = 1.5;
 
-const REPLAY_EFFECT_DURATION_SECONDS = REPLAY_EFFECT_RELEASE_SECONDS
-  + REPLAY_EFFECT_TRAVEL_SECONDS
-  + REPLAY_EFFECT_DECAY_SECONDS;
+function getReplayEffectDurationSeconds(spellId: number) {
+  return REPLAY_EFFECT_RELEASE_SECONDS + getReplayEffectTravelSeconds(spellId) + REPLAY_EFFECT_DECAY_SECONDS;
+}
 const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
 const OTHER_REPLAY_EFFECT_DURATION_SECONDS = 1.7;
 const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
@@ -203,7 +213,7 @@ export function resolveReplayEffectOccurrences(
     const isProjectile = event.id === 117014;
     const release = isProjectile ? REPLAY_EFFECT_RELEASE_SECONDS : 0;
     const duration = isProjectile || event.id === 51505 || event.id === 188196
-      ? REPLAY_EFFECT_DURATION_SECONDS : OTHER_REPLAY_EFFECT_DURATION_SECONDS;
+      ? getReplayEffectDurationSeconds(event.id!) : OTHER_REPLAY_EFFECT_DURATION_SECONDS;
     const elapsedSeconds = roundReplayTime(cursor - event.time);
     if (elapsedSeconds < release || elapsedSeconds > duration) return [];
     return [{
@@ -226,7 +236,7 @@ export function getReplayPlaybackEndTime(events: ReplayEvent[]) {
       const spell = getSupportedReplaySpell(event);
       if (!spell || spell.components.length === 0) return 0;
       return event.time + (event.id === 117014 || event.id === 51505 || event.id === 188196
-        ? REPLAY_EFFECT_DURATION_SECONDS : OTHER_REPLAY_EFFECT_DURATION_SECONDS);
+        ? getReplayEffectDurationSeconds(event.id!) : OTHER_REPLAY_EFFECT_DURATION_SECONDS);
     }),
   );
   return roundReplayTime(Math.max(
@@ -262,8 +272,8 @@ function describeReplayComponentAnchor(spellId: number, component: ReplayCompone
   return `60%-bounds anchored at ${component.anchor} (single applicable attachment point not established from mapped source kit; -1/positioners or multiple authored rows may apply)`;
 }
 
-function sampleReplayEffectPath(caster: Vector3, target: Vector3, componentTimeSeconds: number) {
-  const progress = Math.max(0, Math.min(1, componentTimeSeconds / REPLAY_EFFECT_TRAVEL_SECONDS));
+function sampleReplayEffectPath(caster: Vector3, target: Vector3, componentTimeSeconds: number, spellId: number) {
+  const progress = Math.max(0, Math.min(1, componentTimeSeconds / getReplayEffectTravelSeconds(spellId)));
   return caster.clone().lerp(target, progress);
 }
 
@@ -492,6 +502,10 @@ function describeNativeEffectLimitations(effect: NativeParticleEffect) {
   return [
     ...effect.unsupportedEmitters,
     ...effect.unsupportedMeshBatches,
+    ...(effect.model.fileDataId === 4329984 ? ["SpellMissileMotion 2967 (Elemental Blast) has authored transAngle/transMag/transFront/scale script but its runtime coordinate frame is unverified; not applied; Lava Burst motion ID 0 has no script"] : []),
+    ...(effect.model.fileDataId === 794788 ? ["SpellMissileMotion 2969 script coordinate frame unverified; not applied; BaseMissileSpeed 0 inherits shared 4329984 flight duration"] : []),
+    ...(effect.model.fileDataId === 613807 ? ["SpellMissileMotion 2968 script coordinate frame unverified; not applied; BaseMissileSpeed 0 inherits shared 4329984 flight duration"] : []),
+    ...(effect.model.fileDataId === 6211617 ? ["Lightning Bolt branch has SpellMissileMotion 4856 parabola or motion ID 0; branch unresolved; no arc applied; BaseMissileSpeed 0"] : []),
     ...effect.ribbonLimitations,
     ...(effect.meshTriangleCount > 0
       ? [`authored animation sequence ${effect.animationSequenceIndex} (ID ${effect.model.sequenceIds[effect.animationSequenceIndex]}) sampled for the mesh and emitters; retail spell sequence scheduling not verified`]
@@ -730,13 +744,13 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           const instances: NativeParticleRenderInstance[] = matching.map(({ occurrence, component }) => {
             const source = getReplayEffectSourceAnchor(occurrence.spellId, component.fileDataId, caster, anchors.caster);
             return {
-              timeSeconds: occurrence.componentTimeSeconds - (component.fileDataId === 4329984 || component.fileDataId === 6211617 ? REPLAY_EFFECT_RELEASE_SECONDS : 0),
+              timeSeconds: occurrence.componentTimeSeconds - (occurrence.spellId !== 117014 && (component.fileDataId === 4329984 || component.fileDataId === 6211617) ? REPLAY_EFFECT_RELEASE_SECONDS : 0),
               emissionEndSeconds: component.anchor === "projectile"
-                ? REPLAY_EFFECT_TRAVEL_SECONDS : OTHER_REPLAY_EMISSION_SECONDS,
+                ? getReplayEffectTravelSeconds(occurrence.spellId) : OTHER_REPLAY_EMISSION_SECONDS,
               modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
               sourceTranslationAtTime: (timeSeconds) => threeToNative(component.anchor === "projectile"
-                ? sampleReplayEffectPath(source, anchors.target, timeSeconds)
+                ? sampleReplayEffectPath(source, anchors.target, timeSeconds, occurrence.spellId)
                 : component.anchor === "caster" ? source : anchors.target),
             };
           });
@@ -767,6 +781,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             getReplayEffectSourceAnchor(latestProjectile.spellId, 4329984, caster, anchors.caster),
             anchors.target,
             latestProjectile.componentTimeSeconds,
+            latestProjectile.spellId,
           ).x.toFixed(6)
         : "";
       return true;
@@ -1238,6 +1253,17 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               <small> · {replayAssetIds.has(794788) ? "Partial original Elemental Blast components and partial other spell components" : "Partial source-linked components only"}, not complete spells or verified native timing.</small>
             </p>
           )}
+          {selectedReplaySpell && (selectedReplayEvent?.id === 51505 || selectedReplayEvent?.id === 117014 || selectedReplayEvent?.id === 188196) && (
+            <p data-testid="replay-flight-status">
+              {selectedReplayEvent.id === 188196
+                ? "Lightning Bolt: viewer-chosen 0.80s; all three mapped SpellVisualEffectName speeds are 0 (not derived from authored speed)."
+                : `${selectedReplayEvent.id === 51505 ? "Lava Burst" : "Elemental Blast"}: derived ${getReplayEffectTravelSeconds(selectedReplayEvent.id).toFixed(2)}s = SpellRange 5 maximum 40 yards / SpellVisualEffectName 47399 BaseMissileSpeed 50 (SpellMisc row ${selectedReplayEvent.id === 51505 ? 33331 : 89780} RangeIndex 5); assumes authored maximum range because the trace records no caster-target distance.`}
+              {selectedReplayEvent.id === 117014 && " 2 of 3 rendered bodies have speed 0 and inherit the shared body's derived duration; motion scripts 2967, 2969, 2968 not applied."}
+              {selectedReplayEvent.id === 188196 && " Branch motion 4856 parabola versus 0 unresolved; no arc applied."}
+              {selectedReplayEvent.id === 51505 && " Motion ID 0 has no authored script."}
+              {" 2 of 3 mapped projectile spell durations derived; 1 of 3 viewer-chosen. 0.20s viewer-chosen release; linear viewer path across 8 presentation units, not game yards; at most 1.50s source particle decay. Positioner 712 impact (Elemental Blast) and 513 cast (Lightning Bolt) have unresolved coordinate semantics; blocked FileDataID 3980281 has source attachment -1 and no cast/impact positioner (0/0), so its source origin remains unresolved. Missile FollowGroundHeight/DropSpeed/Approach, Flags and DecayTimeAfterImpact are not interpreted."}
+            </p>
+          )}
           {selectedReplaySpell && (
             <p data-testid="replay-anchor-status">
               Across the mapped spell list, 6 of 19 mapped components use authored caster bone origins and 13 remain bounds-anchored. Placement: {selectedReplaySpell.components.filter((component) =>
@@ -1426,7 +1452,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with six authored caster bone origins (including two Stormkeeper kit components) and thirteen explicitly named bounds-anchored components, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Elemental Blast, Lava Burst, and Lightning Bolt use a viewer-only 0.20s release and 0.80s linear flight. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets or the Stormkeeper 1284864 kit offset, sound, damage, hit reaction, or VFX parity is claimed."
+          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with six authored caster bone origins (including two Stormkeeper kit components) and thirteen explicitly named bounds-anchored components, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Missiles for these three spells use a viewer-chosen 0.20s release and linear path; Lava Burst and Elemental Blast use a 0.80s maximum-range-derived duration (40 yards / BaseMissileSpeed 50), while Lightning Bolt retains a viewer-chosen 0.80s flight because its mapped speeds are 0. Unapplied motion scripts and positioners are counted in selected status and per-component limitations. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets or the Stormkeeper 1284864 kit offset, sound, damage, hit reaction, or VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}

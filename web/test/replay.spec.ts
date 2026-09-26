@@ -638,6 +638,45 @@ test("loads only a selected Lava Burst trace and fails the whole kit when its or
   expect(requests.some((url) => url.endsWith("/model/native-effects/613807.m2"))).toBe(false);
 });
 
+for (const [spellName, spellId, expectedTiming] of [
+  ["Lava Burst", 51505, "derived 0.80s = SpellRange 5 maximum 40 yards / SpellVisualEffectName 47399 BaseMissileSpeed 50"],
+  ["Elemental Blast", 117014, "derived 0.80s = SpellRange 5 maximum 40 yards / SpellVisualEffectName 47399 BaseMissileSpeed 50"],
+  ["Lightning Bolt", 188196, "viewer-chosen 0.80s; all three mapped SpellVisualEffectName speeds are 0"],
+] as const) {
+  test(`discloses ${spellName} missile timing provenance and unresolved motion`, async ({ page }) => {
+    await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+      const response = await route.fetch();
+      const fixture = await response.json() as { sim: { players: Array<{ collected_data: {
+        action_sequence: Array<{ id?: number }>;
+        action_sequence_precombat: Array<unknown>;
+      } }> } };
+      const sequence = fixture.sim.players[0].collected_data;
+      sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === spellId)!];
+      sequence.action_sequence_precombat = [];
+      await route.fulfill({ response, json: fixture });
+    });
+    await page.goto("/");
+    const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+    await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Original components ready", { timeout: 30_000 });
+    const timing = scene.locator("[data-testid='replay-flight-status']");
+    await expect(timing).toContainText(expectedTiming);
+    if (spellId !== 188196) await expect(timing).toContainText("assumes authored maximum range because the trace records no caster-target distance");
+    else await expect(timing).toContainText("not derived from authored speed");
+    await expect(timing).toContainText("2 of 3 mapped projectile spell durations derived; 1 of 3 viewer-chosen");
+    await expect(timing).toContainText("0.20s viewer-chosen release");
+    await expect(timing).toContainText("linear viewer path");
+    await expect(timing).toContainText("FollowGroundHeight/DropSpeed/Approach, Flags and DecayTimeAfterImpact are not interpreted");
+    const limitations = scene.locator("[data-testid='replay-effect-limitations']");
+    if (spellId === 51505) await expect(limitations).toContainText("Lava Burst motion ID 0 has no script");
+    if (spellId === 188196) await expect(limitations).toContainText("SpellMissileMotion 4856 parabola or motion ID 0");
+    if (spellId === 117014) {
+      for (const motionId of [2967, 2969, 2968]) await expect(limitations).toContainText(`SpellMissileMotion ${motionId}`);
+      await expect(timing).toContainText("2 of 3 rendered bodies have speed 0 and inherit the shared body's derived duration");
+      await expect(timing).toContainText("motion scripts 2967, 2969, 2968 not applied");
+    }
+  });
+}
+
 test("renders the original Lightning Bolt missile between caster and dummy with deterministic seeks", async ({ page }, testInfo) => {
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
