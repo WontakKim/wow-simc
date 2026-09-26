@@ -1,4 +1,23 @@
 import { describe, expect, it } from "vitest";
+import previewStageJson from "../previewStage.json";
+import { parsePreviewStage } from "./previewStage";
+
+describe("pinned outdoor LightData preview", () => {
+  it("decodes BGRA daylight and records the source row/time without inventing missing ambient channels", () => {
+    const stage = parsePreviewStage(previewStageJson);
+    expect(stage.source).toMatchObject({ build: "12.1.0.69933", lightId: 1, lightParamsId: 12, lightDataId: 20977, time: 1440 });
+    expect(stage.sky.top).toEqual([0, 0x1f / 255, 0x49 / 255]);
+    expect(stage.lighting.ambientHorizon).toEqual(stage.lighting.ambientSky);
+    expect(stage.lighting.ambientGround).toEqual(stage.lighting.ambientSky);
+    expect(stage.fog.end).toBe(18000);
+    expect(stage.fog.density).toBe(4.5);
+  });
+  it("rejects missing provenance or invalid colors", () => {
+    expect(() => parsePreviewStage({ ...previewStageJson, source: { ...previewStageJson.source, lightDataId: 0 } })).toThrow();
+    expect(() => parsePreviewStage({ ...previewStageJson, source: { ...previewStageJson.source, csvSha256: {} } })).toThrow();
+    expect(() => parsePreviewStage({ ...previewStageJson, colors: { ...previewStageJson.colors, skyTop: -1 } })).toThrow();
+  });
+});
 import {
   M2_INDEXED_SHADER_PAIRS,
   M2_PIXEL_SHADER_NAMES,

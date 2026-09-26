@@ -28,6 +28,23 @@ import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticle
 import { m2BlendParams, m2ParticleAlphaThreshold, m2RenderFlags, selectParticlePixelShader } from "./nativeM2Blend";
 import { sampleNativeEmitter, sampleNativeRibbonEdges, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeMatrix, type NativeParticleSample } from "./nativeParticles";
 
+const FOG_FRAGMENT = `
+  uniform vec3 uFogColor;
+  uniform vec2 uFogRange;
+  uniform int uFogBlendMode;
+  uniform int uUnfogged;
+  varying float vFogDistance;
+  vec3 applyEffectFog(vec3 color, float alpha) {
+    if (uUnfogged == 1) return color;
+    float amount = clamp((vFogDistance - uFogRange.x) / (uFogRange.y - uFogRange.x), 0.0, 1.0);
+    vec3 neutral = (uFogBlendMode == 3 || uFogBlendMode == 4) ? vec3(0.0)
+      : uFogBlendMode == 5 ? vec3(1.0)
+      : uFogBlendMode == 6 ? vec3(0.5)
+      : uFogBlendMode == 7 ? uFogColor * alpha : uFogColor;
+    return mix(color, neutral, amount);
+  }
+`;
+
 const ASSET_ROOT = "/model/native-effects";
 const SETUP_COMMAND = "node script/prepare-native-effects.mjs";
 
@@ -160,6 +177,10 @@ function createEmitterBatch(
       uAlphaTest: { value: m2ParticleAlphaThreshold(emitter.blendingType) },
       uColorMult: { value: emitter.exp2?.colorMultiplier ?? 1 },
       uAlphaMult: { value: emitter.exp2?.alphaMultiplier ?? 1 },
+      uFogColor: { value: new Vector3() },
+      uFogRange: { value: new Vector2(100000, 100001) },
+      uFogBlendMode: { value: emitter.blendingType },
+      uUnfogged: { value: 0 },
       ...(usesMultiTexture ? {
         uMultiTexScale1: { value: emitter.multiTextureScale[0] },
         uMultiTexScale2: { value: emitter.multiTextureScale[1] },
@@ -179,6 +200,7 @@ function createEmitterBatch(
       uniform float uMultiTexScale1;
       uniform float uMultiTexScale2;
       varying float particleAlphaCutoff;
+      varying float vFogDistance;
       varying vec2 particleUv;
       ${usesMultiTexture ? "varying vec2 particleUv2;\n      varying vec2 particleUv3;" : ""}
       varying vec4 particleColor;
@@ -197,6 +219,7 @@ function createEmitterBatch(
         float sine = sin(angle);
         vec2 rotated = vec2(local.x * cosine - local.y * sine, local.x * sine + local.y * cosine);
         vec4 center = modelViewMatrix * vec4(instanceOffset, 1.0);
+        vFogDistance = length(center.xyz);
         ${isTail ? `
           vec3 viewTrail = -(modelViewMatrix * vec4(instanceVelocity, 0.0)).xyz
             * ${(emitter.flags & 0x400) !== 0 ? `min(instanceAge, ${emitter.tailLength.toFixed(8)})` : emitter.tailLength.toFixed(8)};
@@ -223,6 +246,7 @@ function createEmitterBatch(
       ${usesMultiTexture ? "varying vec2 particleUv2;\n      varying vec2 particleUv3;" : ""}
       varying vec4 particleColor;
       varying float particleAlphaCutoff;
+      ${FOG_FRAGMENT}
       void main() {
         vec4 tex1 = texture2D(map, particleUv);
         ${usesMultiTexture ? "vec4 tex2 = texture2D(map2, particleUv2);\n        vec4 tex3 = texture2D(map3, particleUv3);" : ""}
@@ -230,7 +254,8 @@ function createEmitterBatch(
         ${combiner}
         if (combined.a < uAlphaTest) discard;
         if (combined.a < particleAlphaCutoff) discard;
-        gl_FragColor = vec4(combined.rgb * uColorMult, combined.a * uAlphaMult);
+        float alpha = combined.a * uAlphaMult;
+        gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult, alpha), alpha);
         #include <colorspace_fragment>
       }
     `,
@@ -364,13 +389,21 @@ export class NativeParticleEffect {
         uniforms: {
           map: { value: texture },
           uAlphaTest: { value: m2ParticleAlphaThreshold(materialSource.blendMode) },
+          uFogColor: { value: new Vector3() },
+          uFogRange: { value: new Vector2(100000, 100001) },
+          uFogBlendMode: { value: materialSource.blendMode },
+          uUnfogged: { value: ribbonFlags.unfogged ? 1 : 0 },
         },
-        vertexShader: `attribute vec4 ribbonColor; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
+        vertexShader: `attribute vec4 ribbonColor; varying vec4 vRibbonColor; varying vec2 vRibbonUv; varying float vFogDistance;
           void main() { vRibbonColor = ribbonColor; vRibbonUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+            vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+            vFogDistance = length(viewPosition.xyz);
+            gl_Position = projectionMatrix * viewPosition; }`,
         fragmentShader: `uniform sampler2D map; uniform float uAlphaTest; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
+          ${FOG_FRAGMENT}
           void main() { gl_FragColor = texture2D(map, vRibbonUv) * vRibbonColor;
             if (gl_FragColor.a < uAlphaTest) discard;
+            gl_FragColor.rgb = applyEffectFog(gl_FragColor.rgb, gl_FragColor.a);
             #include <tonemapping_fragment>
             #include <colorspace_fragment>
           }`,
@@ -466,23 +499,31 @@ export class NativeParticleEffect {
               meshOpacity: { value: 1 },
               secondaryUvScale: { value: new Vector2(1, 1) },
               secondaryUvTranslation: { value: new Vector2() },
+              uFogColor: { value: new Vector3() },
+              uFogRange: { value: new Vector2(100000, 100001) },
+              uFogBlendMode: { value: material.blendMode },
+              uUnfogged: { value: meshFlags.unfogged ? 1 : 0 },
             },
             vertexShader: `${batch.shaderId === 0x4014 ? "attribute vec2 secondaryUv;" : ""} uniform vec2 secondaryUvScale; uniform vec2 secondaryUvTranslation;
-              varying vec2 primaryCoordinates; varying vec2 secondaryCoordinates;
+              varying vec2 primaryCoordinates; varying vec2 secondaryCoordinates; varying float vFogDistance;
               void main() {
                 primaryCoordinates = uv;
                 secondaryCoordinates = ${batch.shaderId === 0x4014 ? "secondaryUv * secondaryUvScale + secondaryUvTranslation" : "uv"};
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+                vFogDistance = length(viewPosition.xyz);
+                gl_Position = projectionMatrix * viewPosition;
               }`,
             fragmentShader: `uniform sampler2D primaryMap; uniform sampler2D secondaryMap;
               uniform vec3 meshColor; uniform float meshOpacity;
               varying vec2 primaryCoordinates; varying vec2 secondaryCoordinates;
+              ${FOG_FRAGMENT}
               void main() {
                 vec4 primary = texture2D(primaryMap, primaryCoordinates);
                 vec4 secondary = texture2D(secondaryMap, secondaryCoordinates);
                 gl_FragColor = vec4(meshColor * primary.rgb * secondary.rgb * 2.0,
                   meshOpacity * primary.a * secondary.a * 2.0);
                 if (gl_FragColor.a < ${m2ParticleAlphaThreshold(material.blendMode)}) discard;
+                gl_FragColor.rgb = applyEffectFog(gl_FragColor.rgb, gl_FragColor.a);
                 #include <tonemapping_fragment>
                 #include <colorspace_fragment>
               }`,
@@ -515,6 +556,13 @@ export class NativeParticleEffect {
     this.group.name = `Native M2 FileDataID ${model.fileDataId}`;
     this.group.position.set(-0.15, 1.2, 0);
     this.group.scale.setScalar(0.38);
+  }
+
+  setFog(fog: { startPreview: number; endPreview: number; color: readonly [number, number, number] }) {
+    for (const { material } of [...this.batches, ...this.ribbonBatches, ...this.meshBatches]) {
+      (material.uniforms.uFogColor.value as Vector3).fromArray(fog.color);
+      (material.uniforms.uFogRange.value as Vector2).set(fog.startPreview, fog.endPreview);
+    }
   }
 
   private renderRibbons(instances: NativeParticleRenderInstance[]) {

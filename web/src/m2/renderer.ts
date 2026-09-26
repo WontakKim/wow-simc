@@ -19,6 +19,7 @@ import {
   RGBAFormat,
   ShaderMaterial,
   Texture,
+  Vector2,
   Vector3,
   Vector4,
 } from "three";
@@ -57,6 +58,7 @@ export interface NativeM2ActorOptions {
   /** Prepared-appearance mesh part visibility; falls back to the exporter base rule. */
   geosetVisibility?: Map<number, boolean>;
   lightPreset?: M2LightPreset;
+  fog?: { startPreview: number; endPreview: number; color: readonly [number, number, number] };
 }
 
 export interface NativeM2Actor {
@@ -248,6 +250,9 @@ export function createNativeM2Actor(options: NativeM2ActorOptions): NativeM2Acto
         u_sun_direction: { value: new Vector3(0, 1, 0) },
         u_local_light: { value: new Vector3() },
         u_unlit_add: { value: new Vector3() },
+        u_fog_color: { value: new Vector3().fromArray(options.fog?.color ?? [0, 0, 0]) },
+        u_fog_range: { value: new Vector2(options.fog?.startPreview ?? 100000, options.fog?.endPreview ?? 100001) },
+        u_unfogged: { value: renderFlags.unfogged ? 1 : 0 },
       },
       side: renderFlags.twoSided ? DoubleSide : FrontSide,
       depthTest: renderFlags.depthTest,

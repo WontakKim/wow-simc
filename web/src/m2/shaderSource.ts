@@ -181,6 +181,9 @@ uniform vec3 u_sun_color;
 uniform vec3 u_sun_direction;
 uniform vec3 u_local_light;
 uniform vec3 u_unlit_add;
+uniform vec3 u_fog_color;
+uniform vec2 u_fog_range;
+uniform int u_unfogged;
 
 varying vec2 v_texcoord;
 varying vec2 v_texcoord2;
@@ -423,6 +426,14 @@ void main() {
     color = matDiffuse;
   }
   color += specular;
+  if (u_unfogged == 0) {
+    float fogFactor = clamp((length(v_position_view) - u_fog_range.x) / (u_fog_range.y - u_fog_range.x), 0.0, 1.0);
+    vec3 fogTarget = (u_blend_mode == 3 || u_blend_mode == 4) ? vec3(0.0)
+      : u_blend_mode == 5 ? vec3(1.0)
+      : u_blend_mode == 6 ? vec3(0.5)
+      : u_blend_mode == 7 ? u_fog_color * finalOpacity : u_fog_color;
+    color = mix(color, fogTarget, fogFactor);
+  }
 
   gl_FragColor = vec4(color, finalOpacity);
 }

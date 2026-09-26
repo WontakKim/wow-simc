@@ -73,6 +73,16 @@ describe("ranged scene layout", () => {
     expect(trainingDummy.scale.toArray()).toEqual([1, 1, 1]);
   });
 
+  it("repositions both actors on resize without accumulating their prior world offsets", () => {
+    const vulpera = createModel(2, 4, 2);
+    const dummy = createModel(2.4, 5, 2);
+    arrangeCombatants(vulpera, dummy);
+    arrangeCombatants(vulpera, dummy, 5.6);
+    arrangeCombatants(vulpera, dummy, 5.6);
+    expect(new Box3().setFromObject(vulpera).getCenter(new Vector3()).x).toBeCloseTo(-2.8);
+    expect(new Box3().setFromObject(dummy).getCenter(new Vector3()).x).toBeCloseTo(2.8);
+  });
+
   it("fits the ranged bounds at desktop and mobile aspects and restores the responsive default view", () => {
     const vulpera = createModel(2, 4, 2);
     const trainingDummy = createModel(2.4, 5, 2);

@@ -27,11 +27,16 @@ async function analyzeModelRegions(page: Page, screenshot: Buffer): Promise<Mode
     let rightMaximumY = -1;
 
     for (let y = Math.floor(sample.height * 0.14); y < Math.floor(sample.height * 0.78); y += 1) {
+      const backgroundOffset = (y * sample.width + Math.floor(sample.width * 0.55)) * 4;
       for (let x = 0; x < sample.width; x += 1) {
         const offset = (y * sample.width + x) * 4;
         const red = pixels[offset];
         const green = pixels[offset + 1];
         const blue = pixels[offset + 2];
+        const backgroundDifference = Math.abs(red - pixels[backgroundOffset])
+          + Math.abs(green - pixels[backgroundOffset + 1])
+          + Math.abs(blue - pixels[backgroundOffset + 2]);
+        if (backgroundDifference < 45) continue;
         const maximum = Math.max(red, green, blue);
         const minimum = Math.min(red, green, blue);
         const isBrightModelPixel = maximum > 85
@@ -40,9 +45,8 @@ async function analyzeModelRegions(page: Page, screenshot: Buffer): Promise<Mode
         const isWarmModelPixel = red > 50
           && red > green * 1.12
           && green > blue * 1.05;
-        // Native actors bind neutral mid-grey while customization textures are
-        // pending, which stays near-achromatic under the WoW lighting model, so
-        // clearly lit low-chroma pixels above the dark background also count.
+        // Pending customization binds neutral mid-grey, so distinguish its lit
+        // pixels from the sky or ground using the background comparison above.
         const isLitGreyModelPixel = maximum - minimum <= 12
           && red > 95
           && red + green + blue > 300;
@@ -94,9 +98,8 @@ interface CasterChromaAnalysis {
 }
 
 /**
- * Chroma statistics for the caster half of the scene, above the dark
- * background. A composed appearance renders warm fur, so most lit pixels are
- * chromatic; the placeholder-grey actor was near-achromatic.
+ * Compare the caster half against an unobstructed column of the sky and
+ * ground. The composed fur is chromatic; the placeholder actor was grey.
  */
 async function analyzeCasterChroma(page: Page, screenshot: Buffer): Promise<CasterChromaAnalysis> {
   return page.evaluate(async (imageUrl) => {
@@ -116,14 +119,18 @@ async function analyzeCasterChroma(page: Page, screenshot: Buffer): Promise<Cast
     let greenSum = 0;
     let blueSum = 0;
     for (let y = Math.floor(sample.height * 0.14); y < Math.floor(sample.height * 0.78); y += 1) {
+      const backgroundOffset = (y * sample.width + Math.floor(sample.width * 0.55)) * 4;
       for (let x = 0; x < Math.floor(sample.width * 0.5); x += 1) {
         const offset = (y * sample.width + x) * 4;
         const red = pixels[offset];
         const green = pixels[offset + 1];
         const blue = pixels[offset + 2];
+        const backgroundDifference = Math.abs(red - pixels[backgroundOffset])
+          + Math.abs(green - pixels[backgroundOffset + 1])
+          + Math.abs(blue - pixels[backgroundOffset + 2]);
         const maximum = Math.max(red, green, blue);
         const minimum = Math.min(red, green, blue);
-        if (maximum < 60) continue;
+        if (backgroundDifference < 45 || maximum < 60) continue;
         litPixels += 1;
         if (maximum - minimum > 18) chromaticPixels += 1;
         redSum += red;
@@ -498,6 +505,60 @@ test("keeps model camera arrows isolated from trace playback and navigation", as
   await expect(selectedEvent).toContainText("Wait 0.50s");
 });
 
+test("renders the pinned outdoor sky, fogged ground, and dummy crossbar", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  const screenshot = await scene.locator("canvas").screenshot();
+  const stagePixels = await page.evaluate(async (imageUrl) => {
+    const image = new Image();
+    image.src = imageUrl;
+    await image.decode();
+    const sample = document.createElement("canvas");
+    sample.width = image.width;
+    sample.height = image.height;
+    const context = sample.getContext("2d");
+    if (!context) throw new Error("Could not inspect the outdoor stage screenshot.");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    const color = (x: number, y: number) => {
+      const offset = (Math.floor(y * sample.height) * sample.width + Math.floor(x * sample.width)) * 4;
+      return [pixels[offset], pixels[offset + 1], pixels[offset + 2]];
+    };
+    let dummyPixels = 0;
+    let crossbarMinimumX = sample.width;
+    let crossbarMaximumX = 0;
+    for (let y = Math.floor(sample.height * 0.4); y < Math.floor(sample.height * 0.6); y += 1) {
+      const backgroundOffset = (y * sample.width + Math.floor(sample.width * 0.7)) * 4;
+      for (let x = Math.floor(sample.width * 0.72); x < Math.floor(sample.width * 0.98); x += 1) {
+        const offset = (y * sample.width + x) * 4;
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const backgroundDifference = Math.abs(red - pixels[backgroundOffset])
+          + Math.abs(green - pixels[backgroundOffset + 1])
+          + Math.abs(blue - pixels[backgroundOffset + 2]);
+        if (backgroundDifference < 45 || red < 50 || red <= green * 1.12 || green <= blue * 1.05) continue;
+        dummyPixels += 1;
+        crossbarMinimumX = Math.min(crossbarMinimumX, x);
+        crossbarMaximumX = Math.max(crossbarMaximumX, x);
+      }
+    }
+    return {
+      upperSky: color(0.5, 0.06), lowerSky: color(0.5, 0.22),
+      distantGround: color(0.5, 0.34), nearbyGround: color(0.5, 0.84),
+      dummyPixels, crossbarWidth: crossbarMaximumX - crossbarMinimumX,
+    };
+  }, `data:image/png;base64,${screenshot.toString("base64")}`);
+
+  expect(stagePixels.upperSky[2]).toBeGreaterThan(stagePixels.upperSky[0]);
+  expect(Math.abs(stagePixels.upperSky[2] - stagePixels.lowerSky[2])).toBeGreaterThan(10);
+  expect(stagePixels.nearbyGround[0]).toBeGreaterThan(stagePixels.nearbyGround[2]);
+  expect(stagePixels.nearbyGround[0] - stagePixels.distantGround[0]).toBeGreaterThan(15);
+  expect(stagePixels.dummyPixels).toBeGreaterThan(100);
+  expect(stagePixels.crossbarWidth).toBeGreaterThan(35);
+});
+
 test("reframes genuine models after resizing the same page to mobile", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto("/");
@@ -507,19 +568,20 @@ test("reframes genuine models after resizing the same page to mobile", async ({ 
   const desktopModels = await analyzeModelRegions(page, await canvas.screenshot());
   expect(desktopModels.leftPixels).toBeGreaterThan(500);
   expect(desktopModels.rightPixels).toBeGreaterThan(500);
+  expect(desktopModels.leftHeight).toBeGreaterThanOrEqual(60);
+  expect(desktopModels.rightHeight).toBeGreaterThanOrEqual(150);
   expect(desktopModels.horizontalSeparation).toBeGreaterThan(0.28);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await scene.getByRole("button", { name: "Reset camera" }).click();
   const screenshot = await canvas.screenshot();
   const mobileModels = await analyzeModelRegions(page, screenshot);
-  // The ranged layout spans 8+ units, so on a 390px-wide canvas the 1.65-unit
-  // vulpera legitimately projects to a few hundred pixels.
+  // The narrow stage closes the ranged gap without shrinking either actor.
   expect(mobileModels.leftPixels).toBeGreaterThan(200);
   expect(mobileModels.rightPixels).toBeGreaterThan(500);
-  expect(mobileModels.leftHeight).toBeGreaterThanOrEqual(20);
-  expect(mobileModels.rightHeight).toBeGreaterThanOrEqual(50);
-  expect(mobileModels.horizontalSeparation).toBeGreaterThan(0.5);
+  expect(mobileModels.leftHeight).toBeGreaterThanOrEqual(40);
+  expect(mobileModels.rightHeight).toBeGreaterThanOrEqual(90);
+  expect(mobileModels.horizontalSeparation).toBeGreaterThan(0.42);
   const trainingDummyPixelsAtRightEdge = await page.evaluate(async (imageUrl) => {
     const image = new Image();
     image.src = imageUrl;

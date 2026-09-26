@@ -12,6 +12,25 @@ import type { Blending, BlendingDstFactor, BlendingSrcFactor } from "three";
 
 export type RgbaTuple = readonly [number, number, number, number];
 
+/** Fog destination is blend-neutral for additive and modulate passes. */
+export function fogM2BlendColor(
+  blendMode: number,
+  source: readonly [number, number, number],
+  fogColor: readonly [number, number, number],
+  factor: number,
+  opacity = 1,
+): [number, number, number] {
+  let destination: readonly number[] = fogColor;
+  if (blendMode === 3 || blendMode === 4) destination = [0, 0, 0];
+  if (blendMode === 5) destination = [1, 1, 1];
+  if (blendMode === 6) destination = [0.5, 0.5, 0.5];
+  if (blendMode === 7) destination = fogColor.map((channel) => channel * opacity);
+  if (factor <= 0) return [...source];
+  if (factor >= 1) return [...destination] as [number, number, number];
+  return [0, 1, 2].map((channel) => source[channel] +
+    (destination[channel] - source[channel]) * factor) as [number, number, number];
+}
+
 export interface M2BlendParams {
   blending: Blending;
   blendSrc: BlendingSrcFactor;

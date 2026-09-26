@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { geosetIdFromMeshPartId, isGeosetVisibleByDefault, meshPartIdFromGeoset } from "./geosets";
+import { geosetIdFromMeshPartId, isCreatureGeosetVisible, isGeosetVisibleByDefault, meshPartIdFromGeoset } from "./geosets";
+import stageJson from "../previewStage.json";
 
 describe("isGeosetVisibleByDefault", () => {
   it.each([
@@ -25,6 +26,30 @@ describe("isGeosetVisibleByDefault", () => {
     [3501, false],
   ])("geoset %i -> %s", (geosetId, expected) => {
     expect(isGeosetVisibleByDefault(geosetId)).toBe(expected);
+  });
+});
+
+describe("creature display 3019 geosets", () => {
+  it("uses the creature base rule when the model has no extra-geoset data", () => {
+    expect(stageJson.creature.modelId).toBe(270);
+    expect(stageJson.creature.fileDataId).toBe(125259);
+    expect(stageJson.creature.textureVariationFileDataIds).toEqual([125258, 0, 0, 0]);
+    expect(stageJson.creature.geosetDataId).toBe(0);
+    expect(stageJson.creature.geosets).toEqual([]);
+    expect(isCreatureGeosetVisible(0, null)).toBe(true);
+    expect(isCreatureGeosetVisible(100, null)).toBe(true);
+    expect(isCreatureGeosetVisible(101, null)).toBe(true);
+    expect(isCreatureGeosetVisible(102, null)).toBe(false);
+    expect(isCreatureGeosetVisible(3201, null)).toBe(true);
+  });
+
+  it("uses exact display group selections only when creature model enables overrides", () => {
+    const selected = [{ geosetIndex: 0, geosetValue: 2 }, { geosetIndex: 1, geosetValue: 1 }];
+    expect(isCreatureGeosetVisible(0, selected)).toBe(true);
+    expect(isCreatureGeosetVisible(101, selected)).toBe(false);
+    expect(isCreatureGeosetVisible(102, selected)).toBe(true);
+    expect(isCreatureGeosetVisible(201, selected)).toBe(true);
+    expect(isCreatureGeosetVisible(901, selected)).toBe(true);
   });
 });
 

@@ -12,11 +12,26 @@ import { describe, expect, it } from "vitest";
 import {
   applyM2Blend,
   combineParticleTexels,
+  fogM2BlendColor,
   m2BlendParams,
   m2ParticleAlphaThreshold,
   m2RenderFlags,
   selectParticlePixelShader,
 } from "./nativeM2Blend";
+
+describe("fogM2BlendColor", () => {
+  it("fades to each blend mode's neutral contribution", () => {
+    const source: [number, number, number] = [0.8, 0.4, 0.2];
+    const fog: [number, number, number] = [0.2, 0.3, 0.4];
+    expect(fogM2BlendColor(3, source, fog, 1)).toEqual([0, 0, 0]);
+    expect(fogM2BlendColor(4, source, fog, 1)).toEqual([0, 0, 0]);
+    expect(fogM2BlendColor(5, source, fog, 1)).toEqual([1, 1, 1]);
+    expect(fogM2BlendColor(6, source, fog, 1)).toEqual([0.5, 0.5, 0.5]);
+    expect(fogM2BlendColor(2, source, fog, 1)).toEqual(fog);
+    expect(fogM2BlendColor(7, source, fog, 1, 0.5)).toEqual([0.1, 0.15, 0.2]);
+    expect(fogM2BlendColor(4, source, fog, 0)).toEqual(source);
+  });
+});
 
 describe("m2BlendParams", () => {
   it("maps every authored M2 blend mode to the original GxBlend factors", () => {

@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  BackSide,
   Box3,
-  CircleGeometry,
   Clock,
-  Color,
-  DirectionalLight,
   Group,
-  HemisphereLight,
   Matrix4,
   Mesh,
-  MeshStandardMaterial,
   Object3D,
   PerspectiveCamera,
+  PlaneGeometry,
   Scene,
+  ShaderMaterial,
+  SphereGeometry,
   SRGBColorSpace,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from "three";
@@ -31,6 +31,9 @@ import nativeModelManifest from "./nativeModelManifest.json";
 import appearanceJson from "./vulperaAppearance.json";
 import { loadAppearanceTextures, loadNativeActorBundle, type NativeModelManifest } from "./m2/actorLoader";
 import { compileGeosetVisibility } from "./m2/appearance";
+import { isCreatureGeosetVisible } from "./m2/geosets";
+import previewStageJson from "./previewStage.json";
+import { parsePreviewStage } from "./m2/previewStage";
 import { NATIVE_TO_THREE_BASIS, threeToNativePoint } from "./m2/coordinates";
 import { STAND_ANIMATION_ID, animationOptionLabel } from "./m2/animations";
 import {
@@ -45,6 +48,7 @@ import type { M2Sequence } from "./m2/model";
 // resolveJsonModule widens the asset `kind` strings; the manifest is generated
 // by script/prepare-native-models.mjs and pinned by SHA-256 per asset.
 const manifest = nativeModelManifest as NativeModelManifest;
+const PREVIEW_STAGE = parsePreviewStage(previewStageJson);
 
 const ACTOR_ASSETS = {
   vulpera: { label: "Vulpera", manifestName: "vulpera-male" },
@@ -62,7 +66,7 @@ export const ACTOR_BASE_YAW = 0;
 const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
 const STAND_CLIP_NAME = animationOptionLabel(STAND_ANIMATION_ID, 0);
-const CAMERA_FOV = 36;
+const CAMERA_FOV = 32; // fixed vertical FOV for both default framing and reset
 const REPLAY_POSE_BLEND_SECONDS = 0.15;
 const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
 const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
@@ -435,14 +439,14 @@ function placeModel(root: Group, x: number, rotationY: number) {
   root.updateWorldMatrix(true, true);
   const bounds = new Box3().setFromObject(root);
   const center = bounds.getCenter(new Vector3());
-  root.position.set(x - center.x, -bounds.min.y, -center.z);
+  root.position.add(new Vector3(x - center.x, -bounds.min.y, -center.z));
 }
 
-export function arrangeCombatants(vulpera: Group, trainingDummy: Group) {
-  // Uniform native scale for both actors; native model units already read as
-  // sensible scene units (Vulpera about 1.65 tall, dummy about 2.9).
-  placeModel(vulpera, -4, 0);
-  placeModel(trainingDummy, 4, Math.PI);
+export function arrangeCombatants(vulpera: Group, trainingDummy: Group, spacing = 8) {
+  // Keep combatants facing each other; on a narrow stage close the gap rather
+  // than shrinking the models to fit an eight-unit path into a phone viewport.
+  placeModel(vulpera, -spacing / 2, 0);
+  placeModel(trainingDummy, spacing / 2, Math.PI);
 }
 
 export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, bounds: Box3): CameraView {
@@ -450,7 +454,7 @@ export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, 
   const size = bounds.getSize(new Vector3());
   const radius = Math.max(size.length() * 0.5, 1);
   const target = center.clone().add(new Vector3(0, size.y * 0.02, 0));
-  const direction = new Vector3(0.42, 0.28, 1).normalize();
+  const direction = new Vector3(0.78, 0.22, 1).normalize();
   const viewDirection = direction.clone().negate();
   const viewRight = new Vector3().crossVectors(viewDirection, camera.up).normalize();
   const viewUp = new Vector3().crossVectors(viewRight, viewDirection).normalize();
@@ -472,7 +476,7 @@ export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, 
 
   const position = target.clone().add(direction.multiplyScalar(distance));
   camera.near = Math.max(0.01, distance / 100);
-  camera.far = distance * 20;
+  camera.far = Math.max(250, distance * 20);
   camera.position.copy(position);
   camera.updateProjectionMatrix();
   controls.target.copy(target);
@@ -630,11 +634,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let manualTimeMs = 0;
     let manualIsPlaying = false;
 
-    scene.background = new Color(0x111820);
-    // Color-domain policy: the M2 combiners already output display-domain
-    // colors; no tone mapping or output encode is applied to them (the custom
-    // shaders include neither). outputColorSpace stays SRGB so the remaining
-    // standard materials (the floor) keep their own correct encode.
+    // M2 textures and procedural stage colors are display-domain values. All
+    // custom shaders write them directly: no ACES, exposure or output encode.
     renderer.outputColorSpace = SRGBColorSpace;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
@@ -643,23 +644,76 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     controls.enablePan = true;
     controls.listenToKeyEvents(canvas);
 
-    // The actors are lit inside their shaders (WoW ambient/sun model, recorded
-    // preview preset); these lights exist for the floor only.
-    const hemisphereLight = new HemisphereLight(0xdcecff, 0x222016, 1.1);
-    scene.add(hemisphereLight);
-    const keyLight = new DirectionalLight(0xfff0d2, 1.6);
-    keyLight.position.set(4, 7, 5);
-    scene.add(keyLight);
-    const fillLight = new DirectionalLight(0x8ab4ff, 0.6);
-    fillLight.position.set(-5, 3, 2);
-    scene.add(fillLight);
+    const stage = PREVIEW_STAGE;
+    const sky = new Mesh(new SphereGeometry(100, 48, 24), new ShaderMaterial({
+      side: BackSide,
+      depthWrite: false,
+      depthTest: false,
+      uniforms: {
+        top: { value: new Vector3().fromArray(stage.sky.top) },
+        middle: { value: new Vector3().fromArray(stage.sky.middle) },
+        band1: { value: new Vector3().fromArray(stage.sky.band1) },
+        band2: { value: new Vector3().fromArray(stage.sky.band2) },
+        haze: { value: new Vector3().fromArray(stage.sky.fog) },
+      },
+      vertexShader: `varying float elevation;
+        void main() { elevation = normalize(position).y;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `uniform vec3 top, middle, band1, band2, haze;
+        varying float elevation;
+        void main() {
+          vec3 color = mix(haze, band2, smoothstep(-0.06, 0.005, elevation));
+          color = mix(color, band1, smoothstep(0.005, 0.045, elevation));
+          color = mix(color, middle, smoothstep(0.045, 0.13, elevation));
+          color = mix(color, top, smoothstep(0.13, 0.35, elevation));
+          gl_FragColor = vec4(color, 1.0);
+        }`,
+    }));
+    sky.renderOrder = -100;
+    sky.frustumCulled = false;
+    scene.add(sky);
 
-    const floor = new Mesh(
-      new CircleGeometry(7, 72),
-      new MeshStandardMaterial({ color: 0x202a32, roughness: 0.88, metalness: 0.03 }),
-    );
+    const floor = new Mesh(new PlaneGeometry(200, 200), new ShaderMaterial({
+      uniforms: {
+        ambient: { value: new Vector3().fromArray(stage.lighting.ambientSky) },
+        direct: { value: new Vector3().fromArray(stage.lighting.sunColor) },
+        fogColor: { value: new Vector3().fromArray(stage.fog.color) },
+        fogRange: { value: new Vector2(stage.fog.startPreview, stage.fog.endPreview) },
+      },
+      vertexShader: `varying vec3 worldPosition;
+        void main() { vec4 world = modelMatrix * vec4(position, 1.0);
+          worldPosition = world.xyz;
+          gl_Position = projectionMatrix * viewMatrix * world; }`,
+      fragmentShader: `uniform vec3 ambient, direct, fogColor; uniform vec2 fogRange;
+        varying vec3 worldPosition;
+        void main() {
+          float soil = 0.98 + 0.02 * sin(worldPosition.x * 1.8) * sin(worldPosition.z * 2.3)
+            + 0.025 * sin(worldPosition.x * 0.53 + worldPosition.z * 0.71);
+          vec3 color = vec3(0.53, 0.48, 0.37) * (ambient + direct) * soil;
+          float fog = smoothstep(fogRange.x, fogRange.y, distance(worldPosition, cameraPosition));
+          gl_FragColor = vec4(mix(color, fogColor, fog), 1.0);
+        }`,
+    }));
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
+
+    const contactShadows = [-1, 1].map(() => {
+      const mesh = new Mesh(new PlaneGeometry(3, 2.5), new ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        vertexShader: `varying vec2 shadowUv;
+          void main() { shadowUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `varying vec2 shadowUv;
+          void main() { float radius = dot(shadowUv, shadowUv);
+            gl_FragColor = vec4(0.08, 0.075, 0.06, 0.32 * pow(1.0 - smoothstep(0.0, 1.0, radius), 2.0)); }`,
+      }));
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = 0.012;
+      mesh.renderOrder = 1;
+      scene.add(mesh);
+      return mesh;
+    });
 
     const resize = () => {
       const width = Math.max(1, canvas.clientWidth);
@@ -667,6 +721,13 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      if (vulperaMount && dummyMount) {
+        arrangeCombatants(vulperaMount, dummyMount, width < 620 ? 5.6 : 8);
+        contactShadows[0].position.x = vulperaMount.position.x;
+        contactShadows[1].position.x = dummyMount.position.x;
+        replayAnchors = getReplayEffectAnchors(vulperaMount, dummyMount);
+        modelBounds = new Box3().setFromObject(vulperaMount).union(new Box3().setFromObject(dummyMount));
+      }
       if (modelBounds) defaultView = frameModels(camera, controls, modelBounds);
     };
     resizeObserver = new ResizeObserver(resize);
@@ -798,6 +859,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           setNativeError(`${message} No substitute effect was rendered.`);
         }
       }
+      sky.position.copy(camera.position);
       renderer.render(scene, camera);
     };
     renderFrame();
@@ -822,6 +884,12 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       dummyActor = null;
       floor.geometry.dispose();
       floor.material.dispose();
+      sky.geometry.dispose();
+      sky.material.dispose();
+      for (const shadow of contactShadows) {
+        shadow.geometry.dispose();
+        shadow.material.dispose();
+      }
       renderer.dispose();
       controllerRef.current = null;
     };
@@ -860,16 +928,27 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           vulperaBundle.skin.sections.map((section) => section.meshPartId),
           appearanceJson,
         ),
+        lightPreset: stage.lighting,
+        fog: stage.fog,
       });
       dummyActor = createNativeM2Actor({
         model: dummyBundle.model,
         skin: dummyBundle.skin,
         label: ACTOR_ASSETS.trainingDummy.label,
         textures: dummyBundle.textures,
+        geosetVisibility: new Map(dummyBundle.skin.sections.map((section) => [
+          section.meshPartId,
+          isCreatureGeosetVisible(section.meshPartId,
+            stage.creature.geosetDataId > 0 ? stage.creature.geosets : null),
+        ])),
+        lightPreset: stage.lighting,
+        fog: stage.fog,
       });
       vulperaMount = mountNativeActor(vulperaActor);
       dummyMount = mountNativeActor(dummyActor);
-      arrangeCombatants(vulperaMount, dummyMount);
+      arrangeCombatants(vulperaMount, dummyMount, canvas.clientWidth < 620 ? 5.6 : 8);
+      contactShadows[0].position.x = vulperaMount.position.x;
+      contactShadows[1].position.x = dummyMount.position.x;
       replayAnchors = getReplayEffectAnchors(vulperaMount, dummyMount);
       scene.add(vulperaMount, dummyMount);
       canvas.dataset.actorPendingTextureTypes = vulperaActor.pendingTextureTypes.join(",");
@@ -965,6 +1044,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             return null;
           }
           nativeEffect = loadedEffect;
+          nativeEffect.setFog(stage.fog);
           nativeEffect.group.visible = animationModeRef.current === "native";
           scene.add(nativeEffect.group);
           nativeEffect.setTime(nativePreviewTimeRef.current, camera);
@@ -981,7 +1061,9 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           const results = await Promise.allSettled(assets.map(async (asset) => {
             const instanceLimit = REPLAY_COMPONENT_INSTANCE_LIMITS.get(asset.fileDataId);
             if (!instanceLimit) throw new Error(`FileDataID ${asset.fileDataId}: no measured replay instance bound. No substitute effect was rendered.`);
-            return { asset, effect: await loadNativeParticleEffect(asset, instanceLimit) };
+            const effect = await loadNativeParticleEffect(asset, instanceLimit);
+            effect.setFog(stage.fog);
+            return { asset, effect };
           }));
           const loaded = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
           if (isStopped || generation !== replayEffectGeneration) {

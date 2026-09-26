@@ -1,0 +1,47 @@
+{
+  "source": {
+    "build": "12.1.0.69933",
+    "displayId": 3019,
+    "lightId": 1,
+    "lightParamsId": 12,
+    "lightDataId": 20977,
+    "time": 1440,
+    "csvSha256": {
+      "CreatureDisplayInfo": "3d8d73c498eb227fe3479f45805addd5ae415f5c0fd64788725a1410c4330825",
+      "CreatureModelData": "6e0a711391a3eb5188e2c8e199d46e9a1070428bd044147a5379b9de3f549020",
+      "CreatureDisplayInfoGeosetData": "93a621fc0bea2b823460eb2ac8661821ac2316f9f5f1af31e2514f3dd4b03472",
+      "Light": "d9f43be5bfa2926bef36c5516ce0a6d6ceb135282d2002972deab47b9aea50d7",
+      "LightParams": "e06a31fafa90a544dd5a9e13dbcb0c2cf047ceb0beecc563e0cc6b26ac6c9326",
+      "LightData": "0364b899748b37211e3379d27c5d64be52e34ae77d220d781c3c17d1b3d61df9"
+    }
+  },
+  "creature": {
+    "modelId": 270,
+    "fileDataId": 125259,
+    "textureVariationFileDataIds": [
+      125258,
+      0,
+      0,
+      0
+    ],
+    "geosetDataId": 0,
+    "geosets": []
+  },
+  "colors": {
+    "ambient": 8361386,
+    "horizonAmbient": 0,
+    "groundAmbient": 0,
+    "direct": 6968898,
+    "skyTop": 8009,
+    "skyMiddle": 5406631,
+    "skyBand1": 10083573,
+    "skyBand2": 11524832,
+    "skySmog": 11842740,
+    "skyFog": 5077135
+  },
+  "fog": {
+    "end": 18000,
+    "scaler": 0.25,
+    "density": 4.5
+  }
+}
