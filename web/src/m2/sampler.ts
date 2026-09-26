@@ -1,7 +1,8 @@
 // Pure animation sampling for parsed M2 models: sequence resolution (lookup,
 // scan, alias chains, byte-owner selection), bone matrix composition, attachment
-// transforms and skinned vertex bounds. Matrices are column-major number[16] in
-// native M2 coordinates; scene conversion happens only via ./coordinates.
+// transforms, UV texture-transform matrices, pose blending and skinned vertex
+// bounds. Matrices are column-major number[16] in native M2 coordinates; scene
+// conversion happens only via ./coordinates.
 
 import { readTrackKeys } from "./model";
 import type { M2Model, M2Sequence, M2Skin, M2Skel, Payload, Quaternion, TrackKeys, Vec3 } from "./model";
@@ -228,6 +229,134 @@ export function sampleBoneMatrices(
 
   for (let index = 0; index < bones.length; index += 1) matrixOf(index);
   return matrices as number[][];
+}
+
+export interface M2ColorSample {
+  rgb: [number, number, number];
+  alpha: number;
+}
+
+function trackTimeMs(track: { globalSequence: number }, timeMs: number, globalDurations: number[]): number {
+  if (track.globalSequence < 0) return timeMs;
+  const duration = globalDurations[track.globalSequence];
+  return duration > 0 ? timeMs % duration : timeMs;
+}
+
+/**
+ * Batch color slot at a time inside the sequence. Color rgb defaults to white
+ * and alpha to the 32767/32768 convention when the track is empty or the
+ * sequence bytes are unavailable.
+ */
+export function sampleM2Color(
+  model: M2Model,
+  resolution: SequenceResolution,
+  colorIndex: number,
+  timeMs: number,
+): M2ColorSample | null {
+  const color = model.colors[colorIndex];
+  if (!color) return null;
+  const sequenceIndex = resolution.sequence.index;
+  const sampledRgb = resolution.payload
+    ? sampleFloatComponents(readTrackKeys(resolution.payload, color.color, sequenceIndex), trackTimeMs(color.color, timeMs, model.globalSequenceDurationsMs))
+    : null;
+  const sampledAlpha = resolution.payload
+    ? sampleFloatComponents(readTrackKeys(resolution.payload, color.alpha, sequenceIndex), trackTimeMs(color.alpha, timeMs, model.globalSequenceDurationsMs))
+    : null;
+  return {
+    rgb: sampledRgb ? [sampledRgb[0], sampledRgb[1], sampledRgb[2]] : [1, 1, 1],
+    alpha: sampledAlpha ? sampledAlpha[0] / 32768 : 32767 / 32768,
+  };
+}
+
+/**
+ * Texture weight slot at a time inside the sequence: u_tex_sample_alpha
+ * components, defaulting to 32767/32768 when empty.
+ */
+export function sampleM2TextureWeight(
+  model: M2Model,
+  resolution: SequenceResolution,
+  weightIndex: number,
+  timeMs: number,
+): number {
+  const track = model.textureWeights[weightIndex];
+  if (!track) return 32767 / 32768;
+  const sampled = resolution.payload
+    ? sampleFloatComponents(readTrackKeys(resolution.payload, track, resolution.sequence.index), trackTimeMs(track, timeMs, model.globalSequenceDurationsMs))
+    : null;
+  return sampled ? sampled[0] / 32768 : 32767 / 32768;
+}
+
+/**
+ * Linear per-element blend of two full bone-matrix poses. Short cross-fade
+ * windows (the replay 0.15 s transition) keep linear matrix interpolation
+ * visually equivalent to slerping local transforms.
+ */
+export function blendBoneMatrices(a: number[][], b: number[][], weight: number): number[][] {
+  if (a.length !== b.length) {
+    throw new Error(`Cannot blend poses of ${a.length} and ${b.length} bones.`);
+  }
+  const clamped = Math.max(0, Math.min(1, weight));
+  return a.map((matrix, index) => matrix.map((value, element) =>
+    value + (b[index][element] - value) * clamped));
+}
+
+/**
+ * UV transform matrix for one texture-transform slot at a time inside the
+ * sequence, in the exporter convention
+ * M = [T(c) R T(-c)] * [T(c) S T(-c)] * T(t) with c = (0.5, 0.5, 0):
+ * translation is applied first, then the centered scale, then the centered
+ * rotation (wow.export M2RendererGL._update_tex_matrices). Returns identity
+ * when the slot index is -1/undefined or carries no tracks.
+ */
+export function sampleTextureTransformMatrix(
+  model: M2Model,
+  resolution: SequenceResolution,
+  transformIndex: number,
+  timeMs: number,
+): number[] {
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  if (transformIndex < 0 || transformIndex >= model.textureTransforms.length || !resolution.payload) {
+    return identity;
+  }
+  const transform = model.textureTransforms[transformIndex];
+  const sequenceIndex = resolution.sequence.index;
+
+  const translation = sampleFloatComponents(readTrackKeys(resolution.payload, transform.translation, sequenceIndex), timeMs);
+  const rotation = sampleQuaternionKeys(readTrackKeys(resolution.payload, transform.rotation, sequenceIndex), timeMs);
+  const scale = sampleFloatComponents(readTrackKeys(resolution.payload, transform.scale, sequenceIndex), timeMs);
+
+  // Column-major composition matching the exporter product
+  // [T(c) R T(-c)] * [T(c) S T(-c)] * T(t), c = (0.5, 0.5, 0): each block is
+  // appended on the right, so translation applies first in UV space, then the
+  // centered scale, then the centered rotation.
+  const matrix = identity.slice();
+  const appendCentered = (linear: number[]) => {
+    const centered = [
+      linear[0], linear[1], linear[2], 0,
+      linear[3], linear[4], linear[5], 0,
+      linear[6], linear[7], linear[8], 0,
+      0.5 - (linear[0] * 0.5 + linear[3] * 0.5), 0.5 - (linear[1] * 0.5 + linear[4] * 0.5), 0, 1,
+    ];
+    matrix.splice(0, matrix.length, ...multiplyMatrices(matrix, centered));
+  };
+
+  if (rotation) {
+    const [x, y, z, w] = rotation;
+    appendCentered([
+      1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y),
+      2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x),
+      2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y),
+    ]);
+  }
+  if (scale) {
+    appendCentered([scale[0], 0, 0, 0, scale[1], 0, 0, 0, scale[2]]);
+  }
+  if (translation) {
+    matrix.splice(0, matrix.length, ...multiplyMatrices(matrix, [
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, translation[0], translation[1], 0, 1,
+    ]));
+  }
+  return matrix;
 }
 
 /** Attachment world transform: the bone matrix followed by T(position). */

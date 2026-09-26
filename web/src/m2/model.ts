@@ -720,7 +720,7 @@ export function parseSkinFile(source: ArrayBuffer, fileDataId: number): M2Skin {
   const bonesDescriptor = reader.arrayDescriptor(20, 4, "bone remap");
   const sectionsDescriptor = reader.arrayDescriptor(28, 0x30, "sections");
   const batchesDescriptor = reader.arrayDescriptor(36, 0x18, "batches");
-  const shadowBatchesDescriptor = reader.arrayDescriptor(48, 12, "shadow batches");
+  const shadowBatchesDescriptor = reader.arrayDescriptor(44, 12, "shadow batches");
 
   const vertexLookup = readU16Lookup(reader, vertexLookupDescriptor, "vertex lookup");
   const indices = readU16Lookup(reader, indicesDescriptor, "triangle index");

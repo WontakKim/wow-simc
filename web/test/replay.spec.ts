@@ -40,7 +40,13 @@ async function analyzeModelRegions(page: Page, screenshot: Buffer): Promise<Mode
         const isWarmModelPixel = red > 50
           && red > green * 1.12
           && green > blue * 1.05;
-        if (!isBrightModelPixel && !isWarmModelPixel) continue;
+        // Native actors bind neutral mid-grey while customization textures are
+        // pending, which stays near-achromatic under the WoW lighting model, so
+        // clearly lit low-chroma pixels above the dark background also count.
+        const isLitGreyModelPixel = maximum - minimum <= 12
+          && red > 95
+          && red + green + blue > 300;
+        if (!isBrightModelPixel && !isWarmModelPixel && !isLitGreyModelPixel) continue;
         columnCounts[x] += 1;
         if (x < split) {
           leftMinimumY = Math.min(leftMinimumY, y);
@@ -180,7 +186,7 @@ test("keeps the genuine scene usable through reference failure and retry", async
   await expect(scene.locator("canvas")).toBeVisible();
   await expect(scene.locator(".replay-unavailable")).toBeVisible();
   await scene.getByRole("button", { name: "Manual preview" }).click();
-  await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
+  await expect(scene.getByRole("combobox", { name: "Native character animation" })).toBeEnabled();
 
   await alert.getByRole("button", { name: "Retry loading reference" }).click();
 
@@ -222,7 +228,7 @@ test("keeps the replay usable at mobile width", async ({ page }) => {
   await expect(page.getByTestId("selected-event")).toBeVisible();
 });
 
-test("loads both genuine local models with separate replay and manual modes", async ({ page }) => {
+test("loads both genuine native models with separate replay and manual modes", async ({ page }) => {
   const runtimeRequests: string[] = [];
   page.on("request", (request) => runtimeRequests.push(request.url()));
 
@@ -232,15 +238,18 @@ test("loads both genuine local models with separate replay and manual modes", as
   await expect(scene.getByText("Default Vulpera", { exact: true })).toBeVisible();
   await expect(scene.getByText("Training Dummy", { exact: true })).toBeVisible();
   await expect(scene.getByRole("button", { name: "Replay sync" })).toHaveAttribute("aria-pressed", "true");
-  await expect(scene.getByText(/illustrative exported motion/i)).toBeVisible();
+  await expect(scene.getByText(/native M2 cast animations/i)).toBeVisible();
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await expect(scene.getByRole("status")).toContainText(/native sequences/);
+  await expect(scene.getByTestId("native-actor-status")).toContainText(/Vulpera customization textures \(types .+\) pending/);
+  await expect(scene.locator("canvas")).toHaveAttribute("data-actor-pending-texture-types", /.+/);
   await expect(scene.locator("canvas")).toBeVisible();
 
   await scene.getByRole("button", { name: "Play", exact: true }).click();
   await expect(scene.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
   await scene.getByRole("button", { name: "Manual preview" }).click();
   await expect(scene.getByRole("button", { name: "Manual preview" })).toHaveAttribute("aria-pressed", "true");
-  const animationSelect = scene.getByRole("combobox", { name: "Exported character animation" });
+  const animationSelect = scene.getByRole("combobox", { name: "Native character animation" });
   expect(await animationSelect.locator("option").count()).toBeGreaterThan(100);
   await animationSelect.selectOption({ label: "Run (ID 5 variation 0)" });
   await scene.getByRole("button", { name: "Play animation" }).click();
@@ -253,12 +262,14 @@ test("loads both genuine local models with separate replay and manual modes", as
   await scene.getByRole("button", { name: "Replay sync" }).click();
   await expect(scene.getByRole("button", { name: "Play", exact: true })).toBeVisible();
 
-  expect(runtimeRequests.some((url) => url.endsWith("/model/vulpera.glb"))).toBe(true);
-  expect(runtimeRequests.some((url) => url.endsWith("/model/training-dummy.glb"))).toBe(true);
+  expect(runtimeRequests.some((url) => url.endsWith("/model/native-models/1890761.m2"))).toBe(true);
+  expect(runtimeRequests.some((url) => url.endsWith("/model/native-models/1893903.skin"))).toBe(true);
+  expect(runtimeRequests.some((url) => url.endsWith("/model/native-models/125259.m2"))).toBe(true);
+  expect(runtimeRequests.some((url) => url.endsWith("/model/native-models/478820.skin"))).toBe(true);
   expect(runtimeRequests.every((url) => new URL(url).origin === "http://127.0.0.1:4173")).toBe(true);
 });
 
-test("synchronizes real exported poses to replay controls deterministically", async ({ page }) => {
+test("synchronizes native cast poses to replay controls deterministically", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
@@ -292,7 +303,7 @@ test("synchronizes real exported poses to replay controls deterministically", as
   expect(repeatedSample.equals(firstSample)).toBe(true);
 
   await scene.getByRole("button", { name: "Manual preview" }).click();
-  await scene.getByRole("combobox", { name: "Exported character animation" }).selectOption({ label: "Run (ID 5 variation 0)" });
+  await scene.getByRole("combobox", { name: "Native character animation" }).selectOption({ label: "Run (ID 5 variation 0)" });
   await scene.getByRole("button", { name: "Replay sync" }).click();
   await expect(motionStatus).toContainText("Lightning Bolt");
   expect((await canvas.screenshot()).equals(firstSample)).toBe(true);
@@ -315,7 +326,7 @@ test("synchronizes real exported poses to replay controls deterministically", as
 });
 
 test("applies the latest replay pose when the Vulpera finishes loading late", async ({ page }) => {
-  await page.route("**/model/vulpera.glb", async (route) => {
+  await page.route("**/model/native-models/1890761.m2", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 350));
     await route.continue();
   });
@@ -362,15 +373,15 @@ test("orbits, zooms, and resets the genuine model camera", async ({ page }) => {
   expect(reset.equals(zoomed)).toBe(false);
 });
 
-test("shows actionable setup guidance when a genuine model asset is missing", async ({ page }) => {
-  await page.route("**/model/training-dummy.glb", (route) => route.fulfill({ status: 404, body: "missing" }));
+test("shows actionable setup guidance when a native model asset is missing", async ({ page }) => {
+  await page.route("**/model/native-models/125259.m2", (route) => route.fulfill({ status: 404, body: "missing" }));
   await page.goto("/");
 
-  const alert = page.getByRole("alert");
-  await expect(alert).toContainText("training-dummy.glb", { timeout: 30_000 });
-  await expect(alert).toContainText(/export the genuine model with wow\.export/i);
-  await expect(alert).toContainText("web/public/model/");
-  await expect(page.getByText(/no placeholder model was substituted/i)).toBeVisible();
+  const alert = page.getByRole("alert").filter({ hasText: "Genuine model scene unavailable" });
+  await expect(alert).toContainText("FileDataID 125259 (m2)", { timeout: 30_000 });
+  await expect(alert).toContainText("status 404");
+  await expect(alert).toContainText(/run node script\/prepare-native-models\.mjs/i);
+  await expect(alert).toContainText(/no placeholder model was substituted/i);
 });
 
 test("shows actionable feedback when WebGL is unavailable", async ({ page }) => {
@@ -431,9 +442,11 @@ test("reframes genuine models after resizing the same page to mobile", async ({ 
   await scene.getByRole("button", { name: "Reset camera" }).click();
   const screenshot = await canvas.screenshot();
   const mobileModels = await analyzeModelRegions(page, screenshot);
-  expect(mobileModels.leftPixels).toBeGreaterThan(500);
+  // The ranged layout spans 8+ units, so on a 390px-wide canvas the 1.65-unit
+  // vulpera legitimately projects to a few hundred pixels.
+  expect(mobileModels.leftPixels).toBeGreaterThan(200);
   expect(mobileModels.rightPixels).toBeGreaterThan(500);
-  expect(mobileModels.leftHeight).toBeGreaterThanOrEqual(36);
+  expect(mobileModels.leftHeight).toBeGreaterThanOrEqual(20);
   expect(mobileModels.rightHeight).toBeGreaterThanOrEqual(50);
   expect(mobileModels.horizontalSeparation).toBeGreaterThan(0.5);
   const trainingDummyPixelsAtRightEdge = await page.evaluate(async (imageUrl) => {
@@ -493,7 +506,13 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await seek.fill("1.1");
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
   expect((await canvas.screenshot()).equals(lavaFrame)).toBe(true);
-  await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText("FileDataID 4006621: 5 of 9 authored emitters; emitter 4: refraction unsupported");
+  await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText(
+    "FileDataID 4006621: 5 of 9 authored emitters; "
+      + "emitter 0: nonzero TXAC UV shader unsupported, "
+      + "emitter 2: nonzero TXAC UV shader unsupported, "
+      + "emitter 4: refraction unsupported, "
+      + "emitter 6: nonzero TXAC UV shader unsupported",
+  );
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("emitter 1: Modx4 color flag not applied");
 
@@ -608,7 +627,10 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
     `data:image/png;base64,${before.toString("base64")}`,
     `data:image/png;base64,${during.toString("base64")}`,
   ]);
-  expect(targetPixels).toBeGreaterThan(80);
+  // The visible impact is the authored fire blob of the supported emitters:
+  // both Flame Shock kits gate their nonzero-TXAC emitters (disclosed in the
+  // limitations summary), so the cluster beside the dummy is compact.
+  expect(targetPixels).toBeGreaterThan(40);
 });
 
 test("loads only a selected Lava Burst trace and fails the whole kit when its original is missing", async ({ page }) => {
@@ -695,8 +717,9 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Lightning Bolt: 5 of 5 original emitters", { timeout: 30_000 });
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 0 of 3 components use authored caster bone origins");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: 60%-bounds anchored at both endpoints");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 0 of 3 components use native caster attachment origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: 60%-bounds anchored launch");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("dummy attachment 34 (Chest) translation for arrival");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)");
   await seek.fill("2.4");
   await expect(canvas).toHaveAttribute("data-replay-native-components", "3");
@@ -732,8 +755,8 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("4329984", { timeout: 30_000 });
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 1 of 4 components use authored caster bone origins");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: authored bone_Chest origin (source attachment 34)");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 1 of 4 components use native caster attachment origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: native caster attachment 34 (Chest) origin for launch");
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("3980281: 1 of 2 original missile bodies omitted");
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("LOD0 SKIN has 2 of 2 mesh batches");
   await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("FileDataID 4329984 ribbon 1");
@@ -765,10 +788,10 @@ test("moves three coherent original components and discloses the blocked fourth 
   const replayStatus = scene.locator("[data-testid='replay-effect-status']");
   await expect(replayStatus).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
   await page.getByRole("button", { name: /Timeline mark.*Elemental Blast/i }).first().click();
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 3 of 3 components use authored caster bone origins");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: authored bone_SpellHandL origin (source attachment 21)");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 794788: authored bone_SpellHandR origin (source attachment 22)");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 613807: authored bone_Chest origin (source attachment 34)");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 3 of 3 components use native caster attachment origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: native caster attachment 21 (SpellHandL) origin");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 794788: native caster attachment 22 (SpellHandR) origin");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 613807: native caster attachment 34 (Chest) origin");
   await expect(replayStatus).toContainText("9 original BLP textures");
   await expect(replayStatus).toContainText("FileDataID 4329984 + 794788 + 613807");
   expect(runtimeRequests.some((url) => url.endsWith("/model/native-effects/3980281.m2"))).toBe(false);
@@ -1015,7 +1038,7 @@ test("keeps existing scene modes usable when required native data is missing or 
   await expect(replayAlert).toContainText("FileDataID 397894", { timeout: 30_000 });
   await expect(replayAlert).toContainText(/no substitute effect/i);
   await scene.getByRole("button", { name: "Manual preview" }).click();
-  await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
+  await expect(scene.getByRole("combobox", { name: "Native character animation" })).toBeEnabled();
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   const alert = scene.getByRole("alert").filter({ hasText: "Native M2 component unavailable" });
   await expect(alert).toContainText("FileDataID 397894", { timeout: 30_000 });
@@ -1060,21 +1083,21 @@ test("rejects unsupported native source bytes visibly and preserves mobile frami
   await expect(alert).toContainText(/FileDataID 794788.*version 271.*272/i, { timeout: 30_000 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await scene.getByRole("button", { name: "Manual preview" }).click();
-  await expect(scene.getByRole("combobox", { name: "Exported character animation" })).toBeEnabled();
+  await expect(scene.getByRole("combobox", { name: "Native character animation" })).toBeEnabled();
 });
 
 
-test("identifies both Stormkeeper bone origins and the unapplied kit offset", async ({ page }) => {
+test("identifies both Stormkeeper attachment origins and the unapplied kit offset", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   const stormkeeper = page.locator(".event-hit-target").filter({ hasText: "Stormkeeper" }).first();
   await stormkeeper.click();
   const placement = scene.getByTestId("replay-anchor-status");
-  await expect(placement).toContainText("6 of 19 mapped components use authored caster bone origins");
-  await expect(placement).toContainText("Placement: 2 of 2 components use authored caster bone origins");
-  await expect(placement).toContainText("FileDataID 1355634: authored bone_SpellHandR origin (source attachment 22)");
-  await expect(placement).toContainText("FileDataID 1284864: authored bone_SpellHandR origin (source attachment 22); kit offset (0, 0.15, 0) unapplied");
+  await expect(placement).toContainText("6 of 19 mapped components use native caster attachment origins");
+  await expect(placement).toContainText("Placement: 2 of 2 components use native caster attachment origins");
+  await expect(placement).toContainText("FileDataID 1355634: native caster attachment 22 (SpellHandR) origin sampled at the replay time");
+  await expect(placement).toContainText("FileDataID 1284864: native caster attachment 22 (SpellHandR) origin sampled at the replay time; kit offset (0, 0.15, 0) unapplied");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   await seek.fill("0.15");
@@ -1251,7 +1274,7 @@ test("repeated genuine casts blend two local clip times across backward seeks", 
   expect((await capture("32.427")).equals(middle)).toBe(true);
 
   await scene.getByRole("button", { name: "Manual preview" }).click();
-  await scene.getByRole("combobox", { name: "Exported character animation" })
+  await scene.getByRole("combobox", { name: "Native character animation" })
     .selectOption({ label: "ShaSpellCastBothFront (ID 830 variation 0)" });
   const manualAfterBlend = await canvas.screenshot();
   await scene.getByRole("button", { name: "Replay sync" }).click();

@@ -8,7 +8,12 @@ import {
   resolveSequence,
   sampleBoneMatrices,
 } from "./sampler";
-import { geosetIdFromMeshPartId, isGeosetVisibleByDefault } from "./geosets";
+import { isGeosetVisibleByDefault } from "./geosets";
+import {
+  UNSUPPORTED_M2_PIXEL_SHADERS,
+  UNSUPPORTED_M2_VERTEX_SHADERS,
+  selectM2Shaders,
+} from "./shaders";
 
 const MODEL_DIRECTORY = resolve(process.cwd(), "public/model/native-models");
 
@@ -63,7 +68,7 @@ describe.skipIf(!assetsAvailable)("prepared native models", () => {
       "bones:", model.bones.length, "attachments:", attachmentIds.join(","));
 
     const bounds = computeSkinnedVertexBounds(model, skin, null, (section) =>
-      isGeosetVisibleByDefault(geosetIdFromMeshPartId(section.meshPartId)));
+      isGeosetVisibleByDefault(section.meshPartId));
     expect(bounds).not.toBeNull();
     const height = bounds!.max[2] - bounds!.min[2];
     expect(height).toBeGreaterThan(0);
@@ -95,5 +100,41 @@ describe.skipIf(!assetsAvailable)("prepared native models", () => {
     expect(bounds).not.toBeNull();
     expect(bounds!.max[2] - bounds!.min[2]).toBeGreaterThan(0);
     console.log("[native-models] dummy bind bounds:", JSON.stringify(bounds));
+  });
+
+  it("selects the plain unskinned-no-tex-mod shader pair for every Training Dummy batch", () => {
+    const model = parseM2File(readPreparedFile(125259, "m2")!, 125259);
+    const skin = parseSkinFile(readPreparedFile(478820, "skin")!, 478820);
+
+    expect(skin.batches.length).toBeGreaterThan(0);
+    for (const batch of skin.batches) {
+      const selection = selectM2Shaders(batch.shaderId, batch.textureCount);
+      expect(selection.vertexShader, `dummy batch ${batch.index} (shaderId 0x${batch.shaderId.toString(16)})`).toBe(0);
+      expect(selection.pixelShader, `dummy batch ${batch.index}`).toBe(1);
+      expect(selection.unsupportedVertexShader).toBeNull();
+      expect(selection.unsupportedPixelShader).toBeNull();
+    }
+  });
+
+  it("resolves every Vulpera batch to a supported shader pair (no gated shaders)", () => {
+    const model = parseM2File(readPreparedFile(1890761, "m2")!, 1890761);
+    const skin = parseSkinFile(readPreparedFile(1893903, "skin")!, 1893903);
+
+    expect(skin.batches.length).toBeGreaterThan(0);
+    const vertexShaders = new Set<number>();
+    const pixelShaders = new Set<number>();
+    for (const batch of skin.batches) {
+      const selection = selectM2Shaders(batch.shaderId, batch.textureCount);
+      expect(selection.unsupportedVertexShader, `vulpera batch ${batch.index} (shaderId 0x${batch.shaderId.toString(16)})`).toBeNull();
+      expect(selection.unsupportedPixelShader, `vulpera batch ${batch.index}`).toBeNull();
+      vertexShaders.add(selection.vertexShader);
+      pixelShaders.add(selection.pixelShader);
+    }
+    for (const vertexShader of vertexShaders) {
+      expect(UNSUPPORTED_M2_VERTEX_SHADERS.has(vertexShader), `VS ${vertexShader}`).toBe(false);
+    }
+    expect(pixelShaders.has(34)).toBe(false);
+    console.log("[native-models] vulpera batch vertex shaders:", [...vertexShaders].sort((a, b) => a - b).join(","),
+      "pixel shaders:", [...pixelShaders].sort((a, b) => a - b).join(","));
   });
 });

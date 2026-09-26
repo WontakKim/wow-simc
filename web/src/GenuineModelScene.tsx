@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ACESFilmicToneMapping,
-  AnimationAction,
-  AnimationMixer,
   Box3,
   CircleGeometry,
   Clock,
@@ -10,19 +7,17 @@ import {
   DirectionalLight,
   Group,
   HemisphereLight,
+  Matrix4,
   Mesh,
   MeshStandardMaterial,
   Object3D,
   PerspectiveCamera,
-  PCFSoftShadowMap,
   Scene,
   SRGBColorSpace,
-  Texture,
   Vector3,
   WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { GLTFLoader, type GLTF } from "three/addons/loaders/GLTFLoader.js";
 import type { ReplayEvent } from "./replay";
 import {
   loadNativeParticleEffect,
@@ -30,23 +25,40 @@ import {
   type NativeParticleRenderInstance,
 } from "./NativeParticleEffect";
 import { NATIVE_EFFECT_ASSETS, NATIVE_PREVIEW_DURATION_SECONDS, type NativeEffectAsset } from "./nativeEffectAssets";
+import nativeModelManifest from "./nativeModelManifest.json";
+import { loadNativeActorBundle, type NativeModelManifest } from "./m2/actorLoader";
+import { nativeToThreeMatrix, nativeToThreePoint } from "./m2/coordinates";
+import { STAND_ANIMATION_ID, animationOptionLabel } from "./m2/animations";
+import {
+  blendBoneMatrices,
+  resolveSequence,
+  sampleBoneMatrices,
+  type SequenceResolution,
+} from "./m2/sampler";
+import { createNativeM2Actor, type NativeM2Actor } from "./m2/renderer";
+import type { M2Sequence } from "./m2/model";
 
-const MODEL_ASSETS = {
-  vulpera: {
-    label: "Default Vulpera",
-    url: "/model/vulpera.glb",
-    localPath: "web/public/model/vulpera.glb",
-  },
-  trainingDummy: {
-    label: "Training Dummy",
-    url: "/model/training-dummy.glb",
-    localPath: "web/public/model/training-dummy.glb",
-  },
+// resolveJsonModule widens the asset `kind` strings; the manifest is generated
+// by script/prepare-native-models.mjs and pinned by SHA-256 per asset.
+const manifest = nativeModelManifest as NativeModelManifest;
+
+const ACTOR_ASSETS = {
+  vulpera: { label: "Vulpera", manifestName: "vulpera-male" },
+  trainingDummy: { label: "Training Dummy", manifestName: "training-dummy" },
 } as const;
+
+// Native M2 actors are Z-up; the basis conversion is applied exactly once, at
+// the actor root (C from ./m2/coordinates). The extra yaw on top of C turns the
+// converted model's authored facing toward the opponent so arrangeCombatants'
+// 0 / pi rotations face the combatants toward each other.
+const NATIVE_BASIS = new Matrix4().fromArray(nativeToThreeMatrix([
+  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+]));
+const ACTOR_BASE_YAW = -Math.PI / 2;
 
 const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
-const STAND_CLIP_NAME = "Stand (ID 0 variation 0)";
+const STAND_CLIP_NAME = animationOptionLabel(STAND_ANIMATION_ID, 0);
 const CAMERA_FOV = 36;
 export const ILLUSTRATIVE_MOTION_WINDOW_SECONDS = 1.2;
 export const REPLAY_MOTION_BLEND_SECONDS = 0.15;
@@ -97,30 +109,24 @@ const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
   [3980244, 2], [4329984, 3], [6211617, 4], [6211618, 4], [1571475, 4], [4392095, 1], [4050773, 1],
 ]);
 // SpellVisualMissile rows 28854 and 28867–28869 and SpellVisualKitModelAttach rows 321812/321824, build 12.1.0.69933.
-const REPLAY_SOURCE_ATTACHMENTS: Record<number, Record<number, { id: number; boneName: string }>> = {
-  191634: {
-    1355634: { id: 22, boneName: "bone_SpellHandR" },
-    1284864: { id: 22, boneName: "bone_SpellHandR" },
-  },
-  51505: { 4329984: { id: 34, boneName: "bone_Chest" } },
-  117014: {
-    4329984: { id: 21, boneName: "bone_SpellHandL" },
-    794788: { id: 22, boneName: "bone_SpellHandR" },
-    613807: { id: 34, boneName: "bone_Chest" },
-  },
+// Mapped to native M2 attachment ids on the caster model (21 SpellHandL, 22 SpellHandR, 34 Chest).
+export const REPLAY_SOURCE_ATTACHMENTS: Record<number, Record<number, number>> = {
+  191634: { 1355634: 22, 1284864: 22 },
+  51505: { 4329984: 34 },
+  117014: { 4329984: 21, 794788: 22, 613807: 34 },
 };
 const NATIVE_REPLAY_BASE_SCALE = 0.38;
 
-const ELEMENTAL_SHAMAN_CLIPS = new Map<number, { actionName: string; clipName: string }>([
-  [318038, { actionName: "flametongue_weapon", clipName: "SpellCastOmni (ID 54 variation 0)" }],
-  [192106, { actionName: "lightning_shield", clipName: "ShaSpellPrecastBothChannel (ID 862 variation 0)" }],
-  [191634, { actionName: "stormkeeper", clipName: "ShaSpellPrecastBoth (ID 828 variation 0)" }],
-  [443454, { actionName: "ancestral_swiftness", clipName: "SpellCastOmni (ID 54 variation 0)" }],
-  [1219480, { actionName: "ascendance", clipName: "ChannelCastOmniUp (ID 1448 variation 0)" }],
-  [51505, { actionName: "lava_burst", clipName: "CastStrongUpRight (ID 1148 variation 0)" }],
-  [188196, { actionName: "lightning_bolt", clipName: "ShaSpellCastBothFront (ID 830 variation 0)" }],
-  [117014, { actionName: "elemental_blast", clipName: "CastOutStrong (ID 1122 variation 0)" }],
-  [188389, { actionName: "flame_shock", clipName: "SpellCastDirected (ID 53 variation 0)" }],
+const ELEMENTAL_SHAMAN_ANIMATIONS = new Map<number, { actionName: string; animationId: number }>([
+  [318038, { actionName: "flametongue_weapon", animationId: 54 }],
+  [192106, { actionName: "lightning_shield", animationId: 862 }],
+  [191634, { actionName: "stormkeeper", animationId: 828 }],
+  [443454, { actionName: "ancestral_swiftness", animationId: 54 }],
+  [1219480, { actionName: "ascendance", animationId: 1448 }],
+  [51505, { actionName: "lava_burst", animationId: 1148 }],
+  [188196, { actionName: "lightning_bolt", animationId: 830 }],
+  [117014, { actionName: "elemental_blast", animationId: 1122 }],
+  [188389, { actionName: "flame_shock", animationId: 53 }],
 ]);
 
 type SceneStatus = "loading" | "ready" | "error";
@@ -141,6 +147,8 @@ export interface ReplayAnimationResolution {
   kind: ReplayAnimationKind;
   eventLabel: string;
   clipName: string;
+  /** Native M2 animation id; 0 (Stand) for every idle resolution. */
+  animationId: number;
   clipTime: number;
   status: string;
 }
@@ -255,21 +263,43 @@ export function getReplayEffectAnchors(caster: Group, target: Group) {
   return { caster: anchorFromBounds(caster), target: anchorFromBounds(target) };
 }
 
-export function getReplayEffectSourceAnchor(spellId: number, fileDataId: number, caster: Group, boundsAnchor: Vector3) {
-  const attachment = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[fileDataId];
-  if (!attachment) return boundsAnchor;
-  const bone = caster.getObjectByName(attachment.boneName);
-  if (!bone) throw new Error(`FileDataID ${fileDataId}: attachment ${attachment.id} requires missing ${attachment.boneName}.`);
-  bone.updateWorldMatrix(true, false);
-  return bone.getWorldPosition(new Vector3());
+export function getReplayEffectSourceAnchor(
+  spellId: number,
+  fileDataId: number,
+  sampleAttachment: (attachmentId: number) => Vector3 | null,
+  boundsAnchor: Vector3,
+) {
+  const attachmentId = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[fileDataId];
+  if (attachmentId === undefined) return boundsAnchor;
+  const sampled = sampleAttachment(attachmentId);
+  if (!sampled) {
+    throw new Error(`FileDataID ${fileDataId}: native attachment ${attachmentId} is unavailable on the caster model.`);
+  }
+  return sampled;
 }
 
+const M2_ATTACHMENT_NAMES = new Map<number, string>([
+  [21, "SpellHandL"],
+  [22, "SpellHandR"],
+  [34, "Chest"],
+]);
+
 function describeReplayComponentAnchor(spellId: number, component: ReplayComponent) {
-  const attachment = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId];
-  if (attachment && component.anchor === "caster") return `authored ${attachment.boneName} origin (source attachment ${attachment.id})${component.fileDataId === 1284864 ? "; kit offset (0, 0.15, 0) unapplied (attachment-local frame unavailable)" : ""}`;
-  if (attachment) return `authored ${attachment.boneName} origin (source attachment ${attachment.id}); target remains 60%-bounds anchored (destination 34 Chest has no matching dummy attachment/bone; M2 attachment record offset unavailable${spellId === 117014 ? "; impact positioner 712 unresolved" : ""})`;
-  if (component.anchor === "projectile") return "60%-bounds anchored at both endpoints (source attachment 19 Base with cast offset (-7, 0, 5), or -1 with positioner 513 depending on unresolved Lightning Bolt branch; offset unapplied because its attachment frame is unavailable; destination 34 Chest has no matching dummy attachment/bone)";
-  return `60%-bounds anchored at ${component.anchor} (single applicable attachment point not established from mapped source kit; -1/positioners or multiple authored rows may apply)`;
+  const attachmentId = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId];
+  const attachmentName = attachmentId !== undefined ? M2_ATTACHMENT_NAMES.get(attachmentId) : undefined;
+  if (attachmentId !== undefined && component.anchor === "caster") {
+    return `native caster attachment ${attachmentId} (${attachmentName}) origin sampled at the replay time${component.fileDataId === 1284864 ? "; kit offset (0, 0.15, 0) unapplied (attachment-local frame unavailable)" : ""}`;
+  }
+  if (attachmentId !== undefined) {
+    return `native caster attachment ${attachmentId} (${attachmentName}) origin for launch · dummy attachment 34 (Chest) translation for arrival${spellId === 117014 ? "; impact positioner 712 unresolved" : ""}`;
+  }
+  if (component.anchor === "projectile") {
+    return "60%-bounds anchored launch (source attachment 19 Base or -1 with positioner 513, Lightning Bolt branch unresolved) · dummy attachment 34 (Chest) translation for arrival";
+  }
+  if (component.anchor === "target") {
+    return "native dummy attachment 34 (Chest) translation · orientation and scale not passed by the effect API";
+  }
+  return "60%-bounds anchored at caster (source attachment not established for this component)";
 }
 
 function sampleReplayEffectPath(caster: Vector3, target: Vector3, componentTimeSeconds: number, spellId: number) {
@@ -292,6 +322,7 @@ export function resolveReplayAnimation(
       kind: "unavailable",
       eventLabel: "No replay event",
       clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID,
       clipTime: 0,
       status: "Replay sync is unavailable — idle.",
     };
@@ -303,6 +334,7 @@ export function resolveReplayAnimation(
       kind: "before",
       eventLabel,
       clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID,
       clipTime: 0,
       status: "The cursor is before this recorded action — idle.",
     };
@@ -312,6 +344,7 @@ export function resolveReplayAnimation(
       kind: "wait",
       eventLabel,
       clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID,
       clipTime: 0,
       status: "Recorded wait — idle; no cast motion.",
     };
@@ -321,19 +354,21 @@ export function resolveReplayAnimation(
       kind: "failed",
       eventLabel,
       clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID,
       clipTime: 0,
       status: "Recorded queue failure — idle; no successful cast motion.",
     };
   }
 
-  const mappedClip = event.id === null ? undefined : ELEMENTAL_SHAMAN_CLIPS.get(event.id);
-  if (!mappedClip || mappedClip.actionName !== event.name) {
+  const mappedAnimation = event.id === null ? undefined : ELEMENTAL_SHAMAN_ANIMATIONS.get(event.id);
+  if (!mappedAnimation || mappedAnimation.actionName !== event.name) {
     return {
       kind: "unmapped",
       eventLabel,
       clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID,
       clipTime: 0,
-      status: "No supported exported motion mapping — idle.",
+      status: "No supported native cast animation mapping — idle.",
     };
   }
 
@@ -343,6 +378,7 @@ export function resolveReplayAnimation(
       kind: "settled",
       eventLabel,
       clipName: STAND_CLIP_NAME,
+      animationId: STAND_ANIMATION_ID,
       clipTime: 0,
       status: "Illustrative motion window complete — idle.",
     };
@@ -351,9 +387,10 @@ export function resolveReplayAnimation(
   return {
     kind: "motion",
     eventLabel,
-    clipName: mappedClip.clipName,
+    clipName: animationOptionLabel(mappedAnimation.animationId, 0),
+    animationId: mappedAnimation.animationId,
     clipTime: elapsed,
-    status: "Illustrative exported motion — not cast duration or hit timing.",
+    status: "Illustrative native cast motion — not cast duration or hit timing.",
   };
 }
 
@@ -395,52 +432,37 @@ export function isReplayClipMissing(
   return resolution.kind === "motion" && !animationNames.includes(resolution.clipName);
 }
 
-export function configureVulperaMaterials(root: Object3D) {
-  root.traverse((object) => {
-    if (!(object instanceof Mesh)) return;
-    const materials = Array.isArray(object.material) ? object.material : [object.material];
-    for (const material of materials) {
-      if (material.name !== "vulperamale_eyereflect") continue;
-      material.transparent = true;
-      material.depthWrite = false;
-      material.needsUpdate = true;
-    }
-  });
+function mountNativeActor(actor: NativeM2Actor) {
+  // The native->three basis is applied exactly once, here: root = yaw · C.
+  // After this, native attachment positions convert with localToWorld().
+  const mount = new Group();
+  mount.name = `${actor.label}-mount`;
+  const orientation = new Matrix4().makeRotationY(ACTOR_BASE_YAW).multiply(NATIVE_BASIS);
+  actor.root.quaternion.setFromRotationMatrix(orientation);
+  mount.add(actor.root);
+  return mount;
 }
 
-function disposeObject(root: Object3D) {
-  const textures = new Set<Texture>();
-  root.traverse((object) => {
-    if (!(object instanceof Mesh)) return;
-    object.geometry.dispose();
-    const materials = Array.isArray(object.material) ? object.material : [object.material];
-    for (const material of materials) {
-      for (const value of Object.values(material)) {
-        if (value instanceof Texture) textures.add(value);
-      }
-      material.dispose();
-    }
-  });
-  for (const texture of textures) texture.dispose();
+function sampleAttachmentWorldPosition(actor: NativeM2Actor, mount: Group, attachmentId: number) {
+  const nativeMatrix = actor.sampleAttachment(attachmentId);
+  if (!nativeMatrix) return null;
+  actor.root.updateWorldMatrix(true, false);
+  return actor.root.localToWorld(new Vector3(nativeMatrix[12], nativeMatrix[13], nativeMatrix[14]));
 }
 
-function placeModel(root: Group, x: number, rotationY: number, scale = 1) {
+function placeModel(root: Group, x: number, rotationY: number) {
   root.rotation.y = rotationY;
-  root.scale.setScalar(scale);
   root.updateWorldMatrix(true, true);
   const bounds = new Box3().setFromObject(root);
   const center = bounds.getCenter(new Vector3());
   root.position.set(x - center.x, -bounds.min.y, -center.z);
-  root.traverse((object) => {
-    if (!(object instanceof Mesh)) return;
-    object.castShadow = true;
-    object.receiveShadow = true;
-  });
 }
 
 export function arrangeCombatants(vulpera: Group, trainingDummy: Group) {
+  // Uniform native scale for both actors; native model units already read as
+  // sensible scene units (Vulpera about 1.65 tall, dummy about 2.9).
   placeModel(vulpera, -4, 0);
-  placeModel(trainingDummy, 4, Math.PI, 0.7);
+  placeModel(trainingDummy, 4, Math.PI);
 }
 
 export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, bounds: Box3): CameraView {
@@ -479,20 +501,6 @@ export function frameModels(camera: PerspectiveCamera, controls: OrbitControls, 
   controls.update();
 
   return { position, target };
-}
-
-function createAssetError(asset: (typeof MODEL_ASSETS)[keyof typeof MODEL_ASSETS]) {
-  return new Error(
-    `Could not load ${asset.url}. Export the genuine model with wow.export and copy it to ${asset.localPath}, then reload. No placeholder model was substituted.`,
-  );
-}
-
-async function loadModel(loader: GLTFLoader, asset: (typeof MODEL_ASSETS)[keyof typeof MODEL_ASSETS]) {
-  try {
-    return await loader.loadAsync(asset.url);
-  } catch {
-    throw createAssetError(asset);
-  }
 }
 
 function describeNativeEffectLimitations(effect: NativeParticleEffect) {
@@ -538,6 +546,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   ));
   const [status, setStatus] = useState<SceneStatus>("loading");
   const [loadedModelCount, setLoadedModelCount] = useState(0);
+  const [actorStatusLines, setActorStatusLines] = useState<string[]>([]);
   const [animationNames, setAnimationNames] = useState<string[]>([]);
   const [selectedAnimationIndex, setSelectedAnimationIndex] = useState(0);
   const [animationMode, setAnimationMode] = useState<AnimationMode>("replay");
@@ -613,34 +622,40 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let isUnmounted = false;
     let isStopped = false;
     let animationFrame = 0;
-    let mixer: AnimationMixer | null = null;
-    let activeAction: AnimationAction | null = null;
-    let replayActions: AnimationAction[] = [];
+    let vulperaActor: NativeM2Actor | null = null;
+    let dummyActor: NativeM2Actor | null = null;
+    let vulperaMount: Group | null = null;
+    let dummyMount: Group | null = null;
     let nativeEffect: NativeParticleEffect | null = null;
     let nativeEffectGeneration = 0;
     let replayEffectGeneration = 0;
     let replayEffects: Array<{ asset: NativeEffectAsset; effect: NativeParticleEffect }> = [];
     let replayAnchors: ReturnType<typeof getReplayEffectAnchors> | null = null;
-    let casterRoot: Group | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let modelBounds: Box3 | null = null;
     let defaultView: CameraView | null = null;
-    const loadedRoots: Object3D[] = [];
     const scene = new Scene();
     canvas.dataset.replayNativeComponents = "0";
     canvas.dataset.replayNativeParticles = "0";
     canvas.dataset.replayNativeLatestSourceX = "";
     canvas.dataset.replayNativeMeshTriangles = "0";
+    canvas.dataset.actorPendingTextureTypes = "";
     const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 100);
     const controls = new OrbitControls(camera, canvas);
     const clock = new Clock();
+    // Native-sequence pose state: replay poses are pure functions of the replay
+    // cursor (deterministic seeks); manual mode advances its own clock.
+    let manualSequence: M2Sequence | null = null;
+    let manualResolution: SequenceResolution | null = null;
+    let manualTimeMs = 0;
+    let manualIsPlaying = false;
 
     scene.background = new Color(0x111820);
+    // Color-domain policy: the M2 combiners already output display-domain
+    // colors; no tone mapping or output encode is applied to them (the custom
+    // shaders include neither). outputColorSpace stays SRGB so the remaining
+    // standard materials (the floor) keep their own correct encode.
     renderer.outputColorSpace = SRGBColorSpace;
-    renderer.toneMapping = ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = PCFSoftShadowMap;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     controls.enableDamping = true;
@@ -648,19 +663,14 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     controls.enablePan = true;
     controls.listenToKeyEvents(canvas);
 
-    const hemisphereLight = new HemisphereLight(0xdcecff, 0x222016, 2.4);
+    // The actors are lit inside their shaders (WoW ambient/sun model, recorded
+    // preview preset); these lights exist for the floor only.
+    const hemisphereLight = new HemisphereLight(0xdcecff, 0x222016, 1.1);
     scene.add(hemisphereLight);
-    const keyLight = new DirectionalLight(0xfff0d2, 4.2);
+    const keyLight = new DirectionalLight(0xfff0d2, 1.6);
     keyLight.position.set(4, 7, 5);
-    keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(2048, 2048);
-    keyLight.shadow.camera.left = -8;
-    keyLight.shadow.camera.right = 8;
-    keyLight.shadow.camera.top = 8;
-    keyLight.shadow.camera.bottom = -8;
-    keyLight.shadow.camera.updateProjectionMatrix();
     scene.add(keyLight);
-    const fillLight = new DirectionalLight(0x8ab4ff, 2.2);
+    const fillLight = new DirectionalLight(0x8ab4ff, 0.6);
     fillLight.position.set(-5, 3, 2);
     scene.add(fillLight);
 
@@ -669,7 +679,6 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       new MeshStandardMaterial({ color: 0x202a32, roughness: 0.88, metalness: 0.03 }),
     );
     floor.rotation.x = -Math.PI / 2;
-    floor.receiveShadow = true;
     scene.add(floor);
 
     const resize = () => {
@@ -711,8 +720,14 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       }
 
       const anchors = replayAnchors;
-      const caster = casterRoot;
-      if (!caster) throw new Error("Replay caster model is unavailable.");
+      if (!vulperaActor || !vulperaMount || !dummyActor || !dummyMount) {
+        throw new Error("Replay caster model is unavailable.");
+      }
+      // Target endpoint from the dummy's authored chest attachment; the bounds
+      // anchor remains the fallback. The effect API takes translations only.
+      const targetAnchor = sampleAttachmentWorldPosition(dummyActor, dummyMount, 34) ?? anchors.target;
+      const sampleCasterAttachment = (attachmentId: number) =>
+        sampleAttachmentWorldPosition(vulperaActor!, vulperaMount!, attachmentId);
       const occurrences = resolveReplayEffectOccurrences(
         replayState.events,
         replayState.selectedIndex,
@@ -728,7 +743,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             .filter((component) => component.fileDataId === asset.fileDataId)
             .map((component) => ({ occurrence, component })));
           const instances: NativeParticleRenderInstance[] = matching.map(({ occurrence, component }) => {
-            const source = getReplayEffectSourceAnchor(occurrence.spellId, component.fileDataId, caster, anchors.caster);
+            const source = getReplayEffectSourceAnchor(occurrence.spellId, component.fileDataId, sampleCasterAttachment, anchors.caster);
             return {
               timeSeconds: occurrence.componentTimeSeconds - (occurrence.spellId !== 117014 && (component.fileDataId === 4329984 || component.fileDataId === 6211617) ? REPLAY_EFFECT_RELEASE_SECONDS : 0),
               emissionEndSeconds: component.anchor === "projectile"
@@ -736,8 +751,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
               sourceTranslationAtTime: (timeSeconds) => threeToNative(component.anchor === "projectile"
-                ? sampleReplayEffectPath(source, anchors.target, timeSeconds, occurrence.spellId)
-                : component.anchor === "caster" ? source : anchors.target),
+                ? sampleReplayEffectPath(source, targetAnchor, timeSeconds, occurrence.spellId)
+                : component.anchor === "caster" ? source : targetAnchor),
             };
           });
           particleCount += effect.setReplayInstances(instances, camera);
@@ -764,8 +779,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       const latestProjectile = occurrences.filter((occurrence) => occurrence.spellId === 117014).at(-1);
       canvas.dataset.replayNativeLatestSourceX = latestProjectile
         ? sampleReplayEffectPath(
-            getReplayEffectSourceAnchor(latestProjectile.spellId, 4329984, caster, anchors.caster),
-            anchors.target,
+            getReplayEffectSourceAnchor(latestProjectile.spellId, 4329984, sampleCasterAttachment, anchors.caster),
+            targetAnchor,
             latestProjectile.componentTimeSeconds,
             latestProjectile.spellId,
           ).x.toFixed(6)
@@ -773,11 +788,22 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       return true;
     };
 
+    const applySequencePose = (resolution: SequenceResolution, timeMs: number) => {
+      if (!vulperaActor) return;
+      vulperaActor.setPose(sampleBoneMatrices(vulperaActor.model, resolution, timeMs));
+      vulperaActor.updateAnimatedTracks(resolution, timeMs);
+    };
+
     const renderFrame = () => {
       if (isStopped) return;
       animationFrame = requestAnimationFrame(renderFrame);
       const delta = Math.min(clock.getDelta(), 0.1);
-      if (animationModeRef.current === "manual") mixer?.update(delta);
+      if (animationModeRef.current === "manual" && manualResolution && manualSequence) {
+        if (manualIsPlaying) {
+          manualTimeMs = (manualTimeMs + delta * 1000) % Math.max(manualSequence.durationMs, 1);
+          applySequencePose(manualResolution, manualTimeMs);
+        }
+      }
       controls.update();
       if (animationModeRef.current === "replay") updateReplayEffects();
       if (animationModeRef.current === "native" && nativeEffect) {
@@ -802,7 +828,6 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       resizeObserver?.disconnect();
       controls.stopListenToKeyEvents();
       controls.dispose();
-      mixer?.stopAllAction();
       nativeEffectGeneration += 1;
       replayEffectGeneration += 1;
       nativeEffect?.dispose();
@@ -810,7 +835,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       for (const { effect } of replayEffects) effect.dispose();
       replayEffects = [];
       clearReplayEffectEvidence();
-      for (const root of loadedRoots) disposeObject(root);
+      vulperaActor?.dispose();
+      dummyActor?.dispose();
+      vulperaActor = null;
+      dummyActor = null;
       floor.geometry.dispose();
       floor.material.dispose();
       renderer.dispose();
@@ -818,116 +846,106 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     };
 
     const prepare = async () => {
-      const loader = new GLTFLoader();
-      const loadTracked = async (asset: (typeof MODEL_ASSETS)[keyof typeof MODEL_ASSETS]) => {
-        const gltf = await loadModel(loader, asset);
-        loadedRoots.push(gltf.scene);
-        if (isStopped) {
-          disposeObject(gltf.scene);
-          return gltf;
-        }
-        setLoadedModelCount((count) => count + 1);
-        return gltf;
-      };
-
-      let vulpera: GLTF;
-      let trainingDummy: GLTF;
+      let vulperaBundle: Awaited<ReturnType<typeof loadNativeActorBundle>>;
+      let dummyBundle: Awaited<ReturnType<typeof loadNativeActorBundle>>;
       try {
-        [vulpera, trainingDummy] = await Promise.all([
-          loadTracked(MODEL_ASSETS.vulpera),
-          loadTracked(MODEL_ASSETS.trainingDummy),
+        [vulperaBundle, dummyBundle] = await Promise.all([
+          loadNativeActorBundle(manifest, ACTOR_ASSETS.vulpera.manifestName),
+          loadNativeActorBundle(manifest, ACTOR_ASSETS.trainingDummy.manifestName),
         ]);
       } catch (caught) {
         if (!isUnmounted) {
           stop();
           setStatus("error");
-          setError(caught instanceof Error ? caught.message : "The genuine models could not be loaded.");
+          setError(caught instanceof Error ? caught.message : "The genuine native models could not be loaded.");
         }
         return;
       }
       if (isStopped) return;
+      setLoadedModelCount(2);
 
-      configureVulperaMaterials(vulpera.scene);
-      // Facial bones extend along native +X, so these rotations face both exports toward each other.
-      arrangeCombatants(vulpera.scene, trainingDummy.scene);
-      casterRoot = vulpera.scene;
-      replayAnchors = getReplayEffectAnchors(vulpera.scene, trainingDummy.scene);
-      scene.add(vulpera.scene, trainingDummy.scene);
+      vulperaActor = createNativeM2Actor({
+        model: vulperaBundle.model,
+        skin: vulperaBundle.skin,
+        label: ACTOR_ASSETS.vulpera.label,
+        textures: vulperaBundle.textures,
+      });
+      dummyActor = createNativeM2Actor({
+        model: dummyBundle.model,
+        skin: dummyBundle.skin,
+        label: ACTOR_ASSETS.trainingDummy.label,
+        textures: dummyBundle.textures,
+      });
+      vulperaMount = mountNativeActor(vulperaActor);
+      dummyMount = mountNativeActor(dummyActor);
+      arrangeCombatants(vulperaMount, dummyMount);
+      replayAnchors = getReplayEffectAnchors(vulperaMount, dummyMount);
+      scene.add(vulperaMount, dummyMount);
+      canvas.dataset.actorPendingTextureTypes = vulperaActor.pendingTextureTypes.join(",");
+      setActorStatusLines([...vulperaActor.statusLines, ...dummyActor.statusLines]);
 
       modelBounds = new Box3()
-        .setFromObject(vulpera.scene)
-        .union(new Box3().setFromObject(trainingDummy.scene));
+        .setFromObject(vulperaMount)
+        .union(new Box3().setFromObject(dummyMount));
       defaultView = frameModels(camera, controls, modelBounds);
-      const clips = vulpera.animations;
-      const animationClipNames = clips.map((clip) => clip.name);
-      const defaultClipIndex = Math.max(0, animationClipNames.indexOf(STAND_CLIP_NAME));
-      mixer = new AnimationMixer(vulpera.scene);
-      let activeClipIndex = -1;
 
-      const duplicateActions = new Map<number, AnimationAction>();
-      const activateClip = (index: number, shouldRestart: boolean) => {
-        const clip = clips[index];
-        if (!clip || !mixer) return null;
-        for (const action of replayActions) action.stop();
-        replayActions = [];
-        if (activeClipIndex !== index) {
-          activeAction?.stop();
-          activeAction = mixer.clipAction(clip);
-          activeClipIndex = index;
-          shouldRestart = true;
-        }
-        const action = activeAction;
-        if (!action) return null;
-        if (shouldRestart) action.reset().play();
-        action.setEffectiveWeight(1);
-        return action;
+      // Manual preview lists the in-file native sequences by animation id.
+      const sequences = vulperaActor.model.sequences;
+      const animationClipNames = sequences.map((sequence) =>
+        animationOptionLabel(sequence.animationId, sequence.variationIndex));
+      const defaultClipIndex = Math.max(0, animationClipNames.indexOf(STAND_CLIP_NAME));
+
+      const standResolution = resolveSequence(vulperaActor.model, STAND_ANIMATION_ID, { variationIndex: 0 });
+      const dummyStand = resolveSequence(dummyActor.model, STAND_ANIMATION_ID, { variationIndex: 0 });
+      if (dummyStand) {
+        dummyActor.setPose(sampleBoneMatrices(dummyActor.model, dummyStand, 0));
+        dummyActor.updateAnimatedTracks(dummyStand, 0);
+      }
+
+      const samplePoseFor = (resolution: ReplayAnimationResolution) => {
+        const isMotion = resolution.kind === "motion";
+        const animationId = isMotion ? resolution.animationId : STAND_ANIMATION_ID;
+        const sequenceResolution = vulperaActor
+          ? resolveSequence(vulperaActor.model, animationId, { variationIndex: 0 })
+          : null;
+        if (!sequenceResolution) return null;
+        const timeMs = isMotion
+          ? Math.min(resolution.clipTime * 1000, Math.max(0, sequenceResolution.sequence.durationMs - 0.1))
+          : 0;
+        return {
+          resolution: sequenceResolution,
+          timeMs,
+          matrices: sampleBoneMatrices(vulperaActor!.model, sequenceResolution, timeMs),
+        };
       };
       const applyReplayAnimation = (blend: ReplayMotionBlend) => {
-        if (!mixer) return;
-        activeAction?.stop();
-        activeAction = null;
-        activeClipIndex = -1;
-        const incomingIndex = blend.incoming.kind === "motion"
-          ? animationClipNames.indexOf(blend.incoming.clipName) : defaultClipIndex;
-        const canBlend = incomingIndex >= 0 && (!blend.outgoing
-          || blend.outgoing.kind !== "motion"
-          || animationClipNames.includes(blend.outgoing.clipName));
-        const samples = canBlend && blend.outgoing
-          ? [{ resolution: blend.outgoing, weight: 1 - blend.incomingWeight, isOutgoing: true },
-            { resolution: blend.incoming, weight: blend.incomingWeight, isOutgoing: false }]
-          : [{ resolution: blend.incoming, weight: 1, isOutgoing: false }];
-        const nextActions: AnimationAction[] = [];
-        for (const { resolution, weight, isOutgoing } of samples) {
-          if (weight === 0) continue;
-          const requestedIndex = resolution.kind === "motion"
-            ? animationClipNames.indexOf(resolution.clipName) : defaultClipIndex;
-          const index = requestedIndex >= 0 ? requestedIndex : defaultClipIndex;
-          const clip = clips[index];
-          if (!clip) return;
-          const isRepeatedClip = isOutgoing && index === incomingIndex && blend.incoming.kind === "motion";
-          const action = isRepeatedClip
-            ? duplicateActions.get(index) ?? mixer.clipAction(clip.clone())
-            : mixer.clipAction(clip);
-          if (isRepeatedClip) duplicateActions.set(index, action);
-          if (!replayActions.includes(action)) action.reset().play();
-          action.paused = true;
-          action.time = resolution.kind === "motion" && requestedIndex >= 0
-            ? Math.min(resolution.clipTime, Math.max(0, clip.duration - 0.0001))
-            : 0;
-          action.setEffectiveWeight(weight);
-          nextActions.push(action);
+        if (!vulperaActor || !standResolution) return;
+        const incoming = samplePoseFor(blend.incoming) ?? {
+          resolution: standResolution,
+          timeMs: 0,
+          matrices: sampleBoneMatrices(vulperaActor.model, standResolution, 0),
+        };
+        let matrices = incoming.matrices;
+        if (blend.outgoing) {
+          const outgoing = samplePoseFor(blend.outgoing);
+          if (outgoing) {
+            matrices = blendBoneMatrices(outgoing.matrices, incoming.matrices, blend.incomingWeight);
+          }
         }
-        for (const action of replayActions) {
-          if (!nextActions.includes(action)) action.stop();
-        }
-        replayActions = nextActions;
-        mixer.update(0);
+        vulperaActor.setPose(matrices);
+        vulperaActor.updateAnimatedTracks(incoming.resolution, incoming.timeMs);
       };
       const playManualClip = (index: number, shouldPlay: boolean) => {
-        const action = activateClip(index, true);
-        if (!action || !mixer) return;
-        action.paused = !shouldPlay;
-        mixer.update(0);
+        if (!vulperaActor) return;
+        const sequence = sequences[index];
+        if (!sequence) return;
+        manualSequence = sequence;
+        manualResolution = resolveSequence(vulperaActor.model, sequence.animationId, {
+          variationIndex: sequence.variationIndex,
+        });
+        if (!manualResolution) return;
+        manualIsPlaying = shouldPlay;
+        applySequencePose(manualResolution, manualTimeMs);
       };
       const resetCamera = () => {
         if (!defaultView) return;
@@ -940,7 +958,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         applyReplayAnimation,
         playManualClip,
         setManualPlaying: (shouldPlay) => {
-          if (activeAction) activeAction.paused = !shouldPlay;
+          manualIsPlaying = shouldPlay;
         },
         loadNativeEffect: async (asset) => {
           const generation = ++nativeEffectGeneration;
@@ -1220,7 +1238,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             <strong>{replayAnimation.eventLabel}</strong>
             <small>
               {missingReplayClip
-                ? `Required ${missingReplayClip === replayAnimation ? "" : "outgoing "}exported clip missing (${missingReplayClip.clipName}) — ${missingReplayClip === replayAnimation ? "idle" : "transition omitted"}.`
+                ? `Required ${missingReplayClip === replayAnimation ? "" : "outgoing "}native sequence missing (${missingReplayClip.clipName}) — ${missingReplayClip === replayAnimation ? "idle" : "transition omitted"}.`
                 : replayAnimation.status}
             </small>
           </div>
@@ -1252,8 +1270,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           )}
           {selectedReplaySpell && (
             <p data-testid="replay-anchor-status">
-              Across the mapped spell list, 6 of 19 mapped components use authored caster bone origins and 13 remain bounds-anchored. Placement: {selectedReplaySpell.components.filter((component) =>
-                Boolean(REPLAY_SOURCE_ATTACHMENTS[selectedReplayEvent!.id!]?.[component.fileDataId])).length} of {selectedReplaySpell.components.length} components use authored caster bone origins; remaining components use 60%-bounds anchors.
+              Across the mapped spell list, 6 of 19 mapped components use native caster attachment origins and 13 remain bounds-anchored. Placement: {selectedReplaySpell.components.filter((component) =>
+                Boolean(REPLAY_SOURCE_ATTACHMENTS[selectedReplayEvent!.id!]?.[component.fileDataId])).length} of {selectedReplaySpell.components.length} components use native caster attachment origins; remaining components use 60%-bounds anchors.
               {selectedReplaySpell.components.map((component) =>
                 ` FileDataID ${component.fileDataId}: ${describeReplayComponentAnchor(selectedReplayEvent!.id!, component)}.`).join("")}
             </p>
@@ -1267,7 +1285,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           )}
           {selectedReplaySpell && (selectedReplayEvent?.id === 51505 || selectedReplayEvent?.id === 117014) && (
             <p data-testid="replay-missile-blocker">
-              FileDataID 3980281: 1 of {selectedReplayEvent.id === 51505 ? 2 : 4} original missile bodies omitted; no substitute rendered. Its acquired LOD0 SKIN has 2 of 2 mesh batches (1,576 vertex references, 4,722 indices, 1,574 triangles), 13 emitters (one refractive), and 3 ribbons. Both the full render and emitters-and-ribbons-only render were inspected and rejected as incoherent. Source attachment -1 differs from 4329984 attachments 34/21. The omitted body remains unrendered; the rendered 4329984 uses the source bone origin where mapped, while its dummy endpoint remains bounds-anchored. That difference is recorded, not established as the cause.
+              FileDataID 3980281: 1 of {selectedReplayEvent.id === 51505 ? 2 : 4} original missile bodies omitted; no substitute rendered. Its acquired LOD0 SKIN has 2 of 2 mesh batches (1,576 vertex references, 4,722 indices, 1,574 triangles), 13 emitters (one refractive), and 3 ribbons. Both the full render and emitters-and-ribbons-only render were inspected and rejected as incoherent. Source attachment -1 differs from 4329984 attachments 34/21. The omitted body remains unrendered; the rendered 4329984 launches from its native caster attachment where mapped, with its dummy endpoint at native dummy attachment 34 (translation only). That difference is recorded, not established as the cause.
             </p>
           )}
           {selectedReplaySpell && (selectedReplayEvent?.id === 51505 || selectedReplayEvent?.id === 117014) && (
@@ -1319,15 +1337,15 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       ) : animationMode === "manual" ? (
         <div className="model-controls">
           <label>
-            <span>Exported character animation</span>
+            <span>Native character animation</span>
             <select
-              aria-label="Exported character animation"
+              aria-label="Native character animation"
               value={selectedAnimationIndex}
               onChange={(event) => onAnimationChange(Number(event.target.value))}
               disabled={status !== "ready" || animationNames.length === 0}
             >
               {animationNames.length === 0 ? (
-                <option>Animations load with the Vulpera model</option>
+                <option>Native sequences load with the Vulpera model</option>
               ) : animationNames.map((name, index) => (
                 <option value={index} key={`${name}-${index}`}>{name}</option>
               ))}
@@ -1432,13 +1450,19 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           <p role="status">Loading genuine models ({loadedModelCount} of 2)…</p>
         )}
         {status === "ready" && (
-          <p role="status">Both genuine models ready · {animationNames.length} exported character clips</p>
+          <p role="status">Both genuine models ready · {animationNames.length} native sequences</p>
         )}
       </div>
 
+      {status === "ready" && actorStatusLines.length > 0 && (
+        <ul className="native-actor-status" data-testid="native-actor-status">
+          {actorStatusLines.map((line) => <li key={line}>{line}</li>)}
+        </ul>
+      )}
+
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with six authored caster bone origins (including two Stormkeeper kit components) and thirteen explicitly named bounds-anchored components, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Missiles for these three spells use a viewer-chosen 0.20s release and linear path; Lava Burst and Elemental Blast use a 0.80s maximum-range-derived duration (40 yards / BaseMissileSpeed 50), while Lightning Bolt retains a viewer-chosen 0.80s flight because its mapped speeds are 0. Unapplied motion scripts and positioners are counted in selected status and per-component limitations. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets or the Stormkeeper 1284864 kit offset, sound, damage, hit reaction, or VFX parity is claimed."
+          ? "Replay sync samples native M2 cast animations (0.15s pose blend) and original source-linked particle components for mapped successful actions, with mapped caster components anchored at authored native M2 attachment positions (including two Stormkeeper kit components) and target endpoints at the dummy's authored chest attachment (34) where available, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Missiles for these three spells use a viewer-chosen 0.20s release and linear path; Lava Burst and Elemental Blast use a 0.80s maximum-range-derived duration (40 yards / BaseMissileSpeed 50), while Lightning Bolt retains a viewer-chosen 0.80s flight because its mapped speeds are 0. The effect API accepts translations only, so attachment orientation and scale are not forwarded. Unapplied motion scripts and positioners are counted in selected status and per-component limitations. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets or the Stormkeeper 1284864 kit offset, sound, damage, hit reaction, or VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}

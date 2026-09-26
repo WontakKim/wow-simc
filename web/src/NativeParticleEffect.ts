@@ -16,7 +16,7 @@ import {
   RGBAFormat,
   RepeatWrapping,
   ShaderMaterial,
-  SRGBColorSpace,
+  NoColorSpace,
   UnsignedByteType,
   Vector2,
   Vector3,
@@ -77,7 +77,10 @@ function emitterCapacity(emitter: NativeParticleEmitter) {
 
 function createTexture(decoded: ReturnType<typeof decodeNativeBlp>) {
   const texture = new DataTexture(decoded.pixels, decoded.width, decoded.height, RGBAFormat, UnsignedByteType);
-  texture.colorSpace = SRGBColorSpace;
+  // Color-domain policy: BLP bytes are display-domain; binding without an
+  // sRGB internal format keeps the authored values on the canvas without a
+  // second encode (same policy as the M2 actor loader).
+  texture.colorSpace = NoColorSpace;
   texture.flipY = true;
   texture.minFilter = LinearFilter;
   texture.magFilter = LinearFilter;

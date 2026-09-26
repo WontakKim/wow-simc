@@ -1,14 +1,9 @@
 import {
-  AnimationClip,
-  AnimationMixer,
   Box3,
   BoxGeometry,
-  BufferGeometry,
   Group,
   Mesh,
   MeshStandardMaterial,
-  NumberKeyframeTrack,
-  Object3D,
   PerspectiveCamera,
   Vector3,
 } from "three";
@@ -16,8 +11,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { describe, expect, it } from "vitest";
 import officialFixture from "../public/fixture/elemental-shaman-replay.json";
 import {
+  REPLAY_SOURCE_ATTACHMENTS,
   arrangeCombatants,
-  configureVulperaMaterials,
   frameModels,
   getReplayEffectAnchors,
   getReplayEffectSourceAnchor,
@@ -29,22 +24,7 @@ import {
 } from "./GenuineModelScene";
 import { parseReplayReport, type ReplayEvent } from "./replay";
 import { NATIVE_EFFECT_ASSETS } from "./nativeEffectAssets";
-
-describe("configureVulperaMaterials", () => {
-  it("uses the exported alpha channel only for the Vulpera eye reflection", () => {
-    const root = new Object3D();
-    const eyeReflection = new MeshStandardMaterial({ name: "vulperamale_eyereflect" });
-    const body = new MeshStandardMaterial({ name: "data-1" });
-    root.add(new Mesh(new BufferGeometry(), [eyeReflection, body]));
-
-    configureVulperaMaterials(root);
-
-    expect(eyeReflection.transparent).toBe(true);
-    expect(eyeReflection.depthWrite).toBe(false);
-    expect(body.transparent).toBe(false);
-    expect(body.depthWrite).toBe(true);
-  });
-});
+import { blendBoneMatrices } from "./m2/sampler";
 
 function createModel(width: number, height: number, depth: number) {
   const model = new Group();
@@ -88,7 +68,7 @@ describe("ranged scene layout", () => {
     expect(vulpera.rotation.y).toBeCloseTo(0);
     expect(trainingDummy.rotation.y).toBeCloseTo(Math.PI);
     expect(vulpera.scale.toArray()).toEqual([1, 1, 1]);
-    expect(trainingDummy.scale.toArray()).toEqual([0.7, 0.7, 0.7]);
+    expect(trainingDummy.scale.toArray()).toEqual([1, 1, 1]);
   });
 
   it("fits the ranged bounds at desktop and mobile aspects and restores the responsive default view", () => {
@@ -213,70 +193,40 @@ describe("Elemental Blast native replay", () => {
 });
 
 describe("published replay attachment placement", () => {
-  it("samples distinct animated authored hand and chest bone origins at the active pose", () => {
-    const caster = createModel(2, 4, 2);
-    const target = createModel(2, 5, 2);
-    arrangeCombatants(caster, target);
-    const shoulder = new Group();
-    shoulder.position.set(0, 1, 0);
-    caster.add(shoulder);
-    const leftHand = new Group(); leftHand.name = "bone_SpellHandL"; leftHand.position.set(0.5, 0.2, 0);
-    const rightHand = new Group(); rightHand.name = "bone_SpellHandR"; rightHand.position.set(0.6, 0.3, 0);
-    const chest = new Group(); chest.name = "bone_Chest"; chest.position.set(0.1, 0.7, 0);
-    shoulder.add(leftHand, rightHand, chest);
-    const action = new AnimationMixer(caster).clipAction(new AnimationClip("pose", 1, [
-      new NumberKeyframeTrack("bone_SpellHandL.position[x]", [0, 1], [0.5, 1.5]),
-    ]));
-    action.play(); action.paused = true;
-    const sample = (time: number) => {
-      action.time = time;
-      action.getMixer().update(0);
-      const bounds = getReplayEffectAnchors(caster, target);
-      return {
-        left: getReplayEffectSourceAnchor(117014, 4329984, caster, bounds.caster),
-        right: getReplayEffectSourceAnchor(117014, 794788, caster, bounds.caster),
-        chest: getReplayEffectSourceAnchor(117014, 613807, caster, bounds.caster),
-        lava: getReplayEffectSourceAnchor(51505, 4329984, caster, bounds.caster),
-      };
-    };
-    const first = sample(0);
-    const later = sample(0.5);
-    expect(first.left.x).toBeCloseTo(first.right.x - 0.1);
-    expect(first.left.y).toBeCloseTo(first.right.y - 0.1);
-    expect(first.right.toArray()).toEqual(rightHand.getWorldPosition(new Vector3()).toArray());
-    expect(first.chest.toArray()).toEqual(chest.getWorldPosition(new Vector3()).toArray());
-    expect(first.lava.toArray()).toEqual(first.chest.toArray());
-    expect(later.left.x).toBeCloseTo(first.left.x + 0.5);
-    expect(sample(0).left.toArray()).toEqual(first.left.toArray());
+  it("maps published source components to native attachment ids", () => {
+    expect(REPLAY_SOURCE_ATTACHMENTS[191634]).toEqual({ 1355634: 22, 1284864: 22 });
+    expect(REPLAY_SOURCE_ATTACHMENTS[51505]).toEqual({ 4329984: 34 });
+    expect(REPLAY_SOURCE_ATTACHMENTS[117014]).toEqual({ 4329984: 21, 794788: 22, 613807: 34 });
   });
 
-  it("uses the single authored Stormkeeper right-hand attachment at animated bone origin", () => {
-    const caster = createModel(2, 4, 2);
-    const rightHand = new Group();
-    rightHand.name = "bone_SpellHandR";
-    rightHand.position.set(0.3, 1.1, 0.4);
-    caster.add(rightHand);
-    const bounds = getReplayEffectAnchors(caster, createModel(2, 5, 2));
-    for (const fileDataId of [1355634, 1284864]) {
-      expect(getReplayEffectSourceAnchor(191634, fileDataId, caster, bounds.caster).toArray())
-        .toEqual(rightHand.getWorldPosition(new Vector3()).toArray());
-    }
-    rightHand.position.x += 0.5;
-    caster.updateMatrixWorld(true);
-    expect(getReplayEffectSourceAnchor(191634, 1355634, caster, bounds.caster).x).toBeCloseTo(0.8);
-    expect(() => getReplayEffectSourceAnchor(191634, 1355634, createModel(2, 4, 2), bounds.caster))
-      .toThrow(/FileDataID 1355634.*bone_SpellHandR/);
+  it("samples distinct authored hand and chest attachment origins at the requested time", () => {
+    const boundsAnchor = new Vector3(1, 2, 3);
+    const positions = new Map<number, Vector3>([
+      [21, new Vector3(-0.5, 1.0, 0)],
+      [22, new Vector3(0.6, 1.1, 0)],
+      [34, new Vector3(0.1, 1.5, 0)],
+    ]);
+    const sampleAttachment = (attachmentId: number) => positions.get(attachmentId) ?? null;
+
+    expect(getReplayEffectSourceAnchor(117014, 4329984, sampleAttachment, boundsAnchor))
+      .toBe(positions.get(21));
+    expect(getReplayEffectSourceAnchor(117014, 794788, sampleAttachment, boundsAnchor))
+      .toBe(positions.get(22));
+    expect(getReplayEffectSourceAnchor(117014, 613807, sampleAttachment, boundsAnchor))
+      .toBe(positions.get(34));
+    expect(getReplayEffectSourceAnchor(51505, 4329984, sampleAttachment, boundsAnchor))
+      .toBe(positions.get(34));
+    expect(getReplayEffectSourceAnchor(191634, 1355634, sampleAttachment, boundsAnchor))
+      .toBe(positions.get(22));
   });
 
-  it("keeps unidentified or positioner-driven source attachments at bounds, and fails on missing mapped bones", () => {
-    const caster = createModel(2, 4, 2);
-    const target = createModel(2, 5, 2);
-    arrangeCombatants(caster, target);
-    const bounds = getReplayEffectAnchors(caster, target);
-    expect(getReplayEffectSourceAnchor(188196, 6211617, caster, bounds.caster)).toBe(bounds.caster);
-    expect(getReplayEffectSourceAnchor(188196, 6211618, caster, bounds.caster)).toBe(bounds.caster);
-    expect(() => getReplayEffectSourceAnchor(117014, 4329984, caster, bounds.caster))
-      .toThrow(/FileDataID 4329984.*bone_SpellHandL/);
+  it("keeps unmapped components at the bounds anchor and fails on missing mapped attachments", () => {
+    const boundsAnchor = new Vector3(1, 2, 3);
+    const noAttachments = () => null;
+    expect(getReplayEffectSourceAnchor(188196, 6211617, noAttachments, boundsAnchor)).toBe(boundsAnchor);
+    expect(getReplayEffectSourceAnchor(188196, 6211618, noAttachments, boundsAnchor)).toBe(boundsAnchor);
+    expect(() => getReplayEffectSourceAnchor(117014, 4329984, noAttachments, boundsAnchor))
+      .toThrow(/FileDataID 4329984.*attachment 21/);
   });
 });
 
@@ -351,20 +301,20 @@ describe("remaining original replay components", () => {
 
 describe("resolveReplayAnimation", () => {
   it.each([
-    [318038, "flametongue_weapon", "SpellCastOmni (ID 54 variation 0)"],
-    [192106, "lightning_shield", "ShaSpellPrecastBothChannel (ID 862 variation 0)"],
-    [191634, "stormkeeper", "ShaSpellPrecastBoth (ID 828 variation 0)"],
-    [443454, "ancestral_swiftness", "SpellCastOmni (ID 54 variation 0)"],
-    [1219480, "ascendance", "ChannelCastOmniUp (ID 1448 variation 0)"],
-    [51505, "lava_burst", "CastStrongUpRight (ID 1148 variation 0)"],
-    [188196, "lightning_bolt", "ShaSpellCastBothFront (ID 830 variation 0)"],
-    [117014, "elemental_blast", "CastOutStrong (ID 1122 variation 0)"],
-    [188389, "flame_shock", "SpellCastDirected (ID 53 variation 0)"],
-  ])("maps fixture spell %i to exported clip %s", (id, name, clipName) => {
+    [318038, "flametongue_weapon", 54, "SpellCastOmni (ID 54 variation 0)"],
+    [192106, "lightning_shield", 862, "ShaSpellPrecastBothChannel (ID 862 variation 0)"],
+    [191634, "stormkeeper", 828, "ShaSpellPrecastBoth (ID 828 variation 0)"],
+    [443454, "ancestral_swiftness", 54, "SpellCastOmni (ID 54 variation 0)"],
+    [1219480, "ascendance", 1448, "ChannelCastOmniUp (ID 1448 variation 0)"],
+    [51505, "lava_burst", 1148, "CastStrongUpRight (ID 1148 variation 0)"],
+    [188196, "lightning_bolt", 830, "ShaSpellCastBothFront (ID 830 variation 0)"],
+    [117014, "elemental_blast", 1122, "CastOutStrong (ID 1122 variation 0)"],
+    [188389, "flame_shock", 53, "SpellCastDirected (ID 53 variation 0)"],
+  ])("maps fixture spell %i to native animation %i", (id, name, animationId, clipName) => {
     const event = makeAction({ id, name, spellName: name.replaceAll("_", " "), time: 2 });
 
     const resolution = resolveReplayAnimation([event], 0, 2.4);
-    expect(resolution).toMatchObject({ kind: "motion", clipName });
+    expect(resolution).toMatchObject({ kind: "motion", clipName, animationId });
     expect(resolution.clipTime).toBeCloseTo(0.4);
   });
 
@@ -453,28 +403,18 @@ describe("replay motion transitions", () => {
     }
   });
 
-  it("samples two instances of a repeated clip at different local times with zero mixer delta", () => {
-    const clip = new AnimationClip("cast", 1, [new NumberKeyframeTrack(".position[x]", [0, 1], [0, 10])]);
-    const model = new Object3D();
-    const mixer = new AnimationMixer(model);
-    const outgoing = mixer.clipAction(clip).play();
-    const incoming = mixer.clipAction(clip.clone()).play();
-    const sample = (cursor: number) => {
-      const weight = Math.max(0, Math.min(1, (cursor - 0.754) / 0.15));
-      outgoing.paused = incoming.paused = true;
-      outgoing.time = cursor;
-      incoming.time = cursor - 0.754;
-      outgoing.setEffectiveWeight(1 - weight);
-      incoming.setEffectiveWeight(weight);
-      mixer.update(0);
-      return model.position.x;
-    };
-    const halfway = sample(0.829);
-    expect(halfway).toBeCloseTo((8.29 + 0.75) / 2);
-    sample(0.1);
-    expect(sample(0.829)).toBeCloseTo(halfway);
-    sample(1.1);
-    expect(sample(0.829)).toBeCloseTo(halfway);
+  it("blends two native poses deterministically from the resolved pair alone", () => {
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const raised = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 2, 0, 1];
+    const blend = (weight: number) => blendBoneMatrices([identity], [raised], weight)[0];
+
+    expect(blend(0)).toEqual(identity);
+    expect(blend(1)).toEqual(raised);
+    expect(blend(0.5)[13]).toBeCloseTo(1);
+    expect(blend(0.5)[5]).toBeCloseTo(1);
+    const halfway = blend(0.5);
+    blend(0.9);
+    expect(blend(0.5)).toEqual(halfway);
   });
 });
 
