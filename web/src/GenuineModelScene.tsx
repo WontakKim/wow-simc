@@ -86,8 +86,12 @@ const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
   [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 2],
   [3980244, 2], [4329984, 3], [6211617, 4], [6211618, 4], [1571475, 4], [4392095, 1], [4050773, 1],
 ]);
-// SpellVisualMissile rows 28854 and 28867–28869, build 12.1.0.69933.
-const REPLAY_PROJECTILE_SOURCE_ATTACHMENTS: Record<number, Record<number, { id: number; boneName: string }>> = {
+// SpellVisualMissile rows 28854 and 28867–28869 and SpellVisualKitModelAttach rows 321812/321824, build 12.1.0.69933.
+const REPLAY_SOURCE_ATTACHMENTS: Record<number, Record<number, { id: number; boneName: string }>> = {
+  191634: {
+    1355634: { id: 22, boneName: "bone_SpellHandR" },
+    1284864: { id: 22, boneName: "bone_SpellHandR" },
+  },
   51505: { 4329984: { id: 34, boneName: "bone_Chest" } },
   117014: {
     4329984: { id: 21, boneName: "bone_SpellHandL" },
@@ -242,7 +246,7 @@ export function getReplayEffectAnchors(caster: Group, target: Group) {
 }
 
 export function getReplayEffectSourceAnchor(spellId: number, fileDataId: number, caster: Group, boundsAnchor: Vector3) {
-  const attachment = REPLAY_PROJECTILE_SOURCE_ATTACHMENTS[spellId]?.[fileDataId];
+  const attachment = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[fileDataId];
   if (!attachment) return boundsAnchor;
   const bone = caster.getObjectByName(attachment.boneName);
   if (!bone) throw new Error(`FileDataID ${fileDataId}: attachment ${attachment.id} requires missing ${attachment.boneName}.`);
@@ -251,9 +255,10 @@ export function getReplayEffectSourceAnchor(spellId: number, fileDataId: number,
 }
 
 function describeReplayComponentAnchor(spellId: number, component: ReplayComponent) {
-  const attachment = REPLAY_PROJECTILE_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId];
-  if (attachment) return `authored ${attachment.boneName} origin (source attachment ${attachment.id}); target remains 60%-bounds anchored (destination 34 Chest has no matching dummy attachment/bone; exact M2 attachment offsets and positioners unavailable)`;
-  if (component.anchor === "projectile") return "60%-bounds anchored at both endpoints (source attachment 19 Base or -1 with positioner; no corresponding exported attachment point; destination 34 Chest unavailable on dummy)";
+  const attachment = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId];
+  if (attachment && component.anchor === "caster") return `authored ${attachment.boneName} origin (source attachment ${attachment.id})${component.fileDataId === 1284864 ? "; kit offset (0, 0.15, 0) unapplied (attachment-local frame unavailable)" : ""}`;
+  if (attachment) return `authored ${attachment.boneName} origin (source attachment ${attachment.id}); target remains 60%-bounds anchored (destination 34 Chest has no matching dummy attachment/bone; M2 attachment record offset unavailable${spellId === 117014 ? "; impact positioner 712 unresolved" : ""})`;
+  if (component.anchor === "projectile") return "60%-bounds anchored at both endpoints (source attachment 19 Base with cast offset (-7, 0, 5), or -1 with positioner 513 depending on unresolved Lightning Bolt branch; offset unapplied because its attachment frame is unavailable; destination 34 Chest has no matching dummy attachment/bone)";
   return `60%-bounds anchored at ${component.anchor} (single applicable attachment point not established from mapped source kit; -1/positioners or multiple authored rows may apply)`;
 }
 
@@ -732,7 +737,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
               sourceTranslationAtTime: (timeSeconds) => threeToNative(component.anchor === "projectile"
                 ? sampleReplayEffectPath(source, anchors.target, timeSeconds)
-                : anchors[component.anchor]),
+                : component.anchor === "caster" ? source : anchors.target),
             };
           });
           particleCount += effect.setReplayInstances(instances, camera);
@@ -1235,8 +1240,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           )}
           {selectedReplaySpell && (
             <p data-testid="replay-anchor-status">
-              Placement: {selectedReplaySpell.components.filter((component) =>
-                Boolean(REPLAY_PROJECTILE_SOURCE_ATTACHMENTS[selectedReplayEvent!.id!]?.[component.fileDataId])).length} of {selectedReplaySpell.components.length} components use authored caster bone origins; remaining components use 60%-bounds anchors.
+              Across the mapped spell list, 6 of 19 mapped components use authored caster bone origins and 13 remain bounds-anchored. Placement: {selectedReplaySpell.components.filter((component) =>
+                Boolean(REPLAY_SOURCE_ATTACHMENTS[selectedReplayEvent!.id!]?.[component.fileDataId])).length} of {selectedReplaySpell.components.length} components use authored caster bone origins; remaining components use 60%-bounds anchors.
               {selectedReplaySpell.components.map((component) =>
                 ` FileDataID ${component.fileDataId}: ${describeReplayComponentAnchor(selectedReplayEvent!.id!, component)}.`).join("")}
             </p>
@@ -1421,7 +1426,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with four authored caster bone-origin missile sources and explicitly named bounds-anchored remainder, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Elemental Blast, Lava Burst, and Lightning Bolt use a viewer-only 0.20s release and 0.80s linear flight. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets, sound, damage, hit reaction, or VFX parity is claimed."
+          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with six authored caster bone origins (including two Stormkeeper kit components) and thirteen explicitly named bounds-anchored components, plus a 0.20s emission window and decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Elemental Blast, Lava Burst, and Lightning Bolt use a viewer-only 0.20s release and 0.80s linear flight. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, exact M2 attachment offsets or the Stormkeeper 1284864 kit offset, sound, damage, hit reaction, or VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}

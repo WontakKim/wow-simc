@@ -1024,6 +1024,32 @@ test("rejects unsupported native source bytes visibly and preserves mobile frami
 });
 
 
+test("identifies both Stormkeeper bone origins and the unapplied kit offset", async ({ page }) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  const stormkeeper = page.locator(".event-hit-target").filter({ hasText: "Stormkeeper" }).first();
+  await stormkeeper.click();
+  const placement = scene.getByTestId("replay-anchor-status");
+  await expect(placement).toContainText("6 of 19 mapped components use authored caster bone origins");
+  await expect(placement).toContainText("Placement: 2 of 2 components use authored caster bone origins");
+  await expect(placement).toContainText("FileDataID 1355634: authored bone_SpellHandR origin (source attachment 22)");
+  await expect(placement).toContainText("FileDataID 1284864: authored bone_SpellHandR origin (source attachment 22); kit offset (0, 0.15, 0) unapplied");
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const canvas = scene.locator("canvas");
+  await seek.fill("0.15");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "4006618,1598036,1355634,1284864,1109885");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const beforeSeek = await canvas.screenshot();
+  await seek.fill("1.1");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  expect((await canvas.screenshot()).equals(beforeSeek)).toBe(false);
+  await seek.fill("0.15");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  expect((await canvas.screenshot()).equals(beforeSeek)).toBe(true);
+});
+
 test("loads a version 274 original component with every authored emitter", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });

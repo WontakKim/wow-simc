@@ -250,6 +250,24 @@ describe("published replay attachment placement", () => {
     expect(sample(0).left.toArray()).toEqual(first.left.toArray());
   });
 
+  it("uses the single authored Stormkeeper right-hand attachment at animated bone origin", () => {
+    const caster = createModel(2, 4, 2);
+    const rightHand = new Group();
+    rightHand.name = "bone_SpellHandR";
+    rightHand.position.set(0.3, 1.1, 0.4);
+    caster.add(rightHand);
+    const bounds = getReplayEffectAnchors(caster, createModel(2, 5, 2));
+    for (const fileDataId of [1355634, 1284864]) {
+      expect(getReplayEffectSourceAnchor(191634, fileDataId, caster, bounds.caster).toArray())
+        .toEqual(rightHand.getWorldPosition(new Vector3()).toArray());
+    }
+    rightHand.position.x += 0.5;
+    caster.updateMatrixWorld(true);
+    expect(getReplayEffectSourceAnchor(191634, 1355634, caster, bounds.caster).x).toBeCloseTo(0.8);
+    expect(() => getReplayEffectSourceAnchor(191634, 1355634, createModel(2, 4, 2), bounds.caster))
+      .toThrow(/FileDataID 1355634.*bone_SpellHandR/);
+  });
+
   it("keeps unidentified or positioner-driven source attachments at bounds, and fails on missing mapped bones", () => {
     const caster = createModel(2, 4, 2);
     const target = createModel(2, 5, 2);
