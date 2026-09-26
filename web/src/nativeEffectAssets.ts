@@ -10,7 +10,7 @@ export interface NativeEffectAsset {
   sha256: string;
   expectedEmitterCount: number;
   expectedRibbonCount?: number;
-  effectNameScale: 1 | 2;
+  effectNameScale: 1 | 1.4 | 2;
   textures: NativeTextureAsset[];
   skin?: NativeTextureAsset;
 }
@@ -42,7 +42,7 @@ export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
     sha256: "b704ed8b2f6c69349f79653b03d1186bb1ce64bd867636c6591c5b2f87292580",
     expectedEmitterCount: 10,
     expectedRibbonCount: 3,
-    effectNameScale: 1,
+    effectNameScale: 1.4,
     textures: [
       { fileDataId: 3982249, sha256: "bfd1c7d1ae174e7ea68dd92e5abc5e6dbe809a769eaa795b9c6e12931b1b0612" },
       { fileDataId: 4007016, sha256: "82efeb05e3af3070fd286d13d9c8f71750001ebf86437b73855e0109bec4107d" },

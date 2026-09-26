@@ -27,6 +27,7 @@ import {
   resolveReplayMotionBlend,
 } from "./GenuineModelScene";
 import { parseReplayReport, type ReplayEvent } from "./replay";
+import { NATIVE_EFFECT_ASSETS } from "./nativeEffectAssets";
 
 describe("configureVulperaMaterials", () => {
   it("uses the exported alpha channel only for the Vulpera eye reflection", () => {
@@ -173,7 +174,7 @@ describe("Elemental Blast native replay", () => {
       elapsedSeconds: 0.2,
       componentTimeSeconds: 0,
       spellId: 117014,
-      components: [{ fileDataId: 794788, anchor: "projectile" }, { fileDataId: 613807, anchor: "projectile" }],
+      components: [{ fileDataId: 4329984, anchor: "projectile" }, { fileDataId: 794788, anchor: "projectile" }, { fileDataId: 613807, anchor: "projectile" }],
     }]);
     expect(resolveReplayEffectOccurrences([event], 0, 5)[0]).toMatchObject({ componentTimeSeconds: 0.8 });
     const finalDecaySample = resolveReplayEffectOccurrences([event], 0, 6.5);
@@ -405,5 +406,40 @@ describe("replay motion transitions", () => {
     expect(sample(0.829)).toBeCloseTo(halfway);
     sample(1.1);
     expect(sample(0.829)).toBeCloseTo(halfway);
+  });
+});
+
+describe("original missile fallback", () => {
+  it("maps the coherent shared missile into both spells without substituting the blocked body", () => {
+    const lava = makeAction({ id: 51505, name: "lava_burst" });
+    const blast = makeAction({ id: 117014, name: "elemental_blast" });
+    expect(resolveReplayEffectOccurrences([lava], 0, 4.5)[0].components
+      .filter((component) => component.anchor === "projectile").map((component) => component.fileDataId))
+      .toEqual([4329984]);
+    expect(resolveReplayEffectOccurrences([blast], 0, 4.5)[0].components.map((component) => component.fileDataId))
+      .toEqual([4329984, 794788, 613807]);
+    expect(resolveReplayEffectOccurrences([{ ...blast, phase: "precombat" }], 0, 4.5)).toEqual([]);
+  });
+
+  it("measures the shared three-slot and unique two-slot bounds from the public trace", () => {
+    const events = parseReplayReport(officialFixture).actors[0].events;
+    const missiles = events.filter((event) => (event.id === 51505 || event.id === 117014) && event.queueFailed === false);
+    expect(missiles.filter((event) => event.id === 51505)).toHaveLength(12);
+    expect(missiles.filter((event) => event.id === 117014)).toHaveLength(8);
+    const samples = missiles.flatMap((event) => [event.time + 0.2, event.time + 2.5]);
+    const counts = samples.map((time) => {
+      const active = resolveReplayEffectOccurrences(events, events.length - 1, time);
+      return [51505, 117014].map((spellId) => active.filter((effect) => effect.spellId === spellId).length);
+    });
+    expect(Math.max(...counts.map(([lava, blast]) => lava))).toBe(2);
+    expect(Math.max(...counts.map(([lava, blast]) => blast))).toBe(2);
+    expect(Math.max(...counts.map(([lava, blast]) => lava + blast))).toBe(3);
+  });
+
+  it("pins authored scales for the renderable missiles without loading rejected body 3980281", () => {
+    expect([4329984, 794788, 613807].map((fileDataId) =>
+      [fileDataId, NATIVE_EFFECT_ASSETS.find((asset) => asset.fileDataId === fileDataId)?.effectNameScale]))
+      .toEqual([[4329984, 1.4], [794788, 2], [613807, 1]]);
+    expect(NATIVE_EFFECT_ASSETS.some((asset) => asset.fileDataId === 3980281)).toBe(false);
   });
 });

@@ -67,7 +67,7 @@ interface ReplaySpellEffect {
   components: ReplayComponent[];
 }
 
-// Bounds are from overlapping 1.7s and 2.5s fixture windows (Elemental Blast keeps its accepted 16-instance bound).
+// Bounds are from overlapping 1.7s and 2.5s fixture windows.
 const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
   [318038, { actionName: "flametongue_weapon", components: [{ fileDataId: 4006618, anchor: "caster" }] }],
   [192106, { actionName: "lightning_shield", components: [{ fileDataId: 1598036, anchor: "caster" }] }],
@@ -76,15 +76,15 @@ const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
   [51505, { actionName: "lava_burst", components: [{ fileDataId: 4006621, anchor: "caster" }, { fileDataId: 4329984, anchor: "projectile" }, { fileDataId: 4006618, anchor: "target" }, { fileDataId: 3980244, anchor: "target" }] }],
   [188196, { actionName: "lightning_bolt", components: [{ fileDataId: 6211618, anchor: "caster" }, { fileDataId: 6211617, anchor: "projectile" }, { fileDataId: 1571475, anchor: "target" }] }],
   [188389, { actionName: "flame_shock", components: [{ fileDataId: 4006618, anchor: "target" }, { fileDataId: 3980244, anchor: "target" }, { fileDataId: 4392095, anchor: "target" }, { fileDataId: 4050773, anchor: "target" }] }],
-  [117014, { actionName: "elemental_blast", components: [{ fileDataId: 794788, anchor: "projectile" }, { fileDataId: 613807, anchor: "projectile" }] }],
+  [117014, { actionName: "elemental_blast", components: [{ fileDataId: 4329984, anchor: "projectile" }, { fileDataId: 794788, anchor: "projectile" }, { fileDataId: 613807, anchor: "projectile" }] }],
   [443454, { actionName: "ancestral_swiftness", components: [] }],
 ]);
 
 // Shared component capacities include overlapping occurrences from more than one spell in the public fixture.
 const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
-  [794788, 16], [613807, 16], [4006618, 2], [1598036, 1],
+  [794788, 2], [613807, 2], [4006618, 2], [1598036, 1],
   [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 2],
-  [3980244, 2], [4329984, 2], [6211617, 4], [6211618, 4], [1571475, 4], [4392095, 1], [4050773, 1],
+  [3980244, 2], [4329984, 3], [6211617, 4], [6211618, 4], [1571475, 4], [4392095, 1], [4050773, 1],
 ]);
 const NATIVE_REPLAY_BASE_SCALE = 0.38;
 
@@ -698,7 +698,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             timeSeconds: occurrence.componentTimeSeconds - (component.fileDataId === 4329984 || component.fileDataId === 6211617 ? REPLAY_EFFECT_RELEASE_SECONDS : 0),
             emissionEndSeconds: component.anchor === "projectile"
               ? REPLAY_EFFECT_TRAVEL_SECONDS : OTHER_REPLAY_EMISSION_SECONDS,
-            modelScale: NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
+            modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
+              ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
             sourceTranslationAtTime: (timeSeconds) => threeToNative(component.anchor === "projectile"
               ? sampleReplayEffectPath(anchors.caster, anchors.target, timeSeconds)
               : anchors[component.anchor]),
@@ -1194,8 +1195,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             <p data-testid="replay-effect-status">
               <strong>{replayAssetIds.size > 0 ? "Original components ready" : "No original components required for this trace"}</strong>
               {replayAssetIds.has(6211617) && <span> · Lightning Bolt: 5 of 5 original emitters + 1 of 1 original LOD0 mesh batches (64 triangles, two original texture units combined (shader 0x14, UV0/UV0; shared BLP)) · FileDataID 6211617</span>}
-              {replayAssetIds.has(4329984) && <span> · Lava Burst: 10 of 10 emitters + 3 of 3 original ribbons (partially reconstructed) · FileDataID 4329984</span>}
-              {replayAssetIds.has(794788) && <span> · Elemental Blast: 12 of 12 authored emitters ready · 9 original BLP textures · FileDataID 794788 + 613807</span>}
+              {replayAssetIds.has(4329984) && <span> · Shared Lava Burst / Elemental Blast missile: 10 of 10 emitters + 3 of 3 original ribbons (partially reconstructed) · FileDataID 4329984</span>}
+              {replayAssetIds.has(794788) && <span> · Elemental Blast: 12 of 12 authored emitters ready in its two additional bodies · 9 original BLP textures · FileDataID 4329984 + 794788 + 613807</span>}
               <span> · Trace FileDataIDs: {[...replayAssetIds].join(", ") || "none"}</span>
               <small> · {replayAssetIds.has(794788) ? "Partial original Elemental Blast components and partial other spell components" : "Partial source-linked components only"}, not complete spells or verified native timing.</small>
             </p>
@@ -1205,6 +1206,16 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               {replayAnimation.eventLabel} ({selectedReplayEvent?.id}): {selectedReplaySpell.components.length > 0
                 ? `mapped original FileDataIDs ${selectedReplaySpell.components.map((component) => component.fileDataId).join(", ")} · partial components when loaded, not complete spell visuals`
                 : "no verified component; no substitute rendered"}.
+            </p>
+          )}
+          {selectedReplaySpell && (selectedReplayEvent?.id === 51505 || selectedReplayEvent?.id === 117014) && (
+            <p data-testid="replay-missile-blocker">
+              FileDataID 3980281: 1 of {selectedReplayEvent.id === 51505 ? 2 : 4} original missile bodies omitted; no substitute rendered. Its acquired LOD0 SKIN has 2 of 2 mesh batches (1,576 vertex references, 4,722 indices, 1,574 triangles), 13 emitters (one refractive), and 3 ribbons. Both the full render and emitters-and-ribbons-only render were inspected and rejected as incoherent. Source attachment -1 differs from 4329984 attachments 34/21; this viewer uses model-bounds anchors, not attachment points. That difference is recorded, not established as the cause.
+            </p>
+          )}
+          {selectedReplaySpell && (selectedReplayEvent?.id === 51505 || selectedReplayEvent?.id === 117014) && (
+            <p data-testid="replay-ribbon-limitation">
+              FileDataID 4329984 ribbon 1 (with a smaller overlapping strip from ribbon 2): during roughly the final 0.3 seconds, the remaining trail renders as a hard-edged bright quad. The primary BLP’s 8-bit alpha and authored M2 blend mode 2 are applied. Sampled post-arrival source positions refute edge accumulation; the cause remains unresolved. Secondary texture slots and native ribbon edge behavior are not fully reconstructed.
             </p>
           )}
           {selectedReplayEvent?.phase === "precombat" && (
@@ -1370,7 +1381,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with viewer-only caster/target anchors and a 0.20s emission window plus decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Elemental Blast, Lava Burst, and Lightning Bolt use a viewer-only 0.20s release and 0.80s linear flight. Lava Burst adds original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Alternate Lava Burst missile 3980281 is not rendered. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, attachment, sound, damage, hit reaction, or VFX parity is claimed."
+          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with viewer-only caster/target anchors and a 0.20s emission window plus decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Elemental Blast, Lava Burst, and Lightning Bolt use a viewer-only 0.20s release and 0.80s linear flight. Lava Burst and Elemental Blast share original ribbon/particle missile 4329984; Lightning Bolt adds original mesh/particle missile 6211617 with its two-unit Mod2x mesh material (both units sample the original shared BLP on UV0). Source conditions do not establish which branch appears. Shared alternate missile 3980281 is blocked for both spells and counted at the selected action. Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because the combined, fast-fading component is not a discernible ancestor figure at viewer scale. No complete spell, native cast/impact timing, attachment, sound, damage, hit reaction, or VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}

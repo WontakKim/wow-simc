@@ -690,6 +690,10 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("4329984", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("3980281: 1 of 2 original missile bodies omitted");
+  await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("LOD0 SKIN has 2 of 2 mesh batches");
+  await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("FileDataID 4329984 ribbon 1");
+  await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("cause remains unresolved");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   await seek.fill("1.55");
@@ -703,7 +707,7 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   expect((await canvas.screenshot()).equals(screenshot)).toBe(true);
 });
 
-test("moves both source-linked original components on the authoritative Elemental Blast replay", async ({ page }) => {
+test("moves three coherent original components and discloses the blocked fourth on Elemental Blast replay", async ({ page }) => {
   const runtimeRequests: string[] = [];
   const pageErrors: string[] = [];
   page.on("request", (request) => runtimeRequests.push(request.url()));
@@ -717,19 +721,20 @@ test("moves both source-linked original components on the authoritative Elementa
   const replayStatus = scene.locator("[data-testid='replay-effect-status']");
   await expect(replayStatus).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
   await expect(replayStatus).toContainText("9 original BLP textures");
-  await expect(replayStatus).toContainText("FileDataID 794788 + 613807");
+  await expect(replayStatus).toContainText("FileDataID 4329984 + 794788 + 613807");
+  expect(runtimeRequests.some((url) => url.endsWith("/model/native-effects/3980281.m2"))).toBe(false);
   await expect(replayStatus).toContainText(/partial original Elemental Blast components/i);
 
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   await seek.fill("19.52");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "8");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const earlySourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
   const earlyFrame = await canvas.screenshot();
 
   await seek.fill("19.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "6");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const laterSourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
   const laterFrame = await canvas.screenshot();
@@ -737,15 +742,19 @@ test("moves both source-linked original components on the authoritative Elementa
   expect(laterFrame.equals(earlyFrame)).toBe(false);
 
   await seek.fill("19.52");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "8");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
 
   await scene.getByRole("button", { name: "Manual preview" }).click();
   await expect(canvas).toHaveAttribute("data-replay-native-components", "0");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(false);
   await scene.getByRole("button", { name: "Replay sync" }).click();
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "8");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
+  await page.getByRole("button", { name: /Timeline mark.*Elemental Blast/i }).first().click();
+  await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("3980281: 1 of 4 original missile bodies omitted");
+  await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("FileDataID 4329984 ribbon 1");
+  await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("cause remains unresolved");
 
   for (const fileDataId of [794788, 397894, 796153, 243229, 669041, 613807, 613804, 613805, 613806, 167020, 167034]) {
     expect(runtimeRequests.some((url) => url.includes(`/model/native-effects/${fileDataId}.`))).toBe(true);
@@ -809,7 +818,7 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
     const elementalBlast = sequence.find((event) => event.id === 117014);
     if (!elementalBlast) throw new Error("The public fixture has no Elemental Blast source record.");
     fixture.sim.players[0].collected_data.action_sequence = Array.from(
-      { length: 17 },
+      { length: 3 },
       () => ({ ...structuredClone(elementalBlast), time: 7.233 }),
     );
     await route.fulfill({ response, json: fixture });
@@ -832,12 +841,12 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
   releaseNativeResponse?.();
 
   const replayAlert = scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" });
-  await expect(replayAlert).toContainText(/17 simultaneous component instances.*16-instance resource bound/, { timeout: 30_000 });
+  await expect(replayAlert).toContainText(/3 simultaneous component instances.*2-instance resource bound/, { timeout: 30_000 });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toHaveCount(0);
   await expect(scene.locator("canvas")).toHaveAttribute("data-replay-native-particles", "0");
 });
 
-test("applies the latest replay cursor after both original components load late", async ({ page }) => {
+test("applies the latest replay cursor after original components load late", async ({ page }) => {
   await page.route("**/model/native-effects/613807.m2", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 350));
     await route.continue();
@@ -847,7 +856,7 @@ test("applies the latest replay cursor after both original components load late"
   const canvas = scene.locator("canvas");
   await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "6");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 });
 
@@ -868,7 +877,7 @@ test("keeps replay effects hidden when a delayed composite load finishes in manu
   await scene.getByRole("button", { name: "Replay sync" }).click();
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
   await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "6");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
 });
 
 test("renders both original M2 components with deterministic isolated native transport", async ({ page }) => {
