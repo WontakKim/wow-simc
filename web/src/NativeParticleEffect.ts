@@ -1,20 +1,24 @@
 import {
   AdditiveBlending,
   BufferAttribute,
+  BufferGeometry,
   Camera,
   ClampToEdgeWrapping,
   CustomBlending,
   DataTexture,
+  DoubleSide,
   DynamicDrawUsage,
   Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   LinearFilter,
   Mesh,
+  MeshBasicMaterial,
   NormalBlending,
   OneFactor,
   OneMinusSrcAlphaFactor,
   RGBAFormat,
+  RepeatWrapping,
   ShaderMaterial,
   SRGBColorSpace,
   UnsignedByteType,
@@ -22,8 +26,8 @@ import {
 } from "three";
 import { decodeNativeBlp } from "./nativeBlp";
 import type { NativeEffectAsset } from "./nativeEffectAssets";
-import { parseNativeM2, type NativeM2Model, type NativeParticleEmitter, type Vector3Tuple } from "./nativeM2";
-import { sampleNativeEmitter, type NativeParticleSample } from "./nativeParticles";
+import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticleEmitter, type NativeSkinProfile, type Vector3Tuple } from "./nativeM2";
+import { sampleNativeEmitter, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeParticleSample } from "./nativeParticles";
 
 const ASSET_ROOT = "/model/native-effects";
 const SETUP_COMMAND = "node script/prepare-native-effects.mjs";
@@ -192,22 +196,35 @@ export class NativeParticleEffect {
   readonly primaryOnlyEmitters: number[];
   private readonly textures: DataTexture[];
   private readonly batches: EmitterBatch[];
+  readonly meshTriangleCount: number;
+  readonly animationSequenceIndex: number;
+  readonly unsupportedMeshBatches: string[];
+  private readonly meshBatches: Array<{ geometry: BufferGeometry; material: MeshBasicMaterial; mesh: Mesh; textureWeightIndex: number; colorIndex: number }>;
+  private readonly skin: NativeSkinProfile | undefined;
   private readonly maximumInstanceCount: number;
 
   constructor(
     model: NativeM2Model,
     decodedTextures: ReturnType<typeof decodeNativeBlp>[],
     maximumInstanceCount = 1,
+    skin?: NativeSkinProfile,
   ) {
     if (!Number.isInteger(maximumInstanceCount) || maximumInstanceCount < 1) {
       throw new Error(`FileDataID ${model.fileDataId}: native instance capacity must be a positive integer.`);
     }
     this.model = model;
+    this.animationSequenceIndex = model.fileDataId === 4290517 ? 2 : 0;
+    if (model.fileDataId === 4290517 && model.sequenceIds[2] !== 213) {
+      throw new Error(`FileDataID ${model.fileDataId}: expected authored mesh animation 213 at sequence 2.`);
+    }
+    this.skin = skin;
+    if (model.vertices.length > 0 && !skin) throw new Error(`FileDataID ${model.fileDataId}: authored mesh requires a pinned SKIN profile.`);
+    if (model.vertices.length === 0 && skin) throw new Error(`FileDataID ${model.fileDataId}: SKIN supplied without authored vertices.`);
     this.unsupportedEmitters = model.emitters
       .filter((emitter) => (emitter.flags & 0x100000) !== 0)
       .map((emitter) => `emitter ${emitter.index}: refraction unsupported`);
     const renderedEmitters = model.emitters.filter((emitter) => (emitter.flags & 0x100000) === 0);
-    if (renderedEmitters.length === 0) {
+    if (renderedEmitters.length === 0 && !skin) {
       throw new Error(`FileDataID ${model.fileDataId}: no supported authored emitters; ${this.unsupportedEmitters.join(", ")}.`);
     }
     this.renderedEmitterCount = renderedEmitters.length;
@@ -229,6 +246,69 @@ export class NativeParticleEffect {
       mesh.renderOrder = 100 + batch.emitter.priorityPlane;
       this.group.add(mesh);
     }
+    this.meshBatches = [];
+    this.unsupportedMeshBatches = [];
+    this.meshTriangleCount = skin ? skin.batches.reduce((total, batch) => total + skin.sections[batch.sectionIndex].indexCount / 3, 0) : 0;
+    if (skin) {
+      for (const [index, batch] of skin.batches.entries()) {
+        const section = skin.sections[batch.sectionIndex];
+        const material = model.materials[batch.materialIndex];
+        if (!material || material.blendMode !== 2 || (material.flags & ~0x1095) !== 0
+          || (material.flags & 0x15) !== 0x15 || (material.flags & 0x80) === 0 || (material.flags & 0x1000) === 0
+          || batch.shaderId !== 0x4014 || batch.flags !== 0x80 || batch.textureCount !== 2) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} material, flags or shader cannot be rendered with the verified primary-only path.`);
+        }
+        const textureIndices = Array.from({ length: batch.textureCount }, (_, unit) => model.textureLookup[batch.textureComboIndex + unit]);
+        const transformIndices = Array.from({ length: batch.textureCount }, (_, unit) => model.textureTransformLookup[batch.textureTransformComboIndex + unit]);
+        if (textureIndices.some((textureIndex) => textureIndex === undefined || !this.textures[textureIndex])
+          || transformIndices.some((transformIndex) => transformIndex === undefined || transformIndex >= model.textureTransforms.length)) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture or transform lookup is outside the original data.`);
+        }
+        if (!model.textureTransforms[transformIndices[1]]?.translation.sequences.some((sequence) => sequence.values.length > 1)) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} secondary UV transform has no validated animation track.`);
+        }
+        if (transformIndices[0] !== -1 || transformIndices[1] < 0) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} has an unverified primary UV transform or missing secondary animation.`);
+        }
+        if (model.textureCoordinates.length !== 0) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture coordinate lookup is not supported.`);
+        }
+        const textureWeightIndex = model.textureWeightLookup[batch.textureWeightComboIndex];
+        if (textureWeightIndex === undefined || !model.textureWeights[textureWeightIndex]
+          || (batch.colorIndex >= 0 && !model.colors[batch.colorIndex])) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} color or texture weight lookup is outside the original data.`);
+        }
+        for (let vertexIndex = section.vertexStart; vertexIndex < section.vertexStart + section.vertexCount; vertexIndex += 1) {
+          const vertex = model.vertices[skin.vertexLookup[vertexIndex]];
+          for (let slot = 0; slot < 4; slot += 1) {
+            if (vertex.boneWeights[slot] && (vertex.boneIndices[slot] >= model.bones.length
+              || vertex.boneIndices[slot] !== skin.boneRemap[vertexIndex][slot])) {
+              throw new Error(`FileDataID ${model.fileDataId}: SKIN vertex ${vertexIndex} bone remap differs from its authored M2 bone index.`);
+            }
+          }
+        }
+        const sourceTexture = this.textures[textureIndices[0]];
+        const textureFlags = model.textureFlags[textureIndices[0]];
+        if ((textureFlags & ~3) !== 0) throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture wrapping flags are unsupported.`);
+        sourceTexture.wrapS = (textureFlags & 1) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
+        sourceTexture.wrapT = (textureFlags & 2) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
+        const geometry = new BufferGeometry();
+        geometry.setAttribute("position", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
+        geometry.setAttribute("normal", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
+        geometry.setAttribute("uv", new BufferAttribute(new Float32Array(skin.vertexLookup.flatMap((vertexIndex) => model.vertices[vertexIndex].uv[0])), 2));
+        geometry.setIndex(skin.indices);
+        geometry.setDrawRange(section.indexStart, section.indexCount);
+        const meshMaterial = new MeshBasicMaterial({ map: sourceTexture, transparent: true, blending: NormalBlending,
+          side: DoubleSide, depthTest: true, depthWrite: true, fog: false });
+        const mesh = new Mesh(geometry, meshMaterial);
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 100 + batch.priorityPlane;
+        this.group.add(mesh);
+        this.meshBatches.push({ geometry, material: meshMaterial, mesh,
+          textureWeightIndex, colorIndex: batch.colorIndex });
+        this.unsupportedMeshBatches.push(`batch ${index}: ${batch.textureCount - 1} secondary texture unit (animated UV transform) not combined; shader 0x${batch.shaderId.toString(16)}; material flags 0x80 and 0x1000 and batch flag 0x80 have unverified shadow/render semantics`);
+      }
+    }
     this.group.name = `Native M2 FileDataID ${model.fileDataId}`;
     this.group.position.set(-0.15, 1.2, 0);
     this.group.scale.setScalar(0.38);
@@ -248,9 +328,10 @@ export class NativeParticleEffect {
       let particles = instances.flatMap((instance) => sampleNativeEmitter(
         batch.emitter,
         this.model.bones[batch.emitter.boneIndex],
-        this.model.sequenceDurationMs,
+        this.model.sequenceDurationsMs[this.animationSequenceIndex],
         instance.timeSeconds,
-        { ...instance, bones: this.model.bones, globalSequenceDurationsMs: this.model.globalSequenceDurationsMs },
+        { ...instance, bones: this.model.bones, globalSequenceDurationsMs: this.model.globalSequenceDurationsMs,
+          sequenceIndex: this.animationSequenceIndex },
       ));
       if ((batch.emitter.flags & 0x2) !== 0) {
         particles = [...particles].sort((first, second) =>
@@ -287,28 +368,72 @@ export class NativeParticleEffect {
     return totalParticleCount;
   }
 
+  private renderMesh(instances: NativeParticleRenderInstance[]) {
+    if (!this.skin) return;
+    if (instances.length > 1) {
+      throw new Error(`FileDataID ${this.model.fileDataId}: ${instances.length} simultaneous mesh instances exceed the 1-instance LOD0 skinning bound.`);
+    }
+    const instance = instances[0];
+    for (const batch of this.meshBatches) {
+      batch.mesh.visible = Boolean(instance);
+      if (!instance) continue;
+      const timeMs = instance.timeSeconds * 1000;
+      const sequenceDurationMs = this.model.sequenceDurationsMs[this.animationSequenceIndex];
+      const positions = batch.geometry.getAttribute("position") as BufferAttribute;
+      const normals = batch.geometry.getAttribute("normal") as BufferAttribute;
+      this.skin.vertexLookup.forEach((vertexIndex, index) => {
+        const vertex = this.model.vertices[vertexIndex];
+        positions.setXYZ(index, ...nativeToThree(sampleNativeSkinnedVertex(vertex, this.model.bones, timeMs,
+          sequenceDurationMs, this.model.globalSequenceDurationsMs, this.animationSequenceIndex)));
+        normals.setXYZ(index, ...nativeToThree(sampleNativeSkinnedNormal(vertex, this.model.bones, timeMs,
+          sequenceDurationMs, this.model.globalSequenceDurationsMs, this.animationSequenceIndex)));
+      });
+      positions.needsUpdate = true;
+      normals.needsUpdate = true;
+      const source = nativeToThree(instance.sourceTranslationAtTime(instance.timeSeconds));
+      batch.mesh.position.set(...source);
+      batch.mesh.scale.setScalar(instance.modelScale);
+      batch.material.opacity = 1;
+      if (batch.colorIndex >= 0) {
+        const colorTrack = this.model.colors[batch.colorIndex];
+        const color = sampleNativeTrack(colorTrack.color, timeMs, sequenceDurationMs,
+          [1, 1, 1], this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+        batch.material.color.setRGB(color[0], color[1], color[2]);
+        batch.material.opacity = sampleNativeTrack(colorTrack.alpha, timeMs, sequenceDurationMs,
+          1, this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+      }
+      batch.material.opacity *= sampleNativeTrack(this.model.textureWeights[batch.textureWeightIndex], timeMs,
+        this.model.sequenceDurationsMs[this.animationSequenceIndex], 1, this.model.globalSequenceDurationsMs,
+        this.animationSequenceIndex);
+    }
+  }
+
   setTime(timeSeconds: number, camera: Camera) {
-    return this.renderInstances([{
-      timeSeconds,
-      emissionEndSeconds: Number.POSITIVE_INFINITY,
-      modelScale: 1,
-      sourceTranslationAtTime: () => [0, 0, 0],
-    }], camera);
+    const instances = [{ timeSeconds, emissionEndSeconds: Number.POSITIVE_INFINITY,
+      modelScale: 1, sourceTranslationAtTime: () => [0, 0, 0] as Vector3Tuple }];
+    this.renderMesh(instances);
+    return this.renderInstances(instances, camera);
   }
 
   setReplayInstances(instances: NativeParticleRenderInstance[], camera: Camera) {
     this.group.position.set(0, 0, 0);
     this.group.rotation.set(0, 0, 0);
     this.group.scale.setScalar(1);
+    this.renderMesh(instances);
     return this.renderInstances(instances, camera);
   }
 
   clearInstances() {
     for (const batch of this.batches) batch.geometry.instanceCount = 0;
+    for (const batch of this.meshBatches) batch.mesh.visible = false;
   }
 
   dispose() {
     for (const batch of this.batches) {
+      batch.geometry.dispose();
+      batch.material.dispose();
+    }
+    for (const batch of this.meshBatches) {
       batch.geometry.dispose();
       batch.material.dispose();
     }
@@ -322,7 +447,7 @@ async function sha256(source: ArrayBuffer) {
   return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-async function fetchPinnedAsset(fileDataId: number, extension: "m2" | "blp", expectedSha256: string) {
+async function fetchPinnedAsset(fileDataId: number, extension: "m2" | "blp" | "skin", expectedSha256: string) {
   const response = await fetch(`${ASSET_ROOT}/${fileDataId}.${extension}`);
   if (!response.ok) {
     throw new Error(`FileDataID ${fileDataId}: request failed with status ${response.status}. Run ${SETUP_COMMAND}.`);
@@ -352,7 +477,13 @@ export async function loadNativeParticleEffect(asset: NativeEffectAsset, maximum
     }
     const decodedTextures = textureSources.map((source, index) =>
       decodeNativeBlp(source, asset.textures[index].fileDataId));
-    return new NativeParticleEffect(model, decodedTextures, maximumInstanceCount);
+    const skinAsset = asset.skin;
+    if (model.vertices.length > 0 && (!skinAsset || model.skinFileDataIds[0] !== skinAsset.fileDataId)) {
+      throw new Error(`FileDataID ${asset.fileDataId}: no matching pinned LOD0 SKIN profile.`);
+    }
+    const skinSource = skinAsset ? await fetchPinnedAsset(skinAsset.fileDataId, "skin", skinAsset.sha256) : undefined;
+    const skin = skinSource ? parseNativeSkin(skinSource, skinAsset!.fileDataId, model.vertices.length) : undefined;
+    return new NativeParticleEffect(model, decodedTextures, maximumInstanceCount, skin);
   } catch (caught) {
     const reason = caught instanceof Error ? caught.message : "Unknown native asset failure.";
     throw new Error(`${reason} No substitute effect was rendered.`);

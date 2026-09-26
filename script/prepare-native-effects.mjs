@@ -11,6 +11,15 @@ const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, "..");
 const DEFAULT_OUTPUT_DIRECTORY = join(REPOSITORY_ROOT, "web/public/model/native-effects");
 
 export const NATIVE_EFFECT_DOWNLOADS = [
+  { fileDataId: 4290517, extension: "m2", byteSize: 83730, sha256: "bed216503c7603e3e7af1128ac0bef3f549f4b7911123a0fd461098e1b4c4b21", textureFileDataIds: [1715290, 4281046, 982938, 4281030, 4281028, 4281042, 4287476, 2177462], skinFileDataIds: [4291424, 4291426, 4291428, 4291430], version: 274, expectedBoneCount: 5, expectedEmitterCount: 4, expectedVertexCount: 1533 },
+  { fileDataId: 4291424, extension: "skin", byteSize: 9248, sha256: "d8e6cd8e263e14a815d2976029230c47483ccf6e6e6f0276b4ac86600558e283", expectedVertexCount: 1533 },
+  { fileDataId: 1715290, extension: "blp", byteSize: 23044, sha256: "286112c70f1ed8e8282b5fd1554bcebd6770fb8246a4c26892eef8be486a6731" },
+  { fileDataId: 4281046, extension: "blp", byteSize: 88580, sha256: "436a4e0d7e671efb2d71913a2d4bdca79db8c06d3e2da78519d4a786d7770859" },
+  { fileDataId: 4281030, extension: "blp", byteSize: 12132, sha256: "a4d53e5b062fcc5d7fea5d1e466b3532a9015cd8a9f0ab9afcf60902b39d3bc7" },
+  { fileDataId: 4281028, extension: "blp", byteSize: 88580, sha256: "14ddeb9ea1042359bd5f16e06d4ad002e6a1ab03eccffed372e2b36ef325956c" },
+  { fileDataId: 4281042, extension: "blp", byteSize: 88580, sha256: "ec807ba2838104c16fdd9ea0d2c22cd17525d3ac8c709822b4196b86c1d2d539" },
+  { fileDataId: 4287476, extension: "blp", byteSize: 350724, sha256: "ef064c886c2828e4f7d150c056f33c6c278893e8da75f0a97723f0605b22d010" },
+  { fileDataId: 2177462, extension: "blp", byteSize: 23044, sha256: "897d195ed132f9378655ab19b1c0a8c0cf652b969ac75f67eb095c9b7deeecb0" },
   {"fileDataId": 4006618, "extension": "m2", "byteSize": 5938, "sha256": "b02fc2e56920aee69a50259b4bf4af663ccab9fb1ff8806282ea383528f35446", "textureFileDataIds": [3982249, 4007016, 4007017, 3722811, 3308414, 4007018], "version": 274, "expectedBoneCount": 5, "expectedEmitterCount": 3},
   {"fileDataId": 3980244, "extension": "m2", "byteSize": 10252, "sha256": "788db595194c59e392da1c4651e9180d534a16f16df2e83d7eb0aa137414e712", "textureFileDataIds": [1560384, 982938, 2114691, 3722816, 3308414, 1983721, 3982251, 1729857, 2395678], "version": 274, "expectedBoneCount": 7, "expectedEmitterCount": 6},
   {"fileDataId": 1598036, "extension": "m2", "byteSize": 6748, "sha256": "46bb520dc3e5c9ee5583e1ee01e379f9311752db5adcbb97c003791e8c618abf", "textureFileDataIds": [1284799, 1284800, 1284801, 1284802], "version": 274, "expectedBoneCount": 4, "expectedEmitterCount": 4},
@@ -103,7 +112,7 @@ function validateM2(bytes, asset) {
   let offset = 0;
   let model = null;
   let textureIds = null;
-  let hasSkinIds = false;
+  let skinIds = null;
   while (offset < bytes.length) {
     if (offset + 8 > bytes.length) fail(asset, "chunk header is truncated.");
     const tag = fourCc(bytes, offset);
@@ -111,7 +120,10 @@ function validateM2(bytes, asset) {
     const payloadOffset = offset + 8;
     if (payloadOffset + size > bytes.length) fail(asset, `${tag || "unknown"} chunk is truncated.`);
     if (tag === "MD21") model = { offset: payloadOffset, size };
-    if (tag === "SFID") hasSkinIds = size >= 4 && size % 4 === 0;
+    if (tag === "SFID") {
+      if (size < 4 || size % 4 !== 0) fail(asset, "SFID chunk is missing or invalid.");
+      skinIds = Array.from({ length: size / 4 }, (_, index) => view.getUint32(payloadOffset + index * 4, true));
+    }
     if (tag === "TXID") {
       if (size % 4 !== 0) fail(asset, "TXID chunk is not four-byte aligned.");
       textureIds = Array.from({ length: size / 4 }, (_, index) => view.getUint32(payloadOffset + index * 4, true));
@@ -120,7 +132,9 @@ function validateM2(bytes, asset) {
   }
   if (offset !== bytes.length) fail(asset, "outer chunks do not consume the complete file.");
   if (!model || model.size < 0x130) fail(asset, "MD21 payload is missing or too short.");
-  if (!hasSkinIds) fail(asset, "SFID chunk is missing or invalid.");
+  if (!skinIds) fail(asset, "SFID chunk is missing or invalid.");
+  if (asset.skinFileDataIds && (skinIds.length !== asset.skinFileDataIds.length
+    || skinIds.some((id, index) => id !== asset.skinFileDataIds[index]))) fail(asset, "SFID values do not match the pinned skin manifest.");
   if (!textureIds) fail(asset, "TXID chunk is missing.");
   if (fourCc(bytes, model.offset) !== "MD20") fail(asset, "MD21 payload does not begin with MD20.");
   const version = view.getUint32(model.offset + 4, true);
@@ -136,8 +150,8 @@ function validateM2(bytes, asset) {
   const emitters = readDescriptor(view, model.offset, 0x128, emitterStride, asset, "particle emitter", modelLimit);
   const expectedBones = asset.expectedBoneCount ?? 6;
   const expectedEmitters = asset.expectedEmitterCount ?? 6;
-  if (bones.count !== expectedBones || emitters.count !== expectedEmitters || vertices.count !== 0 || ribbons.count !== 0) {
-    fail(asset, `expected ${expectedBones} bones, ${expectedEmitters} particle emitters, 0 vertices, and 0 ribbons; found ${bones.count}, ${emitters.count}, ${vertices.count}, and ${ribbons.count}.`);
+  if (bones.count !== expectedBones || emitters.count !== expectedEmitters || vertices.count !== (asset.expectedVertexCount ?? 0) || ribbons.count !== 0) {
+    fail(asset, `expected ${expectedBones} bones, ${expectedEmitters} particle emitters, ${asset.expectedVertexCount ?? 0} vertices, and 0 ribbons; found ${bones.count}, ${emitters.count}, ${vertices.count}, and ${ribbons.count}.`);
   }
   for (let index = 0; index < emitters.count; index += 1) {
     const emitterOffset = model.offset + emitters.relativeOffset + index * emitterStride;
@@ -150,6 +164,60 @@ function validateM2(bytes, asset) {
   if (textureIds.length !== asset.textureFileDataIds.length
     || textureIds.some((fileDataId, index) => fileDataId !== asset.textureFileDataIds[index])) {
     fail(asset, `TXID values ${textureIds.join(", ")} do not match the pinned manifest.`);
+  }
+}
+
+
+function validateSkin(bytes, asset) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length < 64 || fourCc(bytes, 0) !== "SKIN") fail(asset, "SKIN header is missing or truncated.");
+  const descriptor = (offset, stride, label) => {
+    const count = view.getUint32(offset, true);
+    const start = view.getUint32(offset + 4, true);
+    if (count > 1_000_000 || start > bytes.length || count * stride > bytes.length - start) {
+      fail(asset, `${label} array is outside SKIN bounds.`);
+    }
+    return { count, start };
+  };
+  const vertices = descriptor(4, 2, "vertex lookup");
+  const indices = descriptor(12, 2, "triangle indices");
+  const bones = descriptor(20, 4, "bone remap");
+  const sections = descriptor(28, 48, "sections");
+  const batches = descriptor(36, 24, "batches");
+  descriptor(48, 12, "shadow batches");
+  if (!vertices.count || !indices.count || indices.count % 3 || vertices.count !== bones.count
+    || !sections.count || !batches.count) fail(asset, "vertex, triangle, bone, section or batch counts are invalid.");
+  for (let index = 0; index < vertices.count; index += 1) {
+    if (view.getUint16(vertices.start + index * 2, true) >= asset.expectedVertexCount) {
+      fail(asset, `vertex lookup ${index} is outside the M2 vertex bounds.`);
+    }
+  }
+  for (let index = 0; index < indices.count; index += 1) {
+    if (view.getUint16(indices.start + index * 2, true) >= vertices.count) {
+      fail(asset, `triangle index ${index} is outside the skin vertex bounds.`);
+    }
+  }
+  for (let index = 0; index < sections.count; index += 1) {
+    const offset = sections.start + index * 48;
+    const level = view.getUint16(offset + 2, true);
+    const vertexStart = view.getUint16(offset + 4, true) + level * 65536;
+    const vertexCount = view.getUint16(offset + 6, true);
+    const indexStart = view.getUint16(offset + 8, true) + level * 65536;
+    const indexCount = view.getUint16(offset + 10, true);
+    if (!view.getUint16(offset + 12, true) || vertexStart + vertexCount > vertices.count
+      || indexStart + indexCount > indices.count || indexCount % 3) {
+      fail(asset, `section ${index} vertex, triangle or bone range is invalid.`);
+    }
+    for (let triangle = indexStart; triangle < indexStart + indexCount; triangle += 1) {
+      const vertex = view.getUint16(indices.start + triangle * 2, true);
+      if (vertex < vertexStart || vertex >= vertexStart + vertexCount) fail(asset, `section ${index} triangle index is outside its vertex range.`);
+    }
+  }
+  for (let index = 0; index < batches.count; index += 1) {
+    const offset = batches.start + index * 24;
+    const sectionIndex = view.getUint16(offset + 4, true);
+    const textureCount = view.getUint16(offset + 14, true);
+    if (sectionIndex >= sections.count || textureCount < 1 || textureCount > 4) fail(asset, `batch ${index} section or texture count is invalid.`);
   }
 }
 
@@ -180,6 +248,7 @@ export function validateNativeEffectAsset(source, asset) {
   if (actualSha256 !== asset.sha256) fail(asset, `SHA-256 mismatch (${actualSha256}); expected ${asset.sha256}.`);
   if (asset.extension === "m2") validateM2(bytes, asset);
   else if (asset.extension === "blp") validateBlp(bytes, asset);
+  else if (asset.extension === "skin") validateSkin(bytes, asset);
   else fail(asset, `unsupported extension ${asset.extension}.`);
   return bytes;
 }

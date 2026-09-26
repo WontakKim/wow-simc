@@ -245,7 +245,7 @@ describe("remaining original replay components", () => {
     expect(resolveReplayEffectOccurrences([cast, lightning, flame], 2, 4.5)).toEqual(occurrences);
   });
 
-  it("does not invent a component or tail for Ancestral Swiftness, failed queues, waits or mismatched names", () => {
+  it("keeps Ancestral Swiftness without a replay component when its mesh shader is unsupported", () => {
     const absent = makeAction({ id: 443454, name: "ancestral_swiftness", time: 4 });
     const failed = makeAction({ id: 188196, name: "lightning_bolt", queueFailed: true });
     const wait = makeAction({ kind: "wait", id: null, name: "wait", queueFailed: null });

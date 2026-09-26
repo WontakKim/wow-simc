@@ -171,3 +171,23 @@ test("preserves a pre-existing process-named temp path", () => withOutputDirecto
   assert.deepEqual(new Uint8Array(await readFile(join(outputDirectory, "8.blp"))), bytes);
   assert.deepEqual(new Uint8Array(await readFile(collision)), sentinel);
 }));
+
+test("rejects a pinned skin with an out-of-range triangle index", async () => {
+  await withOutputDirectory(async (outputDirectory) => {
+    const bytes = new Uint8Array(0xb0);
+    const view = new DataView(bytes.buffer);
+    bytes.set(new TextEncoder().encode("SKIN"));
+    view.setUint32(4, 3, true); view.setUint32(8, 0x40, true);
+    view.setUint32(12, 3, true); view.setUint32(16, 0x48, true);
+    view.setUint32(20, 3, true); view.setUint32(24, 0x50, true);
+    view.setUint32(28, 1, true); view.setUint32(32, 0x60, true);
+    view.setUint32(36, 1, true); view.setUint32(40, 0x90, true);
+    view.setUint16(0x4c, 5, true);
+    view.setUint16(0x60 + 6, 3, true); view.setUint16(0x60 + 10, 3, true);
+    view.setUint16(0x60 + 12, 1, true);
+    await assert.rejects(prepareNativeEffects({
+      ...oneAttempt, assets: [manifest(bytes, { fileDataId: 9001, extension: "skin" })], outputDirectory,
+      fetchImplementation: async () => new Response(bytes),
+    }), /FileDataID 9001.*(?:triangle|index).*outside/i);
+  });
+});

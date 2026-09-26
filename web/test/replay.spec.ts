@@ -465,7 +465,7 @@ test("reframes genuine models after resizing the same page to mobile", async ({ 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("renders non-Elemental Blast original kits at their own timestamps and reports verified absence", async ({ page }) => {
+test("renders non-Elemental Blast original kits and reports Ancestral Swiftness absence", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   const canvas = scene.locator("canvas");
@@ -498,7 +498,52 @@ test("renders non-Elemental Blast original kits at their own timestamps and repo
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("blend 7 uses unverified EGxBlend factors");
 
   await page.getByRole("button", { name: /Timeline mark.*Ancestral Swiftness/i }).first().click();
-  await expect(scene.locator("[data-testid='replay-spell-components']")).toContainText("Ancestral Swiftness (443454): no verified component");
+  await expect(scene.locator("[data-testid='replay-spell-components']")).toContainText("Ancestral Swiftness (443454): no verified component; no substitute rendered");
+  await seek.fill("0.15");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /^(?!.*4290517)/);
+  await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "0");
+});
+
+test("keeps the original Ancestral Swiftness mesh preview-only when replay shading is incomplete", async ({ page }) => {
+  await page.context().route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as {
+      sim: { players: Array<{ collected_data: {
+        action_sequence: Array<{ id?: number }>;
+        action_sequence_precombat: unknown[];
+      } }> };
+    };
+    const sequence = fixture.sim.players[0].collected_data;
+    sequence.action_sequence = sequence.action_sequence.filter((event) => event.id === 443454).slice(0, 1);
+    sequence.action_sequence_precombat = [];
+    await route.fulfill({ response, json: fixture });
+  });
+  const requestedMeshAssets: string[] = [];
+  page.on("request", (request) => {
+    if (/\/model\/native-effects\/(4290517|4291424|2177462|4281028)\./.test(request.url())) {
+      requestedMeshAssets.push(request.url());
+    }
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("No original components required for this trace", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='replay-spell-components']")).toContainText("Ancestral Swiftness (443454): no verified component; no substitute rendered");
+  const canvas = scene.locator("canvas");
+  for (const time of ["0.04", "0.15", "0.3"]) {
+    await scene.getByRole("slider", { name: "Seek playback" }).fill(time);
+    await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "");
+    await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "0");
+    await expect(canvas).toHaveAttribute("data-replay-native-particles", "0");
+  }
+  expect(requestedMeshAssets).toEqual([]);
+  await scene.getByRole("button", { name: "Native M2 component preview" }).click();
+  await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4290517");
+  const nativeStatus = scene.locator("[data-testid='native-effect-status']");
+  await expect(nativeStatus).toContainText("4 of 4 authored emitters ready", { timeout: 30_000 });
+  await expect(nativeStatus).toContainText("LOD0 mesh 1 of 1 batches, 900 triangles");
+  await expect(nativeStatus).toContainText("1 secondary texture unit");
+  expect(requestedMeshAssets.some((url) => url.endsWith("/4290517.m2"))).toBe(true);
+  expect(requestedMeshAssets.some((url) => url.endsWith("/4291424.skin"))).toBe(true);
 });
 
 test("renders isolated Flame Shock particles beside the dummy at its own emission time", async ({ page }) => {

@@ -73,15 +73,57 @@ export interface NativeParticleEmitter {
   alphaCutoff: NativeParticleTrack<number>;
 }
 
+export interface NativeMeshVertex {
+  position: Vector3Tuple;
+  boneWeights: [number, number, number, number];
+  boneIndices: [number, number, number, number];
+  normal: Vector3Tuple;
+  uv: [Vector2Tuple, Vector2Tuple];
+}
+
+export interface NativeMeshBatch {
+  flags: number;
+  priorityPlane: number;
+  shaderId: number;
+  sectionIndex: number;
+  colorIndex: number;
+  materialIndex: number;
+  textureCount: number;
+  textureComboIndex: number;
+  textureCoordComboIndex: number;
+  textureWeightComboIndex: number;
+  textureTransformComboIndex: number;
+}
+
+export interface NativeSkinProfile {
+  vertexLookup: number[];
+  indices: number[];
+  boneRemap: Array<[number, number, number, number]>;
+  sections: Array<{ indexStart: number; indexCount: number; vertexStart: number; vertexCount: number; boneCount: number }>;
+  batches: NativeMeshBatch[];
+}
+
 export interface NativeM2Model {
   fileDataId: number;
   version: 272 | 274;
   sequenceDurationsMs: number[];
+  sequenceIds: number[];
   globalSequenceDurationsMs: number[];
   extensionChunks: string[];
   textureControlEntries: Array<[number, number]>;
   sequenceDurationMs: number;
   textureFileDataIds: number[];
+  textureFlags: number[];
+  skinFileDataIds: number[];
+  vertices: NativeMeshVertex[];
+  materials: Array<{ flags: number; blendMode: number }>;
+  colors: Array<{ color: NativeTrack<Vector3Tuple>; alpha: NativeTrack<number> }>;
+  textureWeights: NativeTrack<number>[];
+  textureTransforms: Array<{ translation: NativeTrack<Vector3Tuple>; rotation: NativeTrack<QuaternionTuple>; scale: NativeTrack<Vector3Tuple> }>;
+  textureLookup: number[];
+  textureCoordinates: number[];
+  textureWeightLookup: number[];
+  textureTransformLookup: number[];
   bones: NativeBone[];
   emitters: NativeParticleEmitter[];
 }
@@ -91,7 +133,7 @@ interface ArrayDescriptor {
   offset: number;
 }
 
-type TrackValueKind = "float" | "vector3" | "quaternion" | "uint8" | "gravity";
+type TrackValueKind = "float" | "vector3" | "quaternion" | "uint8" | "gravity" | "fixed16";
 type ParticleValueKind = "vector3" | "fixed16" | "vector2" | "uint16";
 
 const PARTICLE_STRIDE = 0x1ec;
@@ -138,7 +180,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   const textureChunk = chunks.get("TXID");
   if (!textureChunk) throw new Error(`${label}: TXID chunk is missing.`);
   const skinChunk = chunks.get("SFID");
-  if (!skinChunk || skinChunk.size !== 4) throw new Error(`${label}: exactly one SFID is required.`);
+  if (!skinChunk || skinChunk.size < 4 || skinChunk.size % 4 !== 0) throw new Error(`${label}: at least one aligned SFID is required.`);
 
   const modelBase = modelChunk.offset;
   const modelSize = modelChunk.size;
@@ -191,6 +233,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   if (sequences.count === 0) throw new Error(`${label}: at least one animation sequence is required.`);
   const sequenceDurationsMs = Array.from({ length: sequences.count }, (_, index) =>
     getUint32(sequences.offset + index * 0x40 + 4, `sequence ${index} duration`));
+  const sequenceIds = Array.from({ length: sequences.count }, (_, index) =>
+    getUint16(sequences.offset + index * 0x40, `sequence ${index} animation ID`));
   const sequenceDurationMs = sequenceDurationsMs[0];
   if (sequenceDurationMs === 0) throw new Error(`${label}: animation sequence 0 has zero duration.`);
   const globalSequenceDurationsMs = Array.from({ length: globalLoops.count }, (_, index) =>
@@ -221,6 +265,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     if (kind === "vector3") return 12;
     if (kind === "quaternion") return 8;
     if (kind === "uint8") return 1;
+    if (kind === "fixed16") return 2;
     return 4;
   };
   const parseTrack = <T>(offset: number, fieldLabel: string, kind: TrackValueKind): NativeTrack<T> => {
@@ -257,6 +302,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
         if (kind === "vector3") return getVector3(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "quaternion") return parseQuaternion(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "uint8") return source.getUint8(absolute(valueOffset, 1, `${fieldLabel} value`)) as T;
+        if (kind === "fixed16") return Math.max(0, getInt16(valueOffset, `${fieldLabel} value`) / 32767) as T;
         return parseCompressedGravity(valueOffset, `${fieldLabel} value`) as T;
       });
       parsedSequences.push({ timestamps, values });
@@ -349,9 +395,11 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   if (textureRecords.count !== textureFileDataIds.length) {
     throw new Error(`${label}: texture record count ${textureRecords.count} does not match ${textureFileDataIds.length} TXIDs.`);
   }
+  const textureFlags: number[] = [];
   for (let index = 0; index < textureRecords.count; index += 1) {
     const textureOffset = textureRecords.offset + index * 16;
     const textureType = getUint32(textureOffset, `texture ${index} type`);
+    textureFlags.push(getUint32(textureOffset + 4, `texture ${index} flags`));
     const filename = readArray(textureOffset + 8, `texture ${index} filename`);
     if (textureType !== 0 || filename.count !== 0) {
       throw new Error(`${label}: texture ${index} uses unsupported embedded or replaceable data.`);
@@ -359,7 +407,57 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   }
 
   const vertexRecords = readArray(0x3c, "vertices");
-  if (vertexRecords.count !== 0) throw new Error(`${label}: mesh vertices are outside this particle-only proof.`);
+  checkArray(vertexRecords, 0x30, "vertices");
+  const skinFileDataIds = Array.from({ length: skinChunk.size / 4 }, (_, index) =>
+    source.getUint32(skinChunk.offset + index * 4, true));
+  if (skinFileDataIds.some((id) => id === 0 || skinFileDataIds.indexOf(id) !== skinFileDataIds.lastIndexOf(id))) {
+    throw new Error(`${label}: SFID contains zero or duplicate skin FileDataIDs.`);
+  }
+  const vertices = Array.from({ length: vertexRecords.count }, (_, index): NativeMeshVertex => {
+    const offset = vertexRecords.offset + index * 0x30;
+    const byteOffset = absolute(offset + 12, 8, `vertex ${index} skin weights`);
+    return {
+      position: getVector3(offset, `vertex ${index} position`),
+      boneWeights: [0, 1, 2, 3].map((slot) => source.getUint8(byteOffset + slot)) as NativeMeshVertex["boneWeights"],
+      boneIndices: [0, 1, 2, 3].map((slot) => source.getUint8(byteOffset + 4 + slot)) as NativeMeshVertex["boneIndices"],
+      normal: getVector3(offset + 20, `vertex ${index} normal`),
+      uv: [getVector2(offset + 32, `vertex ${index} UV0`), getVector2(offset + 40, `vertex ${index} UV1`)],
+    };
+  });
+  const readUint16Array = (offset: number, field: string, signed = false) => {
+    const descriptor = readArray(offset, field);
+    checkArray(descriptor, 2, field);
+    return Array.from({ length: descriptor.count }, (_, index) => signed
+      ? getInt16(descriptor.offset + index * 2, field)
+      : getUint16(descriptor.offset + index * 2, field));
+  };
+  const materialsRecord = readArray(0x70, "materials");
+  checkArray(materialsRecord, 4, "materials");
+  const materials = Array.from({ length: materialsRecord.count }, (_, index) => ({
+    flags: getUint16(materialsRecord.offset + index * 4, `material ${index} flags`),
+    blendMode: getUint16(materialsRecord.offset + index * 4 + 2, `material ${index} blend mode`),
+  }));
+  const colorsRecord = readArray(0x48, "mesh colors");
+  checkArray(colorsRecord, 40, "mesh colors");
+  const colors = Array.from({ length: colorsRecord.count }, (_, index) => ({
+    color: parseTrack<Vector3Tuple>(colorsRecord.offset + index * 40, `mesh color ${index}`, "vector3"),
+    alpha: parseTrack<number>(colorsRecord.offset + index * 40 + 20, `mesh alpha ${index}`, "fixed16"),
+  }));
+  const weightsRecord = readArray(0x58, "texture weights");
+  checkArray(weightsRecord, 20, "texture weights");
+  const textureWeights = Array.from({ length: weightsRecord.count }, (_, index) =>
+    parseTrack<number>(weightsRecord.offset + index * 20, `texture weight ${index}`, "fixed16"));
+  const transformsRecord = readArray(0x60, "texture transforms");
+  checkArray(transformsRecord, 60, "texture transforms");
+  const textureTransforms = Array.from({ length: transformsRecord.count }, (_, index) => ({
+    translation: parseTrack<Vector3Tuple>(transformsRecord.offset + index * 60, `texture transform ${index} translation`, "vector3"),
+    rotation: parseTrack<QuaternionTuple>(transformsRecord.offset + index * 60 + 20, `texture transform ${index} rotation`, "quaternion"),
+    scale: parseTrack<Vector3Tuple>(transformsRecord.offset + index * 60 + 40, `texture transform ${index} scale`, "vector3"),
+  }));
+  const textureLookup = readUint16Array(0x80, "texture lookup");
+  const textureCoordinates = readUint16Array(0x88, "texture coordinate lookup", true);
+  const textureWeightLookup = readUint16Array(0x90, "texture weight lookup");
+  const textureTransformLookup = readUint16Array(0x98, "texture transform lookup", true);
   const ribbonRecords = readArray(0x120, "ribbons");
   if (ribbonRecords.count !== 0) throw new Error(`${label}: ribbon emitters are outside this component proof.`);
 
@@ -383,11 +481,11 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
 
   const particleRecords = readArray(0x128, "particle emitters");
   const textureAlphaChunk = chunks.get("TXAC");
-  if (textureAlphaChunk && textureAlphaChunk.size !== particleRecords.count * 2) {
-    throw new Error(`${label}: TXAC particle entries do not match ${particleRecords.count} emitters.`);
+  if (textureAlphaChunk && (textureAlphaChunk.size < particleRecords.count * 2 || textureAlphaChunk.size % 2 !== 0)) {
+    throw new Error(`${label}: TXAC particle entries are fewer than ${particleRecords.count} emitters or not aligned.`);
   }
   const textureControlEntries: Array<[number, number]> = textureAlphaChunk
-    ? Array.from({ length: particleRecords.count }, (_, index) => [
+    ? Array.from({ length: textureAlphaChunk.size / 2 }, (_, index) => [
       source.getUint8(textureAlphaChunk.offset + index * 2),
       source.getUint8(textureAlphaChunk.offset + index * 2 + 1),
     ]) : [];
@@ -537,11 +635,90 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     version,
     sequenceDurationMs,
     sequenceDurationsMs,
+    sequenceIds,
     globalSequenceDurationsMs,
     extensionChunks: [...chunks.keys()].filter((tag) => !["MD21", "SFID", "TXID"].includes(tag)),
     textureControlEntries,
     textureFileDataIds,
+    textureFlags,
+    skinFileDataIds,
+    vertices,
+    materials,
+    colors,
+    textureWeights,
+    textureTransforms,
+    textureLookup,
+    textureCoordinates,
+    textureWeightLookup,
+    textureTransformLookup,
     bones,
     emitters,
   };
+}
+
+export function parseNativeSkin(sourceBuffer: ArrayBuffer, fileDataId: number, vertexCount: number): NativeSkinProfile {
+  const label = `FileDataID ${fileDataId}`;
+  const bytes = new Uint8Array(sourceBuffer);
+  const view = new DataView(sourceBuffer);
+  if (bytes.length < 0x40 || fourCc(bytes, 0) !== "SKIN") throw new Error(`${label}: SKIN header is missing or truncated.`);
+  const readArray = (offset: number, stride: number, field: string) => {
+    const count = view.getUint32(offset, true);
+    const start = view.getUint32(offset + 4, true);
+    if (count > 1_000_000 || start > bytes.length || count * stride > bytes.length - start) {
+      throw new Error(`${label}: ${field} array is outside SKIN bounds.`);
+    }
+    return { count, start };
+  };
+  const vertexArray = readArray(4, 2, "vertex lookup");
+  const indexArray = readArray(12, 2, "triangle indices");
+  const boneArray = readArray(20, 4, "bone remap");
+  const sectionArray = readArray(28, 0x30, "sections");
+  const batchArray = readArray(36, 0x18, "batches");
+  readArray(48, 12, "shadow batches");
+  if (vertexArray.count === 0 || indexArray.count % 3 !== 0 || boneArray.count !== vertexArray.count
+    || sectionArray.count === 0 || batchArray.count === 0) {
+    throw new Error(`${label}: SKIN vertex, triangle, bone, section, or batch counts are invalid.`);
+  }
+  const vertexLookup = Array.from({ length: vertexArray.count }, (_, index) => view.getUint16(vertexArray.start + index * 2, true));
+  const indices = Array.from({ length: indexArray.count }, (_, index) => view.getUint16(indexArray.start + index * 2, true));
+  const boneRemap = Array.from({ length: boneArray.count }, (_, index): [number, number, number, number] =>
+    [0, 1, 2, 3].map((slot) => view.getUint8(boneArray.start + index * 4 + slot)) as [number, number, number, number]);
+  if (vertexLookup.some((index) => index >= vertexCount)) throw new Error(`${label}: vertex lookup is outside M2 vertex bounds.`);
+  if (indices.some((index) => index >= vertexLookup.length)) throw new Error(`${label}: triangle index is outside SKIN vertex bounds.`);
+  const sections = Array.from({ length: sectionArray.count }, (_, index) => {
+    const offset = sectionArray.start + index * 0x30;
+    const level = view.getUint16(offset + 2, true);
+    const vertexStart = view.getUint16(offset + 4, true) + level * 65536;
+    const vertexCountInSection = view.getUint16(offset + 6, true);
+    const indexStart = view.getUint16(offset + 8, true) + level * 65536;
+    const indexCount = view.getUint16(offset + 10, true);
+    const boneCount = view.getUint16(offset + 12, true);
+    if (vertexStart + vertexCountInSection > vertexLookup.length || indexStart + indexCount > indices.length
+      || indexCount % 3 !== 0 || boneCount === 0) {
+      throw new Error(`${label}: section ${index} indices, vertices or bone count are invalid.`);
+    }
+    if (indices.slice(indexStart, indexStart + indexCount).some((vertex) =>
+      vertex < vertexStart || vertex >= vertexStart + vertexCountInSection)) {
+      throw new Error(`${label}: section ${index} triangle refers outside its vertex range.`);
+    }
+    return { vertexStart, vertexCount: vertexCountInSection, indexStart, indexCount, boneCount };
+  });
+  const batches = Array.from({ length: batchArray.count }, (_, index): NativeMeshBatch => {
+    const offset = batchArray.start + index * 0x18;
+    const sectionIndex = view.getUint16(offset + 4, true);
+    const textureCount = view.getUint16(offset + 14, true);
+    if (sectionIndex >= sections.length || textureCount < 1 || textureCount > 4) {
+      throw new Error(`${label}: batch ${index} section or texture count is invalid.`);
+    }
+    return {
+      flags: view.getUint8(offset), priorityPlane: view.getInt8(offset + 1),
+      shaderId: view.getUint16(offset + 2, true), sectionIndex,
+      colorIndex: view.getInt16(offset + 8, true), materialIndex: view.getUint16(offset + 10, true),
+      textureCount, textureComboIndex: view.getUint16(offset + 16, true),
+      textureCoordComboIndex: view.getUint16(offset + 18, true),
+      textureWeightComboIndex: view.getUint16(offset + 20, true),
+      textureTransformComboIndex: view.getUint16(offset + 22, true),
+    };
+  });
+  return { vertexLookup, indices, boneRemap, sections, batches };
 }

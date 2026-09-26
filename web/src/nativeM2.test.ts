@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { describe, expect, it } from "vitest";
-import { parseNativeM2 } from "./nativeM2";
+import * as nativeM2 from "./nativeM2";
+const { parseNativeM2 } = nativeM2;
 
 const MODEL_BASE = 8;
 const PARTICLE_OFFSET = 0x300;
@@ -312,12 +313,38 @@ describe("additional original particle structures", () => {
     expect(model.sequenceDurationsMs).toEqual([667, 1400]);
   });
 
-  it("still rejects mesh vertices and ribbons with their FileDataID", () => {
-    for (const [offset, name] of [[0x3c, "vertices"], [0x120, "ribbon"]] as const) {
-      const source = buildM2Fixture();
-      new DataView(source).setUint32(MODEL_BASE + offset, 1, true);
-      expect(() => parseNativeM2(source, 4006618)).toThrow(new RegExp(`FileDataID 4006618.*${name}`));
-    }
+  it("parses authored mesh vertex weights, normals, UV sets and texture-unit lookups", () => {
+    const source = buildM2Fixture();
+    const view = new DataView(source);
+    view.setUint32(MODEL_BASE + 0x3c, 1, true);
+    view.setUint32(MODEL_BASE + 0x40, 0x280, true);
+    view.setFloat32(MODEL_BASE + 0x280, 2, true);
+    view.setFloat32(MODEL_BASE + 0x284, 3, true);
+    view.setFloat32(MODEL_BASE + 0x288, 4, true);
+    view.setUint8(MODEL_BASE + 0x28c, 255);
+    view.setFloat32(MODEL_BASE + 0x294, 1, true);
+    view.setFloat32(MODEL_BASE + 0x2a0, 0.25, true);
+    view.setFloat32(MODEL_BASE + 0x2a4, 0.75, true);
+    view.setFloat32(MODEL_BASE + 0x2a8, 0.5, true);
+    view.setFloat32(MODEL_BASE + 0x2ac, 0.125, true);
+    view.setUint32(MODEL_BASE + 0x70, 1, true);
+    view.setUint32(MODEL_BASE + 0x74, 0x2b0, true);
+    view.setUint16(MODEL_BASE + 0x2b0, 0x15, true);
+    view.setUint16(MODEL_BASE + 0x2b2, 2, true);
+    view.setUint32(MODEL_BASE + 0x80, 1, true);
+    view.setUint32(MODEL_BASE + 0x84, 0x2b4, true);
+    view.setUint16(MODEL_BASE + 0x2b4, 1, true);
+    const model = parseNativeM2(source, 4006618);
+    expect(model.vertices[0]).toEqual({ position: [2, 3, 4], boneWeights: [255, 0, 0, 0], boneIndices: [0, 0, 0, 0], normal: [1, 0, 0], uv: [[0.25, 0.75], [0.5, 0.125]] });
+    expect(model.materials).toEqual([{ flags: 0x15, blendMode: 2 }]);
+    expect(model.textureLookup).toEqual([1]);
+    expect(model.skinFileDataIds).toEqual([9001]);
+  });
+
+  it("continues to reject ribbon emitters with their FileDataID", () => {
+    const source = buildM2Fixture();
+    new DataView(source).setUint32(MODEL_BASE + 0x120, 1, true);
+    expect(() => parseNativeM2(source, 4006618)).toThrow(/FileDataID 4006618.*ribbon/);
   });
 });
 
@@ -351,5 +378,58 @@ describe("eleven pinned particle-only sources", () => {
       expect(view.getUint16(record + 0x30, true)).toBe(model.emitters[index].rows);
       expect(view.getUint16(record + 0x32, true)).toBe(model.emitters[index].columns);
     }
+  });
+});
+
+
+describe("original skin profile", () => {
+  it("resolves triangle indices through the skin vertex lookup and assigns the authored batch", () => {
+    const source = new ArrayBuffer(0xb0);
+    const view = new DataView(source);
+    new Uint8Array(source).set(new TextEncoder().encode("SKIN"));
+    const array = (offset: number, count: number, start: number) => {
+      view.setUint32(offset, count, true);
+      view.setUint32(offset + 4, start, true);
+    };
+    array(4, 3, 0x40);
+    array(12, 3, 0x48);
+    array(20, 3, 0x50);
+    array(28, 1, 0x60);
+    array(36, 1, 0x90);
+    for (const [index, vertex] of [2, 1, 0].entries()) view.setUint16(0x40 + index * 2, vertex, true);
+    for (const index of [0, 1, 2]) view.setUint16(0x48 + index * 2, index, true);
+    view.setUint16(0x60 + 6, 3, true);
+    view.setUint16(0x60 + 10, 3, true);
+    view.setUint16(0x60 + 12, 1, true);
+    view.setUint16(0x90 + 2, 0x4014, true);
+    view.setUint16(0x90 + 14, 2, true);
+    const parser = (nativeM2 as Record<string, unknown>).parseNativeSkin as ((bytes: ArrayBuffer, fileId: number, count: number) => unknown) | undefined;
+    expect(parser?.(source, 9001, 3)).toMatchObject({
+      vertexLookup: [2, 1, 0], indices: [0, 1, 2],
+      sections: [expect.objectContaining({ vertexCount: 3, indexCount: 3 })],
+      batches: [expect.objectContaining({ shaderId: 0x4014, textureCount: 2 })],
+    });
+  });
+});
+
+
+describe("pinned Ancestral Swiftness mesh", () => {
+  it("parses the original geometry, SKIN batch, material, animated texture transform and particle emitters", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const read = (name: string) => {
+      const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${name}`));
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    };
+    const model = parseNativeM2(read("4290517.m2"), 4290517);
+    const skin = nativeM2.parseNativeSkin(read("4291424.skin"), 4291424, model.vertices.length);
+    expect(model).toMatchObject({ version: 274, skinFileDataIds: [4291424, 4291426, 4291428, 4291430], materials: [{ flags: 0x1095, blendMode: 2 }] });
+    expect(model.sequenceIds).toEqual([0, 158, 213]);
+    expect(model.vertices).toHaveLength(1533);
+    expect(model.emitters).toHaveLength(4);
+    expect(model.textureTransforms[0].translation.sequences[0].values.length).toBeGreaterThan(0);
+    expect(skin.vertexLookup).toHaveLength(612);
+    expect(skin.indices).toHaveLength(2700);
+    expect(skin.batches).toEqual([expect.objectContaining({ shaderId: 0x4014, textureCount: 2, materialIndex: 0 })]);
   });
 });

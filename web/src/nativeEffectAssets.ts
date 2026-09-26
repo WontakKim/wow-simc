@@ -11,9 +11,29 @@ export interface NativeEffectAsset {
   expectedEmitterCount: number;
   effectNameScale: 1 | 2;
   textures: NativeTextureAsset[];
+  skin?: NativeTextureAsset;
 }
 
 export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
+  {
+    fileDataId: 4290517,
+    label: "Ancestral Swiftness original mesh 4290517",
+    filename: "FileDataID 4290517.m2",
+    sha256: "bed216503c7603e3e7af1128ac0bef3f549f4b7911123a0fd461098e1b4c4b21",
+    expectedEmitterCount: 4,
+    effectNameScale: 1,
+    skin: { fileDataId: 4291424, sha256: "d8e6cd8e263e14a815d2976029230c47483ccf6e6e6f0276b4ac86600558e283" },
+    textures: [
+      { fileDataId: 1715290, sha256: "286112c70f1ed8e8282b5fd1554bcebd6770fb8246a4c26892eef8be486a6731" },
+      { fileDataId: 4281046, sha256: "436a4e0d7e671efb2d71913a2d4bdca79db8c06d3e2da78519d4a786d7770859" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 4281030, sha256: "a4d53e5b062fcc5d7fea5d1e466b3532a9015cd8a9f0ab9afcf60902b39d3bc7" },
+      { fileDataId: 4281028, sha256: "14ddeb9ea1042359bd5f16e06d4ad002e6a1ab03eccffed372e2b36ef325956c" },
+      { fileDataId: 4281042, sha256: "ec807ba2838104c16fdd9ea0d2c22cd17525d3ac8c709822b4196b86c1d2d539" },
+      { fileDataId: 4287476, sha256: "ef064c886c2828e4f7d150c056f33c6c278893e8da75f0a97723f0605b22d010" },
+      { fileDataId: 2177462, sha256: "897d195ed132f9378655ab19b1c0a8c0cf652b969ac75f67eb095c9b7deeecb0" },
+    ],
+  },
   {
     fileDataId: 794788,
     label: "Leishen lightning burst missile",
@@ -231,6 +251,6 @@ export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
   },
 ] as const;
 
-export const NATIVE_REPLAY_EFFECT_ASSETS = NATIVE_EFFECT_ASSETS.slice(0, 2);
+export const NATIVE_REPLAY_EFFECT_ASSETS = NATIVE_EFFECT_ASSETS.filter((asset) => asset.fileDataId === 794788 || asset.fileDataId === 613807);
 
 export const NATIVE_PREVIEW_DURATION_SECONDS = 3;

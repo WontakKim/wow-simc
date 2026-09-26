@@ -1,6 +1,7 @@
 import type {
   NativeBone,
   NativeParticleEmitter,
+  NativeMeshVertex,
   NativeParticleTrack,
   NativeTrack,
   QuaternionTuple,
@@ -26,6 +27,7 @@ export interface NativeEmitterSampleOptions {
   sourceTranslationAtTime?: (timeSeconds: number) => Vector3Tuple;
   globalSequenceDurationsMs?: number[];
   bones?: NativeBone[];
+  sequenceIndex?: number;
 }
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -62,8 +64,9 @@ export function sampleNativeTrack<T>(
   sequenceDurationMs: number,
   fallback: T,
   globalSequenceDurationsMs: number[] = [],
+  sequenceIndex = 0,
 ): T {
-  const sequence = track.sequences[0];
+  const sequence = track.sequences[track.globalSequence >= 0 || track.sequences.length === 1 ? 0 : sequenceIndex];
   if (!sequence) return fallback;
   const duration = track.globalSequence >= 0
     ? globalSequenceDurationsMs[track.globalSequence]
@@ -150,11 +153,12 @@ function applyBonePoint(
   sequenceDurationMs: number,
   globalSequenceDurationsMs: number[] = [],
   bones?: NativeBone[],
+  sequenceIndex = 0,
 ): Vector3Tuple {
   if (!bone) return point;
-  const translation = sampleNativeTrack<Vector3Tuple>(bone.translation, timeMs, sequenceDurationMs, [0, 0, 0], globalSequenceDurationsMs);
-  const rotation = sampleNativeTrack<QuaternionTuple>(bone.rotation, timeMs, sequenceDurationMs, [0, 0, 0, 1], globalSequenceDurationsMs);
-  const boneScale = sampleNativeTrack<Vector3Tuple>(bone.scale, timeMs, sequenceDurationMs, [1, 1, 1], globalSequenceDurationsMs);
+  const translation = sampleNativeTrack<Vector3Tuple>(bone.translation, timeMs, sequenceDurationMs, [0, 0, 0], globalSequenceDurationsMs, sequenceIndex);
+  const rotation = sampleNativeTrack<QuaternionTuple>(bone.rotation, timeMs, sequenceDurationMs, [0, 0, 0, 1], globalSequenceDurationsMs, sequenceIndex);
+  const boneScale = sampleNativeTrack<Vector3Tuple>(bone.scale, timeMs, sequenceDurationMs, [1, 1, 1], globalSequenceDurationsMs, sequenceIndex);
   const pivotRelative: Vector3Tuple = [
     (point[0] - bone.pivot[0]) * boneScale[0],
     (point[1] - bone.pivot[1]) * boneScale[1],
@@ -162,8 +166,48 @@ function applyBonePoint(
   ];
   const transformed = add(add(rotateVector(pivotRelative, rotation), bone.pivot), translation);
   return bone.parentIndex >= 0 && bones
-    ? applyBonePoint(transformed, bones[bone.parentIndex], timeMs, sequenceDurationMs, globalSequenceDurationsMs, bones)
+    ? applyBonePoint(transformed, bones[bone.parentIndex], timeMs, sequenceDurationMs, globalSequenceDurationsMs, bones, sequenceIndex)
     : transformed;
+}
+
+export function sampleNativeSkinnedVertex(
+  vertex: NativeMeshVertex,
+  bones: NativeBone[],
+  timeMs: number,
+  sequenceDurationMs: number,
+  globalSequenceDurationsMs: number[] = [],
+  sequenceIndex = 0,
+): Vector3Tuple {
+  let point: Vector3Tuple = [0, 0, 0];
+  const weightTotal = vertex.boneWeights.reduce((total, weight) => total + weight, 0);
+  if (weightTotal !== 255) throw new Error(`Vertex bone weights sum to ${weightTotal}, expected 255.`);
+  for (let index = 0; index < 4; index += 1) {
+    const weight = vertex.boneWeights[index];
+    if (weight === 0) continue;
+    const bone = bones[vertex.boneIndices[index]];
+    if (!bone) throw new Error(`Vertex bone index ${vertex.boneIndices[index]} is outside the model.`);
+    point = add(point, scale(applyBonePoint(vertex.position, bone, timeMs, sequenceDurationMs, globalSequenceDurationsMs, bones, sequenceIndex), weight / 255));
+  }
+  return point;
+}
+
+export function sampleNativeSkinnedNormal(
+  vertex: NativeMeshVertex,
+  bones: NativeBone[],
+  timeMs: number,
+  sequenceDurationMs: number,
+  globalSequenceDurationsMs: number[] = [],
+  sequenceIndex = 0,
+): Vector3Tuple {
+  let direction: Vector3Tuple = [0, 0, 0];
+  for (let index = 0; index < 4; index += 1) {
+    const weight = vertex.boneWeights[index];
+    if (weight === 0) continue;
+    const bone = bones[vertex.boneIndices[index]];
+    if (!bone) throw new Error(`Vertex bone index ${vertex.boneIndices[index]} is outside the model.`);
+    direction = add(direction, scale(applyBoneDirection(vertex.normal, bone, timeMs, sequenceDurationMs, globalSequenceDurationsMs, bones, sequenceIndex), weight / 255));
+  }
+  return normalize(direction);
 }
 
 function applyBoneDirection(
@@ -173,17 +217,18 @@ function applyBoneDirection(
   sequenceDurationMs: number,
   globalSequenceDurationsMs: number[] = [],
   bones?: NativeBone[],
+  sequenceIndex = 0,
 ): Vector3Tuple {
   if (!bone) return normalize(direction);
-  const rotation = sampleNativeTrack<QuaternionTuple>(bone.rotation, timeMs, sequenceDurationMs, [0, 0, 0, 1], globalSequenceDurationsMs);
-  const boneScale = sampleNativeTrack<Vector3Tuple>(bone.scale, timeMs, sequenceDurationMs, [1, 1, 1], globalSequenceDurationsMs);
+  const rotation = sampleNativeTrack<QuaternionTuple>(bone.rotation, timeMs, sequenceDurationMs, [0, 0, 0, 1], globalSequenceDurationsMs, sequenceIndex);
+  const boneScale = sampleNativeTrack<Vector3Tuple>(bone.scale, timeMs, sequenceDurationMs, [1, 1, 1], globalSequenceDurationsMs, sequenceIndex);
   const transformed = normalize(rotateVector([
     direction[0] * boneScale[0],
     direction[1] * boneScale[1],
     direction[2] * boneScale[2],
   ], rotation));
   return bone.parentIndex >= 0 && bones
-    ? applyBoneDirection(transformed, bones[bone.parentIndex], timeMs, sequenceDurationMs, globalSequenceDurationsMs, bones)
+    ? applyBoneDirection(transformed, bones[bone.parentIndex], timeMs, sequenceDurationMs, globalSequenceDurationsMs, bones, sequenceIndex)
     : transformed;
 }
 
@@ -198,7 +243,7 @@ interface SpawnTime {
   time: number;
 }
 
-function createSpawnTimes(emitter: NativeParticleEmitter, sequenceDurationMs: number, timeSeconds: number, globalSequenceDurationsMs: number[] = []): SpawnTime[] {
+function createSpawnTimes(emitter: NativeParticleEmitter, sequenceDurationMs: number, timeSeconds: number, globalSequenceDurationsMs: number[] = [], sequenceIndex = 0): SpawnTime[] {
   if (timeSeconds < 0) return [];
   const constantRate = getConstantTrackValue(emitter.emissionRate);
   if (constantRate !== null) {
@@ -220,10 +265,10 @@ function createSpawnTimes(emitter: NativeParticleEmitter, sequenceDurationMs: nu
   let accumulated = 0;
   let threshold = 1;
   let previousTime = 0;
-  let previousRate = Math.max(0, sampleNativeTrack(emitter.emissionRate, 0, sequenceDurationMs, 0, globalSequenceDurationsMs));
+  let previousRate = Math.max(0, sampleNativeTrack(emitter.emissionRate, 0, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex));
   for (let currentTime = step; currentTime <= timeSeconds + step / 2 && result.length < 4096; currentTime += step) {
     const boundedTime = Math.min(timeSeconds, currentTime);
-    const currentRate = Math.max(0, sampleNativeTrack(emitter.emissionRate, boundedTime * 1000, sequenceDurationMs, 0, globalSequenceDurationsMs));
+    const currentRate = Math.max(0, sampleNativeTrack(emitter.emissionRate, boundedTime * 1000, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex));
     const interval = boundedTime - previousTime;
     const nextAccumulated = accumulated + ((previousRate + currentRate) * 0.5) * interval;
     while (threshold <= nextAccumulated && result.length < 4096) {
@@ -245,9 +290,10 @@ function planeEmissionDirection(
   spawnTimeMs: number,
   sequenceDurationMs: number,
   globalSequenceDurationsMs: number[] = [],
+  sequenceIndex = 0,
 ) {
-  const verticalRange = Math.max(0, sampleNativeTrack(emitter.verticalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs));
-  const horizontalRange = Math.max(0, sampleNativeTrack(emitter.horizontalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs));
+  const verticalRange = Math.max(0, sampleNativeTrack(emitter.verticalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex));
+  const horizontalRange = Math.max(0, sampleNativeTrack(emitter.horizontalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex));
   const inclination = randomUnit(emitter.index, spawnIndex, 1) * verticalRange;
   const azimuth = (randomUnit(emitter.index, spawnIndex, 2) * 2 - 1) * horizontalRange * 0.5;
   return normalize([
@@ -268,9 +314,10 @@ function sampleEmission(
   spawnTimeMs: number,
   sequenceDurationMs: number,
   globalSequenceDurationsMs: number[] = [],
+  sequenceIndex = 0,
 ): EmissionSample {
-  const width = sampleNativeTrack(emitter.emissionAreaWidth, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs);
-  const length = sampleNativeTrack(emitter.emissionAreaLength, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs);
+  const width = sampleNativeTrack(emitter.emissionAreaWidth, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
+  const length = sampleNativeTrack(emitter.emissionAreaLength, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
   if (emitter.emitterType === 1) {
     return {
       offset: [
@@ -278,12 +325,12 @@ function sampleEmission(
         (randomUnit(emitter.index, spawnIndex, 4) - 0.5) * width,
         0,
       ],
-      direction: planeEmissionDirection(emitter, spawnIndex, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs),
+      direction: planeEmissionDirection(emitter, spawnIndex, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, sequenceIndex),
     };
   }
 
-  const verticalRange = Math.max(0, sampleNativeTrack(emitter.verticalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs));
-  const horizontalRange = Math.max(0, sampleNativeTrack(emitter.horizontalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs));
+  const verticalRange = Math.max(0, sampleNativeTrack(emitter.verticalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex));
+  const horizontalRange = Math.max(0, sampleNativeTrack(emitter.horizontalRange, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex));
   const elevation = (randomUnit(emitter.index, spawnIndex, 4) * 2 - 1) * verticalRange * 0.5;
   const azimuth = (randomUnit(emitter.index, spawnIndex, 13) * 2 - 1) * horizontalRange * 0.5;
   const cosineElevation = Math.cos(elevation);
@@ -311,15 +358,16 @@ export function sampleNativeEmitter(
   const emissionEndSeconds = Math.max(0, options.emissionEndSeconds ?? Number.POSITIVE_INFINITY);
   const emissionSampleTime = Math.min(timeSeconds, emissionEndSeconds);
   const globalSequenceDurationsMs = options.globalSequenceDurationsMs ?? [];
-  const spawnTimes = createSpawnTimes(emitter, sequenceDurationMs, emissionSampleTime, globalSequenceDurationsMs)
+  const sequenceIndex = options.sequenceIndex ?? 0;
+  const spawnTimes = createSpawnTimes(emitter, sequenceDurationMs, emissionSampleTime, globalSequenceDurationsMs, sequenceIndex)
     .filter((spawn) => !Number.isFinite(emissionEndSeconds) || spawn.time < emissionEndSeconds - 0.0000001);
   const modelScale = options.modelScale ?? 1;
   const sourceTranslationAtTime = options.sourceTranslationAtTime ?? (() => [0, 0, 0]);
   const result: NativeParticleSample[] = [];
   for (const spawn of spawnTimes) {
     const spawnTimeMs = spawn.time * 1000;
-    if (sampleNativeTrack(emitter.enabled, spawnTimeMs, sequenceDurationMs, 1, globalSequenceDurationsMs) === 0) continue;
-    const lifespanBase = sampleNativeTrack(emitter.lifespan, spawnTimeMs, sequenceDurationMs, 0.05, globalSequenceDurationsMs);
+    if (sampleNativeTrack(emitter.enabled, spawnTimeMs, sequenceDurationMs, 1, globalSequenceDurationsMs, sequenceIndex) === 0) continue;
+    const lifespanBase = sampleNativeTrack(emitter.lifespan, spawnTimeMs, sequenceDurationMs, 0.05, globalSequenceDurationsMs, sequenceIndex);
     const lifespan = Math.max(0.05, sampleSymmetricVariation(
       lifespanBase,
       emitter.lifespanVariation,
@@ -329,25 +377,25 @@ export function sampleNativeEmitter(
     if (age < -0.000001 || age > lifespan) continue;
     const progress = clamp(age / lifespan, 0, 1);
 
-    const emission = sampleEmission(emitter, spawn.spawnIndex, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs);
+    const emission = sampleEmission(emitter, spawn.spawnIndex, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, sequenceIndex);
     const localOrigin = add(emitter.position, emission.offset);
-    const authoredZSource = sampleNativeTrack(emitter.zSource, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs);
+    const authoredZSource = sampleNativeTrack(emitter.zSource, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
     const localDirection = authoredZSource > 0
       ? normalize([-localOrigin[0], -localOrigin[1], authoredZSource - localOrigin[2]])
       : emission.direction;
     const usesWorldCoordinates = (emitter.flags & 0x10) !== 0;
     const origin = usesWorldCoordinates
       ? localOrigin
-      : applyBonePoint(localOrigin, bone, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, options.bones);
+      : applyBonePoint(localOrigin, bone, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, options.bones, sequenceIndex);
     const direction = usesWorldCoordinates
       ? localDirection
-      : applyBoneDirection(localDirection, bone, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, options.bones);
-    const speedBase = sampleNativeTrack(emitter.emissionSpeed, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs);
-    const speedVariation = sampleNativeTrack(emitter.speedVariation, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs);
+      : applyBoneDirection(localDirection, bone, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, options.bones, sequenceIndex);
+    const speedBase = sampleNativeTrack(emitter.emissionSpeed, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
+    const speedVariation = sampleNativeTrack(emitter.speedVariation, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
     // M2 documents the speed-variation field but not its native formula; this stable additive sampling is an explicit approximation.
     const speed = Math.max(0, speedBase + (randomUnit(emitter.index, spawn.spawnIndex, 5) - 0.5) * speedVariation);
     const initialVelocity = scale(direction, speed);
-    const gravity = sampleNativeTrack<Vector3Tuple>(emitter.gravity, spawnTimeMs, sequenceDurationMs, [0, 0, 0], globalSequenceDurationsMs);
+    const gravity = sampleNativeTrack<Vector3Tuple>(emitter.gravity, spawnTimeMs, sequenceDurationMs, [0, 0, 0], globalSequenceDurationsMs, sequenceIndex);
     const windAge = Math.max(0, age - emitter.windTime);
     const acceleration = add(gravity, windAge > 0 ? emitter.windVector : [0, 0, 0] as Vector3Tuple);
     const dragFactor = emitter.drag > 0 ? Math.exp(-emitter.drag * age) : 1;

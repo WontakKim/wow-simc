@@ -460,11 +460,17 @@ function describeNativeEffectLimitations(effect: NativeParticleEffect) {
     .map((emitter) => emitter.index);
   return [
     ...effect.unsupportedEmitters,
+    ...effect.unsupportedMeshBatches,
+    ...(effect.meshTriangleCount > 0 ? ["authored animation sequence 2 (ID 213) sampled for the mesh and emitters; retail spell sequence scheduling not verified"] : []),
     ...(effect.primaryOnlyEmitters.length > 0
       ? [`secondary original textures not combined for emitters ${effect.primaryOnlyEmitters.join(", ")}`]
       : []),
     ...effect.model.textureControlEntries.flatMap(([first, second], index) =>
-      first || second ? [`TXAC emitter ${index} (${first},${second}) texture controls not implemented`] : []),
+      first || second ? [`TXAC ${index < effect.model.emitters.length ? `emitter ${index}` : `extra entry ${index}`} (${first},${second}) texture controls not implemented`] : []),
+    ...effect.model.emitters.flatMap((emitter) =>
+      (emitter.flags & 0x1) !== 0 ? [`emitter ${emitter.index} flag 0x1 particle shading not reconstructed (unlit billboard)`] : []),
+    ...effect.model.emitters.flatMap((emitter) =>
+      (emitter.flags & 0x20) !== 0 ? [`emitter ${emitter.index} flag 0x20 particle bone-scale size inheritance not reconstructed`] : []),
     ...effect.model.emitters.flatMap((emitter) =>
       (emitter.flags & 0x40) !== 0 ? [`emitter ${emitter.index} parent-particle velocity inheritance not modeled`] : []),
     ...effect.model.emitters.flatMap((emitter) => {
@@ -583,6 +589,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     canvas.dataset.replayNativeComponents = "0";
     canvas.dataset.replayNativeParticles = "0";
     canvas.dataset.replayNativeLatestSourceX = "";
+    canvas.dataset.replayNativeMeshTriangles = "0";
     const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 100);
     const controls = new OrbitControls(camera, canvas);
     const clock = new Clock();
@@ -640,6 +647,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       canvas.dataset.replayNativeComponents = "0";
       canvas.dataset.replayNativeParticles = "0";
       canvas.dataset.replayNativeLatestSourceX = "";
+      canvas.dataset.replayNativeMeshTriangles = "0";
       canvas.dataset.replayNativeFileDataIds = "";
     };
 
@@ -668,6 +676,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         replayState.cursor,
       );
       let particleCount = 0;
+      let meshTriangles = 0;
       const activeFileDataIds: number[] = [];
       let componentCount = 0;
       try {
@@ -685,6 +694,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               : anchors[component.anchor]),
           }));
           particleCount += effect.setReplayInstances(instances, camera);
+          meshTriangles += instances.length * effect.meshTriangleCount;
           componentCount += matching.length;
         }
       } catch (caught) {
@@ -702,6 +712,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       }
       canvas.dataset.replayNativeComponents = String(componentCount);
       canvas.dataset.replayNativeParticles = String(particleCount);
+      canvas.dataset.replayNativeMeshTriangles = String(meshTriangles);
       canvas.dataset.replayNativeFileDataIds = activeFileDataIds.join(",");
       const latestProjectile = occurrences.filter((occurrence) => occurrence.spellId === 117014).at(-1);
       canvas.dataset.replayNativeLatestSourceX = latestProjectile
@@ -1264,7 +1275,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               <strong>{selectedNativeAsset.label}</strong>
               <small>{selectedNativeAsset.filename} · FileDataID {selectedNativeAsset.fileDataId}</small>
             </div>
-            <p>Original particle component preview · not a complete spell</p>
+            <p>Original {selectedNativeAsset.skin ? "mesh + particle" : "particle"} component preview · not a complete spell</p>
           </div>
           <label className="native-component-select">
             <span>Original M2 component</span>
@@ -1289,10 +1300,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           {nativeStatus === "ready" && (
             <p role="status" data-testid="native-effect-status" data-native-file-data-id={selectedNativeAsset.fileDataId}>
               <strong>{nativeEmitterCount} of {selectedNativeAsset.expectedEmitterCount} authored emitters ready</strong>
-              <span> · {nativeTextureCount} original BLP textures · FileDataID {selectedNativeAsset.fileDataId}</span>
+              <span> · {nativeTextureCount} original BLP textures · FileDataID {selectedNativeAsset.fileDataId}{selectedNativeAsset.skin ? " · LOD0 mesh 1 of 1 batches, 900 triangles" : ""}</span>
               <small> · {selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807
                 ? "Component proof, not complete Elemental Blast."
-                : "Particle component preview, not a complete spell."}{nativeLimitations ? ` · ${nativeLimitations}` : ""}</small>
+                : selectedNativeAsset.skin ? "Original mesh + particle preview, not a complete spell." : "Particle component preview, not a complete spell."}{nativeLimitations ? ` · ${nativeLimitations}` : ""}</small>
             </p>
           )}
           {nativeError && (
@@ -1344,10 +1355,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
 
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with viewer-only caster/target anchors and a 0.20s emission window plus decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Only Elemental Blast uses the accepted 0.20s release and 0.80s linear flight; other spells have no simulated missile travel. Lava Burst and Lightning Bolt show cast/impact kits without unsupported missile bodies (4329984, 3980281, 6211617). Ancestral Swiftness has no verified particle component. No complete spell, native cast/impact timing, attachment, sound, damage, hit reaction, or VFX parity is claimed."
+          ? "Replay sync samples illustrative exported motion and original source-linked particle components for mapped successful actions, with viewer-only caster/target anchors and a 0.20s emission window plus decay. Lightning Shield, Lava Burst, and Lightning Bolt are conditional source visual branches, not guaranteed appearances. Only Elemental Blast uses the accepted 0.20s release and 0.80s linear flight; other spells have no simulated missile travel. Lava Burst and Lightning Bolt show cast/impact kits without unsupported missile bodies (4329984, 3980281, 6211617). Ancestral Swiftness has no replay-ready component: 4290517 is inspectable only in Native M2 preview because its two-unit mesh shader is not reconstructed. No complete spell, native cast/impact timing, attachment, sound, damage, hit reaction, or VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
-            : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component and its original BLP textures; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}
+            : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}
       </p>
     </section>
   );
