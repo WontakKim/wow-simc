@@ -3,6 +3,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   Camera,
+  Color,
   ClampToEdgeWrapping,
   CustomBlending,
   DataTexture,
@@ -13,7 +14,6 @@ import {
   InstancedBufferGeometry,
   LinearFilter,
   Mesh,
-  MeshBasicMaterial,
   NormalBlending,
   OneFactor,
   OneMinusSrcAlphaFactor,
@@ -22,6 +22,7 @@ import {
   ShaderMaterial,
   SRGBColorSpace,
   UnsignedByteType,
+  Vector2,
   Vector3,
 } from "three";
 import { decodeNativeBlp } from "./nativeBlp";
@@ -209,7 +210,7 @@ export class NativeParticleEffect {
   readonly meshTriangleCount: number;
   readonly animationSequenceIndex: number;
   readonly unsupportedMeshBatches: string[];
-  private readonly meshBatches: Array<{ geometry: BufferGeometry; material: MeshBasicMaterial; mesh: Mesh; textureWeightIndex: number; colorIndex: number; instanceIndex: number }>;
+  private readonly meshBatches: Array<{ geometry: BufferGeometry; material: ShaderMaterial; mesh: Mesh; textureWeightIndex: number; colorIndex: number; instanceIndex: number; secondaryTransformIndex: number }>;
   private readonly skin: NativeSkinProfile | undefined;
   private readonly maximumInstanceCount: number;
 
@@ -321,7 +322,7 @@ export class NativeParticleEffect {
         if (!material || (material.blendMode !== 2 && material.blendMode !== 4) || (material.flags & ~0x11d5) !== 0
           || (material.flags & 0x15) !== 0x15 || (material.flags & 0x1000) === 0
           || (batch.shaderId !== 0x4014 && batch.shaderId !== 0x14) || batch.flags !== 0x80 || batch.textureCount !== 2) {
-          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} material, flags or shader cannot be rendered with the verified primary-only path.`);
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} material, flags or shader cannot be rendered with the verified two-unit Mod2x path.`);
         }
         const textureIndices = Array.from({ length: batch.textureCount }, (_, unit) => model.textureLookup[batch.textureComboIndex + unit]);
         const transformIndices = Array.from({ length: batch.textureCount }, (_, unit) => model.textureTransformLookup[batch.textureTransformComboIndex + unit]);
@@ -349,11 +350,24 @@ export class NativeParticleEffect {
             }
           }
         }
-        const sourceTexture = this.textures[textureIndices[0]];
-        const textureFlags = model.textureFlags[textureIndices[0]];
-        if ((textureFlags & ~3) !== 0) throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture wrapping flags are unsupported.`);
-        sourceTexture.wrapS = (textureFlags & 1) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
-        sourceTexture.wrapT = (textureFlags & 2) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
+        for (const textureIndex of textureIndices) {
+          const textureFlags = model.textureFlags[textureIndex];
+          if ((textureFlags & ~3) !== 0) throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} texture wrapping flags are unsupported.`);
+          this.textures[textureIndex].wrapS = (textureFlags & 1) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
+          this.textures[textureIndex].wrapT = (textureFlags & 2) !== 0 ? RepeatWrapping : ClampToEdgeWrapping;
+        }
+        const primaryTransform = model.textureTransforms[transformIndices[0]];
+        const secondaryTransform = model.textureTransforms[transformIndices[1]];
+        const hasRotation = (transform: typeof primaryTransform) => transform?.rotation.sequences.some((sequence) =>
+          sequence.values.some(([x, y, z, w]) => x !== 0 || y !== 0 || z !== 0 || w !== 1));
+        if (hasRotation(primaryTransform) || hasRotation(secondaryTransform) || (batch.shaderId === 0x4014 && transformIndices[0] !== -1)) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} UV rotation or primary UV transform is unsupported.`);
+        }
+        if (batch.shaderId === 0x14 && [primaryTransform, secondaryTransform].some((transform) => transform && (
+          transform.translation.sequences.some((sequence) => sequence.values.some(([x, y]) => x !== 0 || y !== 0))
+          || transform.scale.sequences.some((sequence) => sequence.values.some(([x, y]) => x !== 1 || y !== 1))))) {
+          throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} T1/T1 UV transform is not identity.`);
+        }
         for (let instanceIndex = 0; instanceIndex < maximumInstanceCount; instanceIndex += 1) {
           const geometry = new BufferGeometry();
           geometry.setAttribute("position", new BufferAttribute(new Float32Array(skin.vertexLookup.length * 3), 3).setUsage(DynamicDrawUsage));
@@ -361,25 +375,53 @@ export class NativeParticleEffect {
           geometry.setAttribute("uv", new BufferAttribute(new Float32Array(skin.vertexLookup.flatMap((vertexIndex) => model.vertices[vertexIndex].uv[0])), 2));
           geometry.setIndex(skin.indices);
           geometry.setDrawRange(section.indexStart, section.indexCount);
-          const meshMaterial = new MeshBasicMaterial({ map: sourceTexture, transparent: true,
-            blending: material.blendMode === 4 ? AdditiveBlending : NormalBlending,
-            side: DoubleSide, depthTest: (material.flags & 0x8) === 0, depthWrite: (material.flags & 0x10) !== 0, fog: false });
+          if (batch.shaderId === 0x4014) {
+            geometry.setAttribute("secondaryUv", new BufferAttribute(new Float32Array(skin.vertexLookup.flatMap((vertexIndex) => model.vertices[vertexIndex].uv[1])), 2));
+          }
+          const meshMaterial = new ShaderMaterial({
+            uniforms: {
+              primaryMap: { value: this.textures[textureIndices[0]] },
+              secondaryMap: { value: this.textures[textureIndices[1]] },
+              meshColor: { value: new Color(1, 1, 1) },
+              meshOpacity: { value: 1 },
+              secondaryUvScale: { value: new Vector2(1, 1) },
+              secondaryUvTranslation: { value: new Vector2() },
+            },
+            vertexShader: `${batch.shaderId === 0x4014 ? "attribute vec2 secondaryUv;" : ""} uniform vec2 secondaryUvScale; uniform vec2 secondaryUvTranslation;
+              varying vec2 primaryCoordinates; varying vec2 secondaryCoordinates;
+              void main() {
+                primaryCoordinates = uv;
+                secondaryCoordinates = ${batch.shaderId === 0x4014 ? "secondaryUv * secondaryUvScale + secondaryUvTranslation" : "uv"};
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+              }`,
+            fragmentShader: `uniform sampler2D primaryMap; uniform sampler2D secondaryMap;
+              uniform vec3 meshColor; uniform float meshOpacity;
+              varying vec2 primaryCoordinates; varying vec2 secondaryCoordinates;
+              void main() {
+                vec4 primary = texture2D(primaryMap, primaryCoordinates);
+                vec4 secondary = texture2D(secondaryMap, secondaryCoordinates);
+                gl_FragColor = vec4(meshColor * primary.rgb * secondary.rgb * 2.0,
+                  meshOpacity * primary.a * secondary.a * 2.0);
+                if (gl_FragColor.a < 0.00392157) discard;
+                #include <tonemapping_fragment>
+                #include <colorspace_fragment>
+              }`,
+            transparent: true, blending: material.blendMode === 4 ? AdditiveBlending : NormalBlending,
+            side: DoubleSide, depthTest: (material.flags & 0x8) === 0, depthWrite: (material.flags & 0x10) !== 0, fog: false,
+          });
           const mesh = new Mesh(geometry, meshMaterial);
           mesh.visible = false;
           mesh.frustumCulled = false;
           mesh.renderOrder = 100 + batch.priorityPlane;
           this.group.add(mesh);
           this.meshBatches.push({ geometry, material: meshMaterial, mesh,
-            textureWeightIndex, colorIndex: batch.colorIndex, instanceIndex });
+            textureWeightIndex, colorIndex: batch.colorIndex, instanceIndex,
+            secondaryTransformIndex: batch.shaderId === 0x4014 ? transformIndices[1] : -1 });
         }
-        const missingUvUnits = transformIndices.flatMap((transformIndex, unit) => transformIndex >= 0 ? [unit] : []);
-        const uvLimit = missingUvUnits.length > 0
-          ? `; ${missingUvUnits.map((unit) => unit === 0 ? "primary" : "secondary").join(" and ")} UV transform${missingUvUnits.length > 1 ? "s" : ""} for unit${missingUvUnits.length > 1 ? "s" : ""} ${missingUvUnits.join(", ")} not applied`
-          : "";
         const unknownMaterialFlags = [0x40, 0x80, 0x100, 0x1000]
           .filter((flag) => (material.flags & flag) !== 0)
           .map((flag) => `0x${flag.toString(16)}`).join(", ");
-        this.unsupportedMeshBatches.push(`batch ${index}: shader 0x${batch.shaderId.toString(16)} native combiner for ${batch.textureCount - 1} secondary texture unit not implemented; original primary texture only${uvLimit}; material flags ${unknownMaterialFlags} and batch flag 0x80 have unverified shadow/render semantics`);
+        this.unsupportedMeshBatches.push(`batch ${index}: material flags ${unknownMaterialFlags} and batch flag 0x80 have unverified shadow/render semantics`);
       }
     }
     this.group.name = `Native M2 FileDataID ${model.fileDataId}`;
@@ -538,18 +580,29 @@ export class NativeParticleEffect {
       const source = nativeToThree(instance.sourceTranslationAtTime(instance.timeSeconds));
       batch.mesh.position.set(...source);
       batch.mesh.scale.setScalar(instance.modelScale);
-      batch.material.opacity = 1;
+      let opacity = 1;
+      const color = new Color(1, 1, 1);
       if (batch.colorIndex >= 0) {
         const colorTrack = this.model.colors[batch.colorIndex];
-        const color = sampleNativeTrack(colorTrack.color, timeMs, sequenceDurationMs,
+        const sampledColor = sampleNativeTrack(colorTrack.color, timeMs, sequenceDurationMs,
           [1, 1, 1], this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
-        batch.material.color.setRGB(color[0], color[1], color[2]);
-        batch.material.opacity = sampleNativeTrack(colorTrack.alpha, timeMs, sequenceDurationMs,
+        color.setRGB(sampledColor[0], sampledColor[1], sampledColor[2]);
+        opacity = sampleNativeTrack(colorTrack.alpha, timeMs, sequenceDurationMs,
           1, this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
       }
-      batch.material.opacity *= sampleNativeTrack(this.model.textureWeights[batch.textureWeightIndex], timeMs,
-        this.model.sequenceDurationsMs[this.animationSequenceIndex], 1, this.model.globalSequenceDurationsMs,
-        this.animationSequenceIndex);
+      opacity *= sampleNativeTrack(this.model.textureWeights[batch.textureWeightIndex], timeMs,
+        sequenceDurationMs, 1, this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+      batch.material.uniforms.meshColor.value.copy(color);
+      batch.material.uniforms.meshOpacity.value = opacity;
+      if (batch.secondaryTransformIndex >= 0) {
+        const transform = this.model.textureTransforms[batch.secondaryTransformIndex];
+        const translation = sampleNativeTrack(transform.translation, timeMs, sequenceDurationMs,
+          [0, 0, 0], this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+        const scale = sampleNativeTrack(transform.scale, timeMs, sequenceDurationMs,
+          [1, 1, 1], this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+        batch.material.uniforms.secondaryUvTranslation.value.set(translation[0], translation[1]);
+        batch.material.uniforms.secondaryUvScale.value.set(scale[0], scale[1]);
+      }
     }
   }
 

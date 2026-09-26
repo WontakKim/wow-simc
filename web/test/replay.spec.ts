@@ -504,7 +504,7 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "0");
 });
 
-test("keeps the original Ancestral Swiftness mesh preview-only when replay shading is incomplete", async ({ page }) => {
+test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combined textures", async ({ page }) => {
   await page.context().route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
     const fixture = await response.json() as {
@@ -541,9 +541,12 @@ test("keeps the original Ancestral Swiftness mesh preview-only when replay shadi
   const nativeStatus = scene.locator("[data-testid='native-effect-status']");
   await expect(nativeStatus).toContainText("4 of 4 authored emitters ready", { timeout: 30_000 });
   await expect(nativeStatus).toContainText("LOD0 mesh 1 of 1 batches, 900 triangles");
-  await expect(nativeStatus).toContainText("1 secondary texture unit");
+  await expect(nativeStatus).toContainText("two original textures combined (shader 0x4014, UV0/UV1)");
+  await expect(nativeStatus).not.toContainText("primary texture only");
   expect(requestedMeshAssets.some((url) => url.endsWith("/4290517.m2"))).toBe(true);
   expect(requestedMeshAssets.some((url) => url.endsWith("/4291424.skin"))).toBe(true);
+  await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("6211617");
+  await expect(nativeStatus).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)", { timeout: 30_000 });
 });
 
 test("renders isolated Flame Shock particles beside the dummy at its own emission time", async ({ page }) => {
@@ -652,6 +655,7 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Lightning Bolt: 5 of 5 original emitters", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)");
   await seek.fill("2.4");
   await expect(canvas).toHaveAttribute("data-replay-native-components", "3");
   await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "64");
@@ -659,8 +663,7 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "6211618,6211617,1571475");
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("DBOC four authored values");
-  await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("shader 0x14 native combiner");
-  await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("primary and secondary UV transforms for units 0, 1 not applied");
+  await expect(scene.locator("[data-testid='replay-effect-limitations']")).not.toContainText("shader 0x14 native combiner");
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("emitter 0: flag 0x8000000 not reconstructed");
   await page.evaluate(() => window.scrollTo(0, 0));
   const screenshot = await canvas.screenshot({ path: testInfo.outputPath("lightning-bolt-midflight.png") });

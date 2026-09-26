@@ -66,11 +66,25 @@ describe("original Lightning Bolt missile rendering", () => {
     expect(effect.renderedEmitterCount).toBe(5);
     expect(effect.meshTriangleCount).toBe(64);
     expect(effect.animationSequenceIndex).toBe(0);
-    expect(effect.unsupportedMeshBatches.join(" ")).toContain("primary and secondary UV transforms for units 0, 1 not applied");
+    expect(skin.batches[0].shaderId).toBe(0x14);
+    expect(model.textureLookup.slice(0, 2)).toEqual([7, 7]);
+    expect(model.textureTransformLookup.slice(0, 2)).toEqual([0, 0]);
+    expect(model.textureTransforms[0].scale.sequences.every((sequence) =>
+      sequence.values.every(([x, y]) => x === 1 && y === 1))).toBe(true);
+    const alteredTransform = { ...model.textureTransforms[0], scale: { ...model.textureTransforms[0].scale,
+      sequences: [{ timestamps: [0], values: [[2, 1, 0] as [number, number, number]] }] } };
+    expect(() => new NativeParticleEffect({ ...model, textureTransforms: [...model.textureTransforms, alteredTransform],
+      textureTransformLookup: [0, 1] }, textures, 4, skin)).toThrow(/T1\/T1 UV transform is not identity/);
+    expect(effect.unsupportedMeshBatches.join(" ")).not.toContain("native combiner");
     expect(effect.unsupportedMeshBatches.join(" ")).not.toContain("material flags 0x80");
     expect(effect.group.children).toHaveLength(9);
-    const meshes = effect.group.children.slice(5) as Mesh<BufferGeometry, MeshBasicMaterial>[];
-    expect(meshes.every((mesh) => mesh.material.blending === AdditiveBlending && mesh.material.map !== null)).toBe(true);
+    const meshes = effect.group.children.slice(5) as Mesh<BufferGeometry, ShaderMaterial>[];
+    expect(meshes.every((mesh) => mesh.material.blending === AdditiveBlending
+      && mesh.material.uniforms.primaryMap.value === mesh.material.uniforms.secondaryMap.value
+      && mesh.material.fragmentShader.includes("primary.rgb * secondary.rgb * 2.0")
+      && mesh.material.fragmentShader.includes("primary.a * secondary.a * 2.0")
+      && !mesh.geometry.hasAttribute("secondaryUv")
+      && mesh.material.vertexShader.includes("secondaryCoordinates = uv"))).toBe(true);
     const camera = new PerspectiveCamera();
     const instance = (timeSeconds: number, start: number) => ({ timeSeconds, emissionEndSeconds: 0.8,
       modelScale: 0.38, sourceTranslationAtTime: (time: number): [number, number, number] => [start + time * 10, 0, 0] });
@@ -216,36 +230,49 @@ describe("mesh bone weighting", () => {
 
 
 describe("original mesh component rendering", () => {
-  it("creates the authored LOD0 triangles with original primary texture and discloses secondary units", () => {
+  it("combines both original Ancestral Swiftness textures with scrubbed secondary UV animation", () => {
     const model = parseNativeM2(loadAsset(4290517, "m2"), 4290517);
     const skin = parseNativeSkin(loadAsset(4291424, "skin"), 4291424, model.vertices.length);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const effect = new NativeParticleEffect(model, textures, 1, skin);
     expect(effect.group.children).toHaveLength(5);
     expect(effect.meshTriangleCount).toBe(900);
-    expect(effect.unsupportedMeshBatches.join(" ")).toContain("shader 0x4014 native combiner for 1 secondary texture unit not implemented");
-    expect(effect.unsupportedMeshBatches.join(" ")).toContain("secondary UV transform for unit 1 not applied");
+    expect(skin.batches[0].shaderId).toBe(0x4014);
+    expect(skin.batches[0].textureCount).toBe(2);
+    expect(model.textureFileDataIds[model.textureLookup[1]]).toBe(4281028);
+    expect(model.textureTransformLookup.slice(0, 2)).toEqual([-1, 0]);
+    expect(effect.unsupportedMeshBatches.join(" ")).not.toContain("secondary texture unit not implemented");
     const renamedModel = new NativeParticleEffect({ ...model, fileDataId: 9999 }, textures, 1, skin);
     expect(renamedModel.animationSequenceIndex).toBe(2);
     renamedModel.dispose();
     const mesh = effect.group.children[4] as Mesh;
     expect(mesh.geometry.getAttribute("position").count).toBe(612);
     expect(mesh.geometry.index?.count).toBe(2700);
-    const material = mesh.material as MeshBasicMaterial;
+    const material = mesh.material as ShaderMaterial;
     expect(material.side).toBe(DoubleSide);
     expect(material.depthWrite).toBe(true);
     expect(material.depthTest).toBe(true);
-    expect(material.map?.wrapS).toBe(RepeatWrapping);
+    expect(material.uniforms.primaryMap.value.wrapS).toBe(RepeatWrapping);
+    expect(material.uniforms.secondaryMap.value.image.width).toBe(256);
+    expect(material.fragmentShader).toContain("primary.rgb * secondary.rgb * 2.0");
+    expect(material.fragmentShader).toContain("primary.a * secondary.a * 2.0");
+    expect(mesh.geometry.getAttribute("secondaryUv").count).toBe(612);
     const originalUv = (mesh.geometry.getAttribute("uv") as BufferAttribute).array.slice(0, 2);
     effect.setTime(0.04, new PerspectiveCamera());
-    expect(material.opacity).toBeGreaterThan(0);
+    expect(material.uniforms.meshOpacity.value).toBeGreaterThan(0);
     expect(effect.animationSequenceIndex).toBe(2);
     const alpha = model.colors[skin.batches[0].colorIndex].alpha;
     expect(particleSampling.sampleNativeTrack(alpha, 40, model.sequenceDurationsMs[0], 1, model.globalSequenceDurationsMs)).toBe(0);
     expect(particleSampling.sampleNativeTrack(alpha, 40, model.sequenceDurationsMs[2], 1, model.globalSequenceDurationsMs, 2)).toBeGreaterThan(0);
     expect(Array.from((mesh.geometry.getAttribute("uv") as BufferAttribute).array.slice(0, 2))).toEqual(Array.from(originalUv));
     effect.setTime(0.15, new PerspectiveCamera());
-    expect(material.opacity).toBeLessThan(0.8);
+    expect(material.uniforms.meshOpacity.value).toBeLessThan(0.8);
+    expect(material.uniforms.secondaryUvScale.value.toArray().slice(0, 2)).toEqual([0.25, 1]);
+    expect(material.uniforms.secondaryUvTranslation.value.x).toBeCloseTo(0.15, 2);
+    effect.setTime(0.30, new PerspectiveCamera());
+    expect(material.uniforms.secondaryUvTranslation.value.x).toBeCloseTo(0.30, 2);
+    effect.setTime(0.15, new PerspectiveCamera());
+    expect(material.uniforms.secondaryUvTranslation.value.x).toBeCloseTo(0.15, 2);
     effect.setReplayInstances([{ timeSeconds: 0.04, emissionEndSeconds: 0.2, modelScale: 0.38,
       sourceTranslationAtTime: () => [-4, 0, 1] }], new PerspectiveCamera());
     expect(mesh.position.toArray()).toEqual([-4, -1, 0]);
@@ -261,7 +288,7 @@ describe("original mesh component rendering", () => {
     let textureDisposals = 0;
     mesh.geometry.addEventListener("dispose", () => { geometryDisposals += 1; });
     material.addEventListener("dispose", () => { materialDisposals += 1; });
-    material.map!.addEventListener("dispose", () => { textureDisposals += 1; });
+    material.uniforms.primaryMap.value.addEventListener("dispose", () => { textureDisposals += 1; });
     effect.dispose();
     expect([geometryDisposals, materialDisposals, textureDisposals]).toEqual([1, 1, 1]);
   });
