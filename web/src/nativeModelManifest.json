@@ -1,0 +1,83 @@
+{
+  "build": "12.1.0.69933",
+  "actors": [
+    {
+      "name": "training-dummy",
+      "modelFileDataId": 125259,
+      "animationIds": [
+        0,
+        9,
+        10
+      ]
+    },
+    {
+      "name": "vulpera-male",
+      "modelFileDataId": 1890761,
+      "animationIds": [
+        0,
+        51,
+        52,
+        53,
+        54,
+        124,
+        125,
+        828,
+        830,
+        862,
+        1122,
+        1148,
+        1448
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "fileDataId": 125259,
+      "kind": "m2",
+      "byteSize": 82878,
+      "sha256": "e01493cf4b3d4fe6d5b34000d06bc565ef068df4e8b95f9e88872f9074fe3765"
+    },
+    {
+      "fileDataId": 478820,
+      "kind": "skin",
+      "byteSize": 6352,
+      "sha256": "cfeadc5850f756ce664025bed1910394973b67418e0c7b8f901d2c9b9dc5227b"
+    },
+    {
+      "fileDataId": 1378206,
+      "kind": "blp",
+      "byteSize": 1399300,
+      "sha256": "c20f98ceb1d8eb683169bd66345ec4bcb5f9c05b36b7a761a5ac90d3b4da5a99"
+    },
+    {
+      "fileDataId": 1890761,
+      "kind": "m2",
+      "byteSize": 16315502,
+      "sha256": "cb910cfaa3c123c0172e648efd5947c5fd060355e0b1714fb6aeae7c0c162b57"
+    },
+    {
+      "fileDataId": 1893903,
+      "kind": "skin",
+      "byteSize": 324480,
+      "sha256": "6647ddca909bd7ca4577729355db8b4dfaf423ccd3e98e375a6a3cce6942633d"
+    },
+    {
+      "fileDataId": 3552542,
+      "kind": "blp",
+      "byteSize": 44900,
+      "sha256": "ab65b08ff1efd645f092e96c533d0073d35cad3ae0c1f19b95cde9dd74947700"
+    },
+    {
+      "fileDataId": 4531035,
+      "kind": "blp",
+      "byteSize": 350724,
+      "sha256": "8bb6127332e36d397c434d06377baafc826ef45a4598cff9cc9e42f5969e7c2e"
+    },
+    {
+      "fileDataId": 5210139,
+      "kind": "blp",
+      "byteSize": 23044,
+      "sha256": "f537389d4ed369fbb9750fcddf89b6a5d7276702e87bad5b3bd344940501425d"
+    }
+  ]
+}
