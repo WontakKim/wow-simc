@@ -20,6 +20,7 @@ import {
   configureVulperaMaterials,
   frameModels,
   getReplayEffectAnchors,
+  getReplayEffectSourceAnchor,
   getReplayPlaybackEndTime,
   isReplayClipMissing,
   resolveReplayAnimation,
@@ -208,6 +209,56 @@ describe("Elemental Blast native replay", () => {
     expect(anchors.caster.y).toBeCloseTo(casterBounds.min.y + casterBounds.getSize(new Vector3()).y * 0.6);
     expect(anchors.target.y).toBeCloseTo(targetBounds.min.y + targetBounds.getSize(new Vector3()).y * 0.6);
     expect(anchors.target.x - anchors.caster.x).toBeCloseTo(8);
+  });
+});
+
+describe("published replay attachment placement", () => {
+  it("samples distinct animated authored hand and chest bone origins at the active pose", () => {
+    const caster = createModel(2, 4, 2);
+    const target = createModel(2, 5, 2);
+    arrangeCombatants(caster, target);
+    const shoulder = new Group();
+    shoulder.position.set(0, 1, 0);
+    caster.add(shoulder);
+    const leftHand = new Group(); leftHand.name = "bone_SpellHandL"; leftHand.position.set(0.5, 0.2, 0);
+    const rightHand = new Group(); rightHand.name = "bone_SpellHandR"; rightHand.position.set(0.6, 0.3, 0);
+    const chest = new Group(); chest.name = "bone_Chest"; chest.position.set(0.1, 0.7, 0);
+    shoulder.add(leftHand, rightHand, chest);
+    const action = new AnimationMixer(caster).clipAction(new AnimationClip("pose", 1, [
+      new NumberKeyframeTrack("bone_SpellHandL.position[x]", [0, 1], [0.5, 1.5]),
+    ]));
+    action.play(); action.paused = true;
+    const sample = (time: number) => {
+      action.time = time;
+      action.getMixer().update(0);
+      const bounds = getReplayEffectAnchors(caster, target);
+      return {
+        left: getReplayEffectSourceAnchor(117014, 4329984, caster, bounds.caster),
+        right: getReplayEffectSourceAnchor(117014, 794788, caster, bounds.caster),
+        chest: getReplayEffectSourceAnchor(117014, 613807, caster, bounds.caster),
+        lava: getReplayEffectSourceAnchor(51505, 4329984, caster, bounds.caster),
+      };
+    };
+    const first = sample(0);
+    const later = sample(0.5);
+    expect(first.left.x).toBeCloseTo(first.right.x - 0.1);
+    expect(first.left.y).toBeCloseTo(first.right.y - 0.1);
+    expect(first.right.toArray()).toEqual(rightHand.getWorldPosition(new Vector3()).toArray());
+    expect(first.chest.toArray()).toEqual(chest.getWorldPosition(new Vector3()).toArray());
+    expect(first.lava.toArray()).toEqual(first.chest.toArray());
+    expect(later.left.x).toBeCloseTo(first.left.x + 0.5);
+    expect(sample(0).left.toArray()).toEqual(first.left.toArray());
+  });
+
+  it("keeps unidentified or positioner-driven source attachments at bounds, and fails on missing mapped bones", () => {
+    const caster = createModel(2, 4, 2);
+    const target = createModel(2, 5, 2);
+    arrangeCombatants(caster, target);
+    const bounds = getReplayEffectAnchors(caster, target);
+    expect(getReplayEffectSourceAnchor(188196, 6211617, caster, bounds.caster)).toBe(bounds.caster);
+    expect(getReplayEffectSourceAnchor(188196, 6211618, caster, bounds.caster)).toBe(bounds.caster);
+    expect(() => getReplayEffectSourceAnchor(117014, 4329984, caster, bounds.caster))
+      .toThrow(/FileDataID 4329984.*bone_SpellHandL/);
   });
 });
 

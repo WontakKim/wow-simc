@@ -655,6 +655,8 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Lightning Bolt: 5 of 5 original emitters", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 0 of 3 components use authored caster bone origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: 60%-bounds anchored at both endpoints");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)");
   await seek.fill("2.4");
   await expect(canvas).toHaveAttribute("data-replay-native-components", "3");
@@ -690,6 +692,8 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("4329984", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 1 of 4 components use authored caster bone origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: authored bone_Chest origin (source attachment 34)");
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("3980281: 1 of 2 original missile bodies omitted");
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("LOD0 SKIN has 2 of 2 mesh batches");
   await expect(scene.locator("[data-testid='replay-ribbon-limitation']")).toContainText("FileDataID 4329984 ribbon 1");
@@ -720,6 +724,11 @@ test("moves three coherent original components and discloses the blocked fourth 
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   const replayStatus = scene.locator("[data-testid='replay-effect-status']");
   await expect(replayStatus).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
+  await page.getByRole("button", { name: /Timeline mark.*Elemental Blast/i }).first().click();
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 3 of 3 components use authored caster bone origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: authored bone_SpellHandL origin (source attachment 21)");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 794788: authored bone_SpellHandR origin (source attachment 22)");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 613807: authored bone_Chest origin (source attachment 34)");
   await expect(replayStatus).toContainText("9 original BLP textures");
   await expect(replayStatus).toContainText("FileDataID 4329984 + 794788 + 613807");
   expect(runtimeRequests.some((url) => url.endsWith("/model/native-effects/3980281.m2"))).toBe(false);
@@ -731,6 +740,7 @@ test("moves three coherent original components and discloses the blocked fourth 
   await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const earlySourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
+  await page.evaluate(() => window.scrollTo(0, 0));
   const earlyFrame = await canvas.screenshot();
 
   await seek.fill("19.85");
@@ -750,6 +760,7 @@ test("moves three coherent original components and discloses the blocked fourth 
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(false);
   await scene.getByRole("button", { name: "Replay sync" }).click();
   await expect(canvas).toHaveAttribute("data-replay-native-components", "10");
+  await page.evaluate(() => window.scrollTo(0, 0));
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
   await page.getByRole("button", { name: /Timeline mark.*Elemental Blast/i }).first().click();
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("3980281: 1 of 4 original missile bodies omitted");
