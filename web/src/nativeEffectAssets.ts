@@ -9,12 +9,40 @@ export interface NativeEffectAsset {
   filename: string;
   sha256: string;
   expectedEmitterCount: number;
+  expectedRibbonCount?: number;
   effectNameScale: 1 | 2;
   textures: NativeTextureAsset[];
   skin?: NativeTextureAsset;
 }
 
 export const NATIVE_EFFECT_ASSETS: readonly NativeEffectAsset[] = [
+  {
+    fileDataId: 4329984,
+    label: "Original Lava Burst missile 4329984",
+    filename: "FileDataID 4329984.m2",
+    sha256: "b704ed8b2f6c69349f79653b03d1186bb1ce64bd867636c6591c5b2f87292580",
+    expectedEmitterCount: 10,
+    expectedRibbonCount: 3,
+    effectNameScale: 1,
+    textures: [
+      { fileDataId: 3982249, sha256: "bfd1c7d1ae174e7ea68dd92e5abc5e6dbe809a769eaa795b9c6e12931b1b0612" },
+      { fileDataId: 4007016, sha256: "82efeb05e3af3070fd286d13d9c8f71750001ebf86437b73855e0109bec4107d" },
+      { fileDataId: 4007017, sha256: "513c21e811382f42d1a94256e9f66c1be4750e3dcc68d3ead4df86e0ec847ea5" },
+      { fileDataId: 3722811, sha256: "78dbc9cf5a2d45fae08fac4d36761ebe46f2e82ab120eb0bd7c60a6100f350ab" },
+      { fileDataId: 3308414, sha256: "0dcf13f6ef6db319bcebbea444baf1f7a3a5774f106599477761b197e0585827" },
+      { fileDataId: 4007018, sha256: "90b032731ca6124b4477710d388ea1b60b629f38b7c582d3e364ff26af9faedb" },
+      { fileDataId: 4007019, sha256: "ce7c826db700fceb0971506837e517bac379a96ba93ed4ea18f074b73c5d22ac" },
+      { fileDataId: 4007020, sha256: "5fd5009e942acb069693f19fb42c15493cc062de436c3f91a6530e8b87737254" },
+      { fileDataId: 983668, sha256: "f86ca357e085a8f503b6b713e1c973db9243a00e47502ba9732c7a490e71f6d0" },
+      { fileDataId: 1715203, sha256: "452fea117135cee43ae174fef19ae07a096ab21a252068d9b0c0b479b3fd8b0f" },
+      { fileDataId: 982938, sha256: "67e2ae55d5c797768776b097c986f4122c177db6cb44571fe6c9f1c4dcf44199" },
+      { fileDataId: 4007021, sha256: "b413c3adad9b3cf87aa8ec3c13759a35aa77f2536bc696109d2128fa77998f81" },
+      { fileDataId: 4007022, sha256: "df1c54fd6ff26abdb78452174d330a5c61474bda96d2f78e06619c0641e8eb47" },
+      { fileDataId: 4007023, sha256: "b708157daae1d107e71beedfa1c20fa7441c6e8e9616b2f03c096467a22bc2bc" },
+      { fileDataId: 4007024, sha256: "b5786275782c8024afe32aaabc858cd3516f889de2d689a0be1e04afea0211b3" },
+    ],
+  },
+
   {
     fileDataId: 4290517,
     label: "Ancestral Swiftness original mesh 4290517",

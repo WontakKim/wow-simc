@@ -26,8 +26,8 @@ import {
 } from "three";
 import { decodeNativeBlp } from "./nativeBlp";
 import type { NativeEffectAsset } from "./nativeEffectAssets";
-import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticleEmitter, type NativeSkinProfile, type Vector3Tuple } from "./nativeM2";
-import { sampleNativeEmitter, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeParticleSample } from "./nativeParticles";
+import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticleEmitter, type NativeRibbonEmitter, type NativeSkinProfile, type Vector3Tuple } from "./nativeM2";
+import { applyBonePoint, sampleNativeEmitter, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeParticleSample } from "./nativeParticles";
 
 const ASSET_ROOT = "/model/native-effects";
 const SETUP_COMMAND = "node script/prepare-native-effects.mjs";
@@ -37,6 +37,14 @@ export interface NativeParticleRenderInstance {
   emissionEndSeconds: number;
   modelScale: number;
   sourceTranslationAtTime: (timeSeconds: number) => Vector3Tuple;
+}
+
+interface RibbonBatch {
+  ribbon: NativeRibbonEmitter;
+  geometry: BufferGeometry;
+  material: ShaderMaterial;
+  mesh: Mesh;
+  capacity: number;
 }
 
 interface EmitterBatch {
@@ -196,6 +204,8 @@ export class NativeParticleEffect {
   readonly primaryOnlyEmitters: number[];
   private readonly textures: DataTexture[];
   private readonly batches: EmitterBatch[];
+  readonly ribbonLimitations: string[];
+  private readonly ribbonBatches: RibbonBatch[];
   readonly meshTriangleCount: number;
   readonly animationSequenceIndex: number;
   readonly unsupportedMeshBatches: string[];
@@ -224,7 +234,7 @@ export class NativeParticleEffect {
       .filter((emitter) => (emitter.flags & 0x100000) !== 0)
       .map((emitter) => `emitter ${emitter.index}: refraction unsupported`);
     const renderedEmitters = model.emitters.filter((emitter) => (emitter.flags & 0x100000) === 0);
-    if (renderedEmitters.length === 0 && !skin) {
+    if (renderedEmitters.length === 0 && model.ribbons.length === 0 && !skin) {
       throw new Error(`FileDataID ${model.fileDataId}: no supported authored emitters; ${this.unsupportedEmitters.join(", ")}.`);
     }
     this.renderedEmitterCount = renderedEmitters.length;
@@ -246,6 +256,59 @@ export class NativeParticleEffect {
       mesh.renderOrder = 100 + batch.emitter.priorityPlane;
       this.group.add(mesh);
     }
+    this.ribbonLimitations = model.ribbons.flatMap((ribbon) => [
+      ...(ribbon.materialIndices.length > 1 ? [`ribbon ${ribbon.index}: ${ribbon.materialIndices.length - 1} secondary materials not combined; first M2BLEND material only`] : []),
+      ...(ribbon.textureIndices.length > 1 ? [`ribbon ${ribbon.index}: ${ribbon.textureIndices.length - 1} secondary texture slots not combined; original primary texture only`] : []),
+      ...(ribbon.gravity !== 0 ? [`ribbon ${ribbon.index}: authored gravity ${ribbon.gravity} edge behavior not reconstructed`] : []),
+      ...(ribbon.textureTransformLookupIndex !== 0 ? [`ribbon ${ribbon.index}: texture transform lookup ${ribbon.textureTransformLookupIndex} not applied`] : []),
+      ...(ribbon.colorIndex !== 0 ? [`ribbon ${ribbon.index}: color index ${ribbon.colorIndex} not applied`] : []),
+      ...((model.materials[ribbon.materialIndices[0]].flags & 0x140) !== 0 ? [`ribbon ${ribbon.index}: material flags 0x40 and 0x100 have unverified shadow/render semantics`] : []),
+    ]);
+    this.ribbonBatches = model.ribbons.map((ribbon) => {
+      const materialSource = model.materials[ribbon.materialIndices[0]];
+      if ((materialSource.flags & ~0x15d) !== 0) {
+        throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} material flags 0x${materialSource.flags.toString(16)} contain unsupported bits.`);
+      }
+      if (materialSource.blendMode !== 2 && materialSource.blendMode !== 4) {
+        throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} M2BLEND material ${materialSource.blendMode} is unsupported.`);
+      }
+      if (!(ribbon.edgesPerSecond > 0) || !(ribbon.edgeLifetime > 0) || !Number.isFinite(ribbon.edgesPerSecond * ribbon.edgeLifetime)) {
+        throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} invalid authored edge rate or lifetime.`);
+      }
+      const capacity = (Math.ceil(ribbon.edgesPerSecond * ribbon.edgeLifetime) + 3) * maximumInstanceCount;
+      if (capacity > 2048) throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} exceeds the 2048-edge resource bound.`);
+      const geometry = new BufferGeometry();
+      geometry.setAttribute("position", new BufferAttribute(new Float32Array(capacity * 6), 3).setUsage(DynamicDrawUsage));
+      geometry.setAttribute("uv", new BufferAttribute(new Float32Array(capacity * 4), 2).setUsage(DynamicDrawUsage));
+      geometry.setAttribute("ribbonColor", new BufferAttribute(new Float32Array(capacity * 8), 4).setUsage(DynamicDrawUsage));
+      const indices = new Uint16Array((capacity - maximumInstanceCount) * 6);
+      geometry.setIndex(new BufferAttribute(indices, 1));
+      geometry.setDrawRange(0, 0);
+      const texture = this.textures[ribbon.textureIndices[0]];
+      if (!texture) throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} primary texture is unavailable.`);
+      const material = new ShaderMaterial({
+        uniforms: { map: { value: texture } },
+        vertexShader: `attribute vec4 ribbonColor; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
+          void main() { vRibbonColor = ribbonColor; vRibbonUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `uniform sampler2D map; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
+          void main() { gl_FragColor = texture2D(map, vRibbonUv) * vRibbonColor;
+            if (gl_FragColor.a < 0.00392157) discard;
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+          }`,
+        transparent: true,
+        blending: materialSource.blendMode === 4 ? AdditiveBlending : NormalBlending,
+        depthWrite: (materialSource.flags & 0x10) !== 0,
+        depthTest: (materialSource.flags & 0x8) !== 0,
+        side: DoubleSide,
+      });
+      const mesh = new Mesh(geometry, material);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 100 + ribbon.priorityPlane;
+      this.group.add(mesh);
+      return { ribbon, geometry, material, mesh, capacity };
+    });
     this.meshBatches = [];
     this.unsupportedMeshBatches = [];
     this.meshTriangleCount = skin ? skin.batches.reduce((total, batch) => total + skin.sections[batch.sectionIndex].indexCount / 3, 0) : 0;
@@ -314,6 +377,77 @@ export class NativeParticleEffect {
     this.group.scale.setScalar(0.38);
   }
 
+  private renderRibbons(instances: NativeParticleRenderInstance[]) {
+    const duration = this.model.sequenceDurationsMs[this.animationSequenceIndex];
+    for (const batch of this.ribbonBatches) {
+      const { ribbon, geometry } = batch;
+      const positions = geometry.getAttribute("position") as BufferAttribute;
+      const uvs = geometry.getAttribute("uv") as BufferAttribute;
+      const colors = geometry.getAttribute("ribbonColor") as BufferAttribute;
+      const indices = geometry.index!;
+      let edgeCount = 0;
+      let triangleCount = 0;
+      for (const instance of instances) {
+        if (instance.timeSeconds < 0) continue;
+        const headTime = Math.min(instance.timeSeconds, instance.emissionEndSeconds);
+        const oldestTime = Math.max(0, instance.timeSeconds - ribbon.edgeLifetime);
+        if (headTime <= oldestTime) continue;
+        let previousEdge = -1;
+        const sampleTimes: number[] = [];
+        for (let time = headTime; time >= oldestTime; time -= 1 / ribbon.edgesPerSecond) sampleTimes.push(time);
+        if (sampleTimes.at(-1)! > oldestTime) sampleTimes.push(oldestTime);
+        for (const sampleTime of sampleTimes) {
+          const timeMs = sampleTime * 1000;
+          const enabled = sampleNativeTrack(ribbon.enabled, timeMs, duration, 1,
+            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+          if (enabled === 0) { previousEdge = -1; continue; }
+          if (edgeCount >= batch.capacity) throw new Error(`FileDataID ${this.model.fileDataId}: ribbon ${ribbon.index} exceeds its ${batch.capacity}-edge resource bound.`);
+          const position = ribbon.position;
+          const above = sampleNativeTrack(ribbon.heightAbove, timeMs, duration, 0,
+            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+          const below = sampleNativeTrack(ribbon.heightBelow, timeMs, duration, 0,
+            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+          const translate = instance.sourceTranslationAtTime(sampleTime);
+          const bone = this.model.bones[ribbon.boneIndex];
+          for (const [side, height] of [above, -below].entries()) {
+            const point = applyBonePoint([position[0], position[1], position[2] + height], bone,
+              timeMs, duration, this.model.globalSequenceDurationsMs, this.model.bones, this.animationSequenceIndex);
+            const converted = nativeToThree([translate[0] + point[0] * instance.modelScale,
+              translate[1] + point[1] * instance.modelScale, translate[2] + point[2] * instance.modelScale]);
+            positions.setXYZ(edgeCount * 2 + side, ...converted);
+          }
+          const color = sampleNativeTrack(ribbon.color, timeMs, duration, [1, 1, 1] as Vector3Tuple,
+            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+          const alpha = sampleNativeTrack(ribbon.alpha, timeMs, duration, 1,
+            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+          const slot = sampleNativeTrack(ribbon.textureSlot, timeMs, duration, 0,
+            this.model.globalSequenceDurationsMs, this.animationSequenceIndex);
+          const frame = Math.max(0, Math.min(ribbon.rows * ribbon.columns - 1, slot));
+          const column = frame % ribbon.columns;
+          const row = Math.floor(frame / ribbon.columns);
+          const u = column / ribbon.columns;
+          const v = 1 - (row + 1) / ribbon.rows;
+          const along = (headTime - sampleTime) / ribbon.edgeLifetime;
+          uvs.setXY(edgeCount * 2, u + along / ribbon.columns, v);
+          uvs.setXY(edgeCount * 2 + 1, u + along / ribbon.columns, v + 1 / ribbon.rows);
+          for (const side of [0, 1]) colors.setXYZW(edgeCount * 2 + side, color[0], color[1], color[2], alpha);
+          if (previousEdge >= 0) {
+            const next = edgeCount * 2;
+            const previous = previousEdge * 2;
+            for (const [offset, vertex] of [previous, previous + 1, next, previous + 1, next + 1, next].entries()) {
+              indices.setX(triangleCount * 3 + offset, vertex);
+            }
+            triangleCount += 2;
+          }
+          previousEdge = edgeCount;
+          edgeCount += 1;
+        }
+      }
+      geometry.setDrawRange(0, triangleCount * 3);
+      for (const attribute of [positions, uvs, colors, indices]) attribute.needsUpdate = true;
+    }
+  }
+
   private renderInstances(instances: NativeParticleRenderInstance[], camera: Camera) {
     if (instances.length > this.maximumInstanceCount) {
       throw new Error(
@@ -321,6 +455,7 @@ export class NativeParticleEffect {
       );
     }
 
+    this.renderRibbons(instances);
     this.group.updateWorldMatrix(true, false);
     const localCamera = this.group.worldToLocal(camera.getWorldPosition(new Vector3()));
     let totalParticleCount = 0;
@@ -425,11 +560,16 @@ export class NativeParticleEffect {
 
   clearInstances() {
     for (const batch of this.batches) batch.geometry.instanceCount = 0;
+    for (const batch of this.ribbonBatches) batch.geometry.setDrawRange(0, 0);
     for (const batch of this.meshBatches) batch.mesh.visible = false;
   }
 
   dispose() {
     for (const batch of this.batches) {
+      batch.geometry.dispose();
+      batch.material.dispose();
+    }
+    for (const batch of this.ribbonBatches) {
       batch.geometry.dispose();
       batch.material.dispose();
     }
@@ -467,6 +607,9 @@ export async function loadNativeParticleEffect(asset: NativeEffectAsset, maximum
       ...asset.textures.map((texture) => fetchPinnedAsset(texture.fileDataId, "blp", texture.sha256)),
     ]);
     const model = parseNativeM2(modelSource, asset.fileDataId);
+    if (model.ribbons.length !== (asset.expectedRibbonCount ?? 0)) {
+      throw new Error(`FileDataID ${asset.fileDataId}: expected ${asset.expectedRibbonCount ?? 0} authored ribbons, found ${model.ribbons.length}.`);
+    }
     if (model.emitters.length !== asset.expectedEmitterCount) {
       throw new Error(`FileDataID ${asset.fileDataId}: expected ${asset.expectedEmitterCount} authored emitters, found ${model.emitters.length}.`);
     }

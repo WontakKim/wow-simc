@@ -220,7 +220,7 @@ describe("remaining original replay components", () => {
     expect(resolveReplayEffectOccurrences([self, later], 1, 1.71).some((occurrence) => occurrence.spellId === 318038)).toBe(false);
   });
 
-  it("uses target-directed cast/impact kit components without a missile body or projectile travel", () => {
+  it("flies the original Lava Burst missile while keeping its cast and impact components", () => {
     const cast = makeAction({ time: 4, id: 51505, name: "lava_burst" });
     const lightning = makeAction({ key: "combat-1", time: 4.2, id: 188196, name: "lightning_bolt" });
     const flame = makeAction({ key: "combat-2", time: 4.4, id: 188389, name: "flame_shock" });
@@ -228,6 +228,7 @@ describe("remaining original replay components", () => {
     expect(occurrences).toEqual([
       expect.objectContaining({ spellId: 51505, componentTimeSeconds: 0.5, components: [
         { fileDataId: 4006621, anchor: "caster" },
+        { fileDataId: 4329984, anchor: "projectile" },
         { fileDataId: 4006618, anchor: "target" },
         { fileDataId: 3980244, anchor: "target" },
       ] }),

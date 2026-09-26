@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { prepareNativeEffects } from "./prepare-native-effects.mjs";
+import { NATIVE_EFFECT_DOWNLOADS, prepareNativeEffects, validateNativeEffectAsset } from "./prepare-native-effects.mjs";
 
 function makeBc1Blp() {
   const bytes = new Uint8Array(156);
@@ -190,4 +190,16 @@ test("rejects a pinned skin with an out-of-range triangle index", async () => {
       fetchImplementation: async () => new Response(bytes),
     }), /FileDataID 9001.*(?:triangle|index).*outside/i);
   });
+});
+
+test("validates three real 0xb0-byte Lava Burst ribbon records at their measured offsets", async () => {
+  const bytes = await readFile(new URL("../web/public/model/native-effects/4329984.m2", import.meta.url));
+  const asset = NATIVE_EFFECT_DOWNLOADS.find((item) => item.fileDataId === 4329984);
+  assert.ok(asset);
+  validateNativeEffectAsset(bytes, asset);
+  const tampered = Buffer.from(bytes);
+  tampered.writeUInt32LE(0, 8 + 0x10e0);
+  assert.throws(() => validateNativeEffectAsset(tampered, {
+    ...asset, sha256: createHash("sha256").update(tampered).digest("hex"),
+  }), /FileDataID 4329984.*ribbon 1.*0xb0-byte record stride/);
 });

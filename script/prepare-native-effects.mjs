@@ -11,6 +11,11 @@ const REPOSITORY_ROOT = resolve(SCRIPT_DIRECTORY, "..");
 const DEFAULT_OUTPUT_DIRECTORY = join(REPOSITORY_ROOT, "web/public/model/native-effects");
 
 export const NATIVE_EFFECT_DOWNLOADS = [
+  { fileDataId: 4329984, extension: "m2", byteSize: 24058, sha256: "b704ed8b2f6c69349f79653b03d1186bb1ce64bd867636c6591c5b2f87292580", textureFileDataIds: [3982249, 4007016, 4007017, 3722811, 3308414, 4007018, 4007019, 4007020, 983668, 1715203, 982938, 4007021, 4007022, 4007023, 4007024], skinFileDataIds: [4329994], version: 274, expectedBoneCount: 17, expectedEmitterCount: 10, expectedRibbonCount: 3, expectedVertexCount: 0 },
+  { fileDataId: 4007021, extension: "blp", byteSize: 1399300, sha256: "b413c3adad9b3cf87aa8ec3c13759a35aa77f2536bc696109d2128fa77998f81" },
+  { fileDataId: 4007022, extension: "blp", byteSize: 44900, sha256: "df1c54fd6ff26abdb78452174d330a5c61474bda96d2f78e06619c0641e8eb47" },
+  { fileDataId: 4007023, extension: "blp", byteSize: 88580, sha256: "b708157daae1d107e71beedfa1c20fa7441c6e8e9616b2f03c096467a22bc2bc" },
+  { fileDataId: 4007024, extension: "blp", byteSize: 350724, sha256: "b5786275782c8024afe32aaabc858cd3516f889de2d689a0be1e04afea0211b3" },
   { fileDataId: 4290517, extension: "m2", byteSize: 83730, sha256: "bed216503c7603e3e7af1128ac0bef3f549f4b7911123a0fd461098e1b4c4b21", textureFileDataIds: [1715290, 4281046, 982938, 4281030, 4281028, 4281042, 4287476, 2177462], skinFileDataIds: [4291424, 4291426, 4291428, 4291430], version: 274, expectedBoneCount: 5, expectedEmitterCount: 4, expectedVertexCount: 1533 },
   { fileDataId: 4291424, extension: "skin", byteSize: 9248, sha256: "d8e6cd8e263e14a815d2976029230c47483ccf6e6e6f0276b4ac86600558e283", expectedVertexCount: 1533 },
   { fileDataId: 1715290, extension: "blp", byteSize: 23044, sha256: "286112c70f1ed8e8282b5fd1554bcebd6770fb8246a4c26892eef8be486a6731" },
@@ -145,13 +150,20 @@ function validateM2(bytes, asset) {
   const modelLimit = model.offset + model.size;
   const bones = readDescriptor(view, model.offset, 0x2c, 0x58, asset, "bone", modelLimit);
   const vertices = readDescriptor(view, model.offset, 0x3c, 0x30, asset, "vertex", modelLimit);
-  const ribbons = readDescriptor(view, model.offset, 0x120, 0xac, asset, "ribbon", modelLimit);
+  const ribbons = readDescriptor(view, model.offset, 0x120, 0xb0, asset, "ribbon", modelLimit);
   const emitterStride = 0x1ec;
   const emitters = readDescriptor(view, model.offset, 0x128, emitterStride, asset, "particle emitter", modelLimit);
   const expectedBones = asset.expectedBoneCount ?? 6;
   const expectedEmitters = asset.expectedEmitterCount ?? 6;
-  if (bones.count !== expectedBones || emitters.count !== expectedEmitters || vertices.count !== (asset.expectedVertexCount ?? 0) || ribbons.count !== 0) {
-    fail(asset, `expected ${expectedBones} bones, ${expectedEmitters} particle emitters, ${asset.expectedVertexCount ?? 0} vertices, and 0 ribbons; found ${bones.count}, ${emitters.count}, ${vertices.count}, and ${ribbons.count}.`);
+  if (bones.count !== expectedBones || emitters.count !== expectedEmitters || vertices.count !== (asset.expectedVertexCount ?? 0) || ribbons.count !== (asset.expectedRibbonCount ?? 0)) {
+    fail(asset, `expected ${expectedBones} bones, ${expectedEmitters} particle emitters, ${asset.expectedVertexCount ?? 0} vertices, and ${asset.expectedRibbonCount ?? 0} ribbons; found ${bones.count}, ${emitters.count}, ${vertices.count}, and ${ribbons.count}.`);
+  }
+  for (let index = 0; index < ribbons.count; index += 1) {
+    const ribbonOffset = model.offset + ribbons.relativeOffset + index * 0xb0;
+    if (view.getUint32(ribbonOffset, true) !== 0xffffffff) {
+      fail(asset, `ribbon ${index} does not start at the pinned 0xb0-byte record stride.`);
+    }
+    if (view.getUint32(ribbonOffset + 4, true) >= bones.count) fail(asset, `ribbon ${index} bone is outside the bone array.`);
   }
   for (let index = 0; index < emitters.count; index += 1) {
     const emitterOffset = model.offset + emitters.relativeOffset + index * emitterStride;

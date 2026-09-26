@@ -146,7 +146,7 @@ function rotateVector(value: Vector3Tuple, quaternionValue: QuaternionTuple): Ve
   ];
 }
 
-function applyBonePoint(
+export function applyBonePoint(
   point: Vector3Tuple,
   bone: NativeBone | undefined,
   timeMs: number,

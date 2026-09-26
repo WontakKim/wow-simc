@@ -1,4 +1,6 @@
 /// <reference types="node" />
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as nativeM2 from "./nativeM2";
 const { parseNativeM2 } = nativeM2;
@@ -7,7 +9,7 @@ const MODEL_BASE = 8;
 const PARTICLE_OFFSET = 0x300;
 const PARTICLE_STRIDE = 0x1ec;
 
-function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean; zSource?: number; version?: number; extension?: string } = {}) {
+function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean; zSource?: number; version?: number; extension?: string; includeRibbon?: boolean } = {}) {
   const emitterCount = options.emitterCount ?? 6;
   const payload = new ArrayBuffer(0x3000);
   const view = new DataView(payload);
@@ -137,7 +139,7 @@ function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean;
     writeFloat32(offset + 0x1ac, 0.4);
   }
 
-  const modelPayload = payload.slice(0, allocationOffset);
+  const modelPayload = payload.slice(0, options.includeRibbon ? 0x3000 : allocationOffset);
   const chunks: Uint8Array[] = [];
   const addChunk = (tag: string, chunkPayload: ArrayBuffer) => {
     const chunk = new Uint8Array(8 + chunkPayload.byteLength);
@@ -341,10 +343,42 @@ describe("additional original particle structures", () => {
     expect(model.skinFileDataIds).toEqual([9001]);
   });
 
-  it("continues to reject ribbon emitters with their FileDataID", () => {
-    const source = buildM2Fixture();
-    new DataView(source).setUint32(MODEL_BASE + 0x120, 1, true);
-    expect(() => parseNativeM2(source, 4006618)).toThrow(/FileDataID 4006618.*ribbon/);
+  it("parses authored 0xb0-byte ribbon records and validates their material/texture references", () => {
+    const source = buildM2Fixture({ emitterCount: 0, version: 274, includeRibbon: true });
+    const view = new DataView(source);
+    const writeArray = (offset: number, count: number, dataOffset: number) => {
+      view.setUint32(MODEL_BASE + offset, count, true);
+      view.setUint32(MODEL_BASE + offset + 4, dataOffset, true);
+    };
+    writeArray(0x120, 1, 0x2e00);
+    writeArray(0x70, 1, 0x2de0);
+    view.setUint16(MODEL_BASE + 0x2de0, 0x155, true);
+    view.setUint16(MODEL_BASE + 0x2de2, 2, true);
+    const ribbon = 0x2e00;
+    view.setUint32(MODEL_BASE + ribbon, 0xffffffff, true);
+    view.setUint32(MODEL_BASE + ribbon + 4, 0, true);
+    view.setFloat32(MODEL_BASE + ribbon + 8, 0.25, true);
+    writeArray(ribbon + 0x14, 1, 0x2ec0);
+    writeArray(ribbon + 0x1c, 1, 0x2ed0);
+    view.setUint16(MODEL_BASE + 0x2ec0, 1, true);
+    view.setUint16(MODEL_BASE + 0x2ed0, 0, true);
+    for (const offset of [0x24, 0x38, 0x4c, 0x60, 0x84, 0x98]) {
+      view.setInt16(MODEL_BASE + ribbon + offset + 2, -1, true);
+    }
+    view.setFloat32(MODEL_BASE + ribbon + 0x74, 32, true);
+    view.setFloat32(MODEL_BASE + ribbon + 0x78, 0.4, true);
+    view.setFloat32(MODEL_BASE + ribbon + 0x7c, -2.5, true);
+    view.setUint16(MODEL_BASE + ribbon + 0x80, 1, true);
+    view.setUint16(MODEL_BASE + ribbon + 0x82, 1, true);
+    view.setInt16(MODEL_BASE + ribbon + 0xac, 3, true);
+    expect(parseNativeM2(source, 4329984).ribbons).toMatchObject([{
+      boneIndex: 0, position: [0.25, 0, 0], textureIndices: [1], materialIndices: [0],
+      edgesPerSecond: 32, gravity: -2.5, rows: 1, columns: 1,
+      priorityPlane: 3, color: { globalSequence: -1 }, alpha: { globalSequence: -1 },
+    }]);
+    expect(parseNativeM2(source, 4329984).ribbons[0].edgeLifetime).toBeCloseTo(0.4);
+    view.setUint16(MODEL_BASE + 0x2ec0, 99, true);
+    expect(() => parseNativeM2(source, 4329984)).toThrow(/FileDataID 4329984.*ribbon 0.*texture.*bounds/i);
   });
 });
 
@@ -431,5 +465,19 @@ describe("pinned Ancestral Swiftness mesh", () => {
     expect(skin.vertexLookup).toHaveLength(612);
     expect(skin.indices).toHaveLength(2700);
     expect(skin.batches).toEqual([expect.objectContaining({ shaderId: 0x4014, textureCount: 2, materialIndex: 0 })]);
+  });
+});
+
+describe("original Lava Burst ribbon source", () => {
+  it("measures three 0xb0-byte records and resolves authored materials and tracks", () => {
+    const bytes = readFileSync(resolve(process.cwd(), "public/model/native-effects/4329984.m2"));
+    const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    const model = parseNativeM2(source, 4329984);
+    expect(model.ribbons).toHaveLength(3);
+    expect(model.ribbons.map((ribbon) => ribbon.boneIndex)).toEqual([14, 15, 16]);
+    expect(model.ribbons.map((ribbon) => ribbon.textureIndices)).toEqual([[12, 13, 4], [12, 1, 14], [12, 1, 14]]);
+    expect(model.ribbons.map((ribbon) => model.materials[ribbon.materialIndices[0]].blendMode)).toEqual([4, 2, 2]);
+    expect(model.ribbons.map((ribbon) => ribbon.edgesPerSecond)).toEqual([1, 32, 32]);
+    expect(model.vertices).toHaveLength(0);
   });
 });

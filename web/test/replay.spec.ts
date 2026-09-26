@@ -484,14 +484,14 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 
   await seek.fill("1.1");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4006618,3980244/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const lavaFrame = await canvas.screenshot();
   await seek.fill("3.85");
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /6211618,1571475/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await seek.fill("1.1");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4006618,3980244/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
   expect((await canvas.screenshot()).equals(lavaFrame)).toBe(true);
   await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText("FileDataID 4006621: 8 of 9 authored emitters; emitter 4: refraction unsupported");
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
@@ -635,6 +635,34 @@ test("loads only a selected Lava Burst trace and fails the whole kit when its or
   expect(requests.some((url) => url.endsWith("/model/native-effects/613807.m2"))).toBe(false);
 });
 
+test("renders and scrubs the original Lava Burst ribbon missile mid-flight", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as { sim: { players: Array<{ collected_data: {
+      action_sequence: Array<{ id?: number }>;
+      action_sequence_precombat: Array<unknown>;
+    } }> } };
+    const sequence = fixture.sim.players[0].collected_data;
+    sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === 51505)!];
+    sequence.action_sequence_precombat = [];
+    await route.fulfill({ response, json: fixture });
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("4329984", { timeout: 30_000 });
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const canvas = scene.locator("canvas");
+  await seek.fill("1.55");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "4");
+  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
+  await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("ribbon 0:");
+  const screenshot = await canvas.screenshot({ path: "/private/tmp/claude-501/-Users-wontak-Desktop-project-wow-sim/97be1d9b-4b69-45f8-adf6-d63036334aa9/scratchpad/replay-12/lava-burst-midflight.png" });
+  await seek.fill("2.1");
+  expect((await canvas.screenshot()).equals(screenshot)).toBe(false);
+  await seek.fill("1.55");
+  expect((await canvas.screenshot()).equals(screenshot)).toBe(true);
+});
+
 test("moves both source-linked original components on the authoritative Elemental Blast replay", async ({ page }) => {
   const runtimeRequests: string[] = [];
   const pageErrors: string[] = [];
@@ -655,13 +683,13 @@ test("moves both source-linked original components on the authoritative Elementa
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   await seek.fill("19.52");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "8");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const earlySourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
   const earlyFrame = await canvas.screenshot();
 
   await seek.fill("19.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "5");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "6");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const laterSourceX = Number(await canvas.getAttribute("data-replay-native-latest-source-x"));
   const laterFrame = await canvas.screenshot();
@@ -669,14 +697,14 @@ test("moves both source-linked original components on the authoritative Elementa
   expect(laterFrame.equals(earlyFrame)).toBe(false);
 
   await seek.fill("19.52");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "8");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
 
   await scene.getByRole("button", { name: "Manual preview" }).click();
   await expect(canvas).toHaveAttribute("data-replay-native-components", "0");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(false);
   await scene.getByRole("button", { name: "Replay sync" }).click();
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "7");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "8");
   expect((await canvas.screenshot()).equals(earlyFrame)).toBe(true);
 
   for (const fileDataId of [794788, 397894, 796153, 243229, 669041, 613807, 613804, 613805, 613806, 167020, 167034]) {
@@ -779,7 +807,7 @@ test("applies the latest replay cursor after both original components load late"
   const canvas = scene.locator("canvas");
   await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "5");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "6");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 });
 
@@ -800,7 +828,7 @@ test("keeps replay effects hidden when a delayed composite load finishes in manu
   await scene.getByRole("button", { name: "Replay sync" }).click();
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("12 of 12 authored emitters ready", { timeout: 30_000 });
   await scene.getByRole("slider", { name: "Seek playback" }).fill("19.85");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "5");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "6");
 });
 
 test("renders both original M2 components with deterministic isolated native transport", async ({ page }) => {

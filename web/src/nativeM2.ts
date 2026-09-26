@@ -73,6 +73,28 @@ export interface NativeParticleEmitter {
   alphaCutoff: NativeParticleTrack<number>;
 }
 
+export interface NativeRibbonEmitter {
+  index: number;
+  boneIndex: number;
+  position: Vector3Tuple;
+  textureIndices: number[];
+  materialIndices: number[];
+  color: NativeTrack<Vector3Tuple>;
+  alpha: NativeTrack<number>;
+  heightAbove: NativeTrack<number>;
+  heightBelow: NativeTrack<number>;
+  edgesPerSecond: number;
+  edgeLifetime: number;
+  gravity: number;
+  rows: number;
+  columns: number;
+  textureSlot: NativeTrack<number>;
+  enabled: NativeTrack<number>;
+  priorityPlane: number;
+  colorIndex: number;
+  textureTransformLookupIndex: number;
+}
+
 export interface NativeMeshVertex {
   position: Vector3Tuple;
   boneWeights: [number, number, number, number];
@@ -126,6 +148,7 @@ export interface NativeM2Model {
   textureTransformLookup: number[];
   bones: NativeBone[];
   emitters: NativeParticleEmitter[];
+  ribbons: NativeRibbonEmitter[];
 }
 
 interface ArrayDescriptor {
@@ -133,13 +156,14 @@ interface ArrayDescriptor {
   offset: number;
 }
 
-type TrackValueKind = "float" | "vector3" | "quaternion" | "uint8" | "gravity" | "fixed16";
+type TrackValueKind = "float" | "vector3" | "quaternion" | "uint8" | "uint16" | "gravity" | "fixed16";
 type ParticleValueKind = "vector3" | "fixed16" | "vector2" | "uint16";
 
 const PARTICLE_STRIDE = 0x1ec;
 const BONE_STRIDE = 0x58;
+const RIBBON_STRIDE = 0xb0;
 const SUPPORTED_PARTICLE_FLAGS =
-  0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400 | 0x10000 | 0x20000 | 0x80000 | 0x100000 | 0x200000 | 0x800000 | 0x2000000 | 0x4000000 | 0x10000000 | 0x20000000 | 0x40000000;
+  0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400 | 0x8000 | 0x10000 | 0x20000 | 0x80000 | 0x100000 | 0x200000 | 0x800000 | 0x2000000 | 0x4000000 | 0x10000000 | 0x20000000 | 0x40000000;
 
 function fourCc(source: Uint8Array, offset: number) {
   return String.fromCharCode(...source.subarray(offset, offset + 4));
@@ -265,6 +289,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     if (kind === "vector3") return 12;
     if (kind === "quaternion") return 8;
     if (kind === "uint8") return 1;
+    if (kind === "uint16") return 2;
     if (kind === "fixed16") return 2;
     return 4;
   };
@@ -302,6 +327,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
         if (kind === "vector3") return getVector3(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "quaternion") return parseQuaternion(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "uint8") return source.getUint8(absolute(valueOffset, 1, `${fieldLabel} value`)) as T;
+        if (kind === "uint16") return getUint16(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "fixed16") return Math.max(0, getInt16(valueOffset, `${fieldLabel} value`) / 32767) as T;
         return parseCompressedGravity(valueOffset, `${fieldLabel} value`) as T;
       });
@@ -459,7 +485,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   const textureWeightLookup = readUint16Array(0x90, "texture weight lookup");
   const textureTransformLookup = readUint16Array(0x98, "texture transform lookup", true);
   const ribbonRecords = readArray(0x120, "ribbons");
-  if (ribbonRecords.count !== 0) throw new Error(`${label}: ribbon emitters are outside this component proof.`);
+  checkArray(ribbonRecords, RIBBON_STRIDE, "ribbons");
+  if (ribbonRecords.count > 256) throw new Error(`${label}: ribbon count ${ribbonRecords.count} is unreasonable.`);
 
   const boneRecords = readArray(0x2c, "bones");
   checkArray(boneRecords, BONE_STRIDE, "bones");
@@ -476,6 +503,46 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       rotation: parseTrack(offset + 0x24, `bone ${index} rotation`, "quaternion"),
       scale: parseTrack(offset + 0x38, `bone ${index} scale`, "vector3"),
       pivot: getVector3(offset + 0x4c, `bone ${index} pivot`),
+    };
+  });
+
+  const ribbons = Array.from({ length: ribbonRecords.count }, (_, index): NativeRibbonEmitter => {
+    const offset = ribbonRecords.offset + index * RIBBON_STRIDE;
+    const ribbonLabel = `ribbon ${index}`;
+    const textureIndices = readArray(offset + 0x14, `${ribbonLabel} textures`);
+    const materialIndices = readArray(offset + 0x1c, `${ribbonLabel} materials`);
+    checkArray(textureIndices, 2, `${ribbonLabel} textures`);
+    checkArray(materialIndices, 2, `${ribbonLabel} materials`);
+    const readIndices = (descriptor: ArrayDescriptor, field: string) => Array.from({ length: descriptor.count }, (_, item) =>
+      getUint16(descriptor.offset + item * 2, `${ribbonLabel} ${field} ${item}`));
+    const textures = readIndices(textureIndices, "texture");
+    const materialsUsed = readIndices(materialIndices, "material");
+    if (textures.length === 0 || textures.some((value) => value >= textureFileDataIds.length)) {
+      throw new Error(`${label}: ${ribbonLabel} texture index is outside texture bounds.`);
+    }
+    if (materialsUsed.length === 0 || materialsUsed.some((value) => value >= materials.length)) {
+      throw new Error(`${label}: ${ribbonLabel} material index is outside material bounds.`);
+    }
+    const boneIndex = getUint32(offset + 4, `${ribbonLabel} bone`);
+    if (boneIndex >= bones.length) throw new Error(`${label}: ${ribbonLabel} bone ${boneIndex} is outside bone bounds.`);
+    const rows = getUint16(offset + 0x80, `${ribbonLabel} rows`);
+    const columns = getUint16(offset + 0x82, `${ribbonLabel} columns`);
+    if (rows === 0 || columns === 0) throw new Error(`${label}: ${ribbonLabel} has an empty texture grid.`);
+    return {
+      index, boneIndex, position: getVector3(offset + 8, `${ribbonLabel} position`),
+      textureIndices: textures, materialIndices: materialsUsed,
+      color: parseTrack(offset + 0x24, `${ribbonLabel} color`, "vector3"),
+      alpha: parseTrack(offset + 0x38, `${ribbonLabel} alpha`, "fixed16"),
+      heightAbove: parseTrack(offset + 0x4c, `${ribbonLabel} height above`, "float"),
+      heightBelow: parseTrack(offset + 0x60, `${ribbonLabel} height below`, "float"),
+      edgesPerSecond: getFloat32(offset + 0x74, `${ribbonLabel} edges per second`),
+      edgeLifetime: getFloat32(offset + 0x78, `${ribbonLabel} edge lifetime`),
+      gravity: getFloat32(offset + 0x7c, `${ribbonLabel} gravity`), rows, columns,
+      textureSlot: parseTrack(offset + 0x84, `${ribbonLabel} texture slot`, "uint16"),
+      enabled: parseTrack(offset + 0x98, `${ribbonLabel} enabled`, "uint8"),
+      priorityPlane: getInt16(offset + 0xac, `${ribbonLabel} priority plane`),
+      colorIndex: source.getInt8(absolute(offset + 0xae, 1, `${ribbonLabel} color index`)),
+      textureTransformLookupIndex: source.getInt8(absolute(offset + 0xaf, 1, `${ribbonLabel} texture transform lookup index`)),
     };
   });
 
@@ -653,6 +720,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     textureTransformLookup,
     bones,
     emitters,
+    ribbons,
   };
 }
 

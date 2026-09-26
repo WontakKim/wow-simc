@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
   AdditiveBlending,
   BufferAttribute,
+  BufferGeometry,
   DoubleSide,
   MeshBasicMaterial,
   RepeatWrapping,
@@ -27,6 +28,34 @@ function loadAsset(fileDataId: number, extension: "m2" | "blp" | "skin") {
   const bytes = readFileSync(path);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
+
+describe("original Lava Burst ribbon rendering", () => {
+  it("draws bounded original ribbon geometry with M2BLEND material modes and deterministic scrubbing", () => {
+    const model = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures, 2);
+    const ribbons = effect.group.children.slice(-3) as Mesh<BufferGeometry, ShaderMaterial>[];
+    expect(ribbons.map((mesh) => mesh.material.blending)).toEqual([AdditiveBlending, NormalBlending, NormalBlending]);
+    const instance = { timeSeconds: 0.415, emissionEndSeconds: 0.8, modelScale: 0.38,
+      sourceTranslationAtTime: (time: number): [number, number, number] => [-4 + time * 10, 0, 0] };
+    const camera = new PerspectiveCamera();
+    effect.setReplayInstances([instance], camera);
+    expect(ribbons.every((mesh) => mesh.geometry.drawRange.count > 0)).toBe(true);
+    expect(Array.from(ribbons[1].geometry.index!.array).slice(0, 12)).toEqual([0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4]);
+    const first = ribbons.map((mesh) => ({ count: mesh.geometry.drawRange.count,
+      positions: Array.from(mesh.geometry.getAttribute("position").array),
+      indices: Array.from(mesh.geometry.index!.array) }));
+    effect.setReplayInstances([{ ...instance, timeSeconds: 0.7 }], camera);
+    effect.setReplayInstances([instance], camera);
+    expect(ribbons.map((mesh) => ({ count: mesh.geometry.drawRange.count,
+      positions: Array.from(mesh.geometry.getAttribute("position").array),
+      indices: Array.from(mesh.geometry.index!.array) }))).toEqual(first);
+    expect(() => effect.setReplayInstances([instance, instance, instance], camera)).toThrow(/FileDataID 4329984.*3 simultaneous.*2-instance/i);
+    effect.clearInstances();
+    expect(ribbons.every((mesh) => mesh.geometry.drawRange.count === 0)).toBe(true);
+    effect.dispose();
+  });
+});
 
 describe("NativeParticleEffect source rendering", () => {
   it.each([794788, 613807])("uses authored blend modes and shader-safe scaled billboards for FileDataID %i", (fileDataId) => {

@@ -111,10 +111,10 @@ describe("new original preview BLP assets", () => {
     asset.fileDataId !== 4290517 && asset.fileDataId !== 794788 && asset.fileDataId !== 613807).flatMap((asset) =>
     asset.textures.map((texture) => texture.fileDataId)))];
 
-  it("decodes all 44 pinned original textures as BC1 or BC3", async () => {
+  it("decodes all 48 pinned original textures as BC1 or BC3", async () => {
     const { readFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");
-    expect(textureIds).toHaveLength(44);
+    expect(textureIds).toHaveLength(48);
     const compressionCounts = { BC1: 0, BC3: 0 };
     for (const fileDataId of textureIds) {
       const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${fileDataId}.blp`));
@@ -123,7 +123,7 @@ describe("new original preview BLP assets", () => {
       expect(image.width * image.height * 4).toBe(image.pixels.length);
       compressionCounts[image.compression] += 1;
     }
-    expect(compressionCounts).toEqual({ BC1: 6, BC3: 38 });
+    expect(compressionCounts).toEqual({ BC1: 6, BC3: 42 });
   });
 
   it("decodes the seven newly pinned original mesh textures without replacing the shared eighth", async () => {
