@@ -28,7 +28,7 @@ export interface NativeParticleEmitter {
   position: Vector3Tuple;
   boneIndex: number;
   textureIndices: number[];
-  blendingType: 2 | 4 | 7;
+  blendingType: number;
   emitterType: 1 | 2;
   priorityPlane: number;
   rows: number;
@@ -65,12 +65,16 @@ export interface NativeParticleEmitter {
   tumbleMaximum: Vector3Tuple;
   windVector: Vector3Tuple;
   windTime: number;
+  multiTextureParam0: [Vector2Tuple, Vector2Tuple];
+  multiTextureParam1: [Vector2Tuple, Vector2Tuple];
+  multiTextureScale: [number, number];
   followSpeed1: number;
   followScale1: number;
   followSpeed2: number;
   followScale2: number;
   enabled: NativeTrack<number>;
   alphaCutoff: NativeParticleTrack<number>;
+  exp2?: { zSource: number; colorMultiplier: number; alphaMultiplier: number };
 }
 
 export interface NativeRibbonEmitter {
@@ -133,7 +137,8 @@ export interface NativeM2Model {
   globalSequenceDurationsMs: number[];
   extensionChunks: string[];
   dboc?: { floats: [number, number]; integers: [number, number] };
-  textureControlEntries: Array<[number, number]>;
+  materialTextureControls: Array<[number, number]>;
+  particleTextureControls: Array<[number, number]>;
   sequenceDurationMs: number;
   textureFileDataIds: number[];
   textureFlags: number[];
@@ -157,12 +162,25 @@ interface ArrayDescriptor {
   offset: number;
 }
 
-type TrackValueKind = "float" | "vector3" | "quaternion" | "uint8" | "uint16" | "gravity" | "fixed16";
+type TrackValueKind = "float" | "vector3" | "quaternion" | "quaternionFloat" | "uint8" | "uint16" | "gravity" | "fixed16";
 type ParticleValueKind = "vector3" | "fixed16" | "vector2" | "uint16";
 
 const PARTICLE_STRIDE = 0x1ec;
 const BONE_STRIDE = 0x58;
 const RIBBON_STRIDE = 0xb0;
+
+/**
+ * Secondary/tertiary UV scroll speeds are authored as sign-magnitude fixed-point
+ * 6.9 values: the top bit is a sign flag and the low 15 bits hold 1/512 units.
+ */
+export function decodeFixed6Point9(raw: number) {
+  return (raw & 0x8000 ? -1 : 1) * (raw & 0x7fff) / 512;
+}
+
+/** Multi-texture scale bytes pack a 5-bit fraction (1/32 units) below a 3-bit integer part. */
+export function decodeMultiTextureScale(raw: number) {
+  return (raw & 0x1f) / 32 + (raw >> 5);
+}
 const SUPPORTED_PARTICLE_FLAGS =
   0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400 | 0x8000 | 0x10000 | 0x20000 | 0x80000 | 0x100000 | 0x200000 | 0x800000 | 0x2000000 | 0x4000000 | 0x8000000 | 0x10000000 | 0x20000000 | 0x40000000;
 
@@ -289,6 +307,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   const trackValueSize = (kind: TrackValueKind) => {
     if (kind === "vector3") return 12;
     if (kind === "quaternion") return 8;
+    if (kind === "quaternionFloat") return 16;
     if (kind === "uint8") return 1;
     if (kind === "uint16") return 2;
     if (kind === "fixed16") return 2;
@@ -327,6 +346,12 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
         if (kind === "float") return getFloat32(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "vector3") return getVector3(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "quaternion") return parseQuaternion(valueOffset, `${fieldLabel} value`) as T;
+        if (kind === "quaternionFloat") return [
+          getFloat32(valueOffset, `${fieldLabel}.x`),
+          getFloat32(valueOffset + 4, `${fieldLabel}.y`),
+          getFloat32(valueOffset + 8, `${fieldLabel}.z`),
+          getFloat32(valueOffset + 12, `${fieldLabel}.w`),
+        ] as T;
         if (kind === "uint8") return source.getUint8(absolute(valueOffset, 1, `${fieldLabel} value`)) as T;
         if (kind === "uint16") return getUint16(valueOffset, `${fieldLabel} value`) as T;
         if (kind === "fixed16") return Math.max(0, getInt16(valueOffset, `${fieldLabel} value`) / 32767) as T;
@@ -388,16 +413,10 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     }
     return { chunk, count, offset };
   };
-  const readExtendedParticleTrack = (index: number): NativeParticleTrack<number> => {
+  const readExp2Record = (index: number): { exp2: { zSource: number; colorMultiplier: number; alphaMultiplier: number }; alphaCutoff: NativeParticleTrack<number> } | undefined => {
     const array = readChunkArray("EXP2", 0, 28, particleRecords.count);
-    if (!array) return { timestamps: [], values: [] };
+    if (!array) return undefined;
     const base = array.chunk.offset + array.offset + index * 28;
-    const zSource = source.getFloat32(base, true);
-    const colorMultiplier = source.getFloat32(base + 4, true);
-    const alphaMultiplier = source.getFloat32(base + 8, true);
-    if (zSource !== 0 || colorMultiplier !== 1 || alphaMultiplier !== 1) {
-      throw new Error(`${label}: emitter ${index} EXP2 zSource/color/alpha multipliers require unsupported values ${zSource}/${colorMultiplier}/${alphaMultiplier}.`);
-    }
     const timeCount = source.getUint32(base + 12, true);
     const timeOffset = source.getUint32(base + 16, true);
     const valueCount = source.getUint32(base + 20, true);
@@ -408,9 +427,16 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       throw new Error(`${label}: emitter ${index} EXP2 alpha cutoff track is outside chunk bounds.`);
     }
     return {
-      timestamps: Array.from({ length: timeCount }, (_, key) => source.getUint16(array.chunk.offset + timeOffset + key * 2, true)),
-      values: Array.from({ length: valueCount }, (_, key) =>
-        Math.max(0, source.getInt16(array.chunk.offset + valueOffset + key * 2, true) / 32767)),
+      exp2: {
+        zSource: source.getFloat32(base, true),
+        colorMultiplier: source.getFloat32(base + 4, true),
+        alphaMultiplier: source.getFloat32(base + 8, true),
+      },
+      alphaCutoff: {
+        timestamps: Array.from({ length: timeCount }, (_, key) => source.getUint16(array.chunk.offset + timeOffset + key * 2, true)),
+        values: Array.from({ length: valueCount }, (_, key) =>
+          Math.max(0, source.getInt16(array.chunk.offset + valueOffset + key * 2, true) / 32767)),
+      },
     };
   };
 
@@ -478,7 +504,7 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   checkArray(transformsRecord, 60, "texture transforms");
   const textureTransforms = Array.from({ length: transformsRecord.count }, (_, index) => ({
     translation: parseTrack<Vector3Tuple>(transformsRecord.offset + index * 60, `texture transform ${index} translation`, "vector3"),
-    rotation: parseTrack<QuaternionTuple>(transformsRecord.offset + index * 60 + 20, `texture transform ${index} rotation`, "quaternion"),
+    rotation: parseTrack<QuaternionTuple>(transformsRecord.offset + index * 60 + 20, `texture transform ${index} rotation`, "quaternionFloat"),
     scale: parseTrack<Vector3Tuple>(transformsRecord.offset + index * 60 + 40, `texture transform ${index} scale`, "vector3"),
   }));
   const textureLookup = readUint16Array(0x80, "texture lookup");
@@ -548,15 +574,26 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
   });
 
   const particleRecords = readArray(0x128, "particle emitters");
+  // TXAC pairs are material entries first, then particle entries, in chunk order.
   const textureAlphaChunk = chunks.get("TXAC");
-  if (textureAlphaChunk && (textureAlphaChunk.size < particleRecords.count * 2 || textureAlphaChunk.size % 2 !== 0)) {
-    throw new Error(`${label}: TXAC particle entries are fewer than ${particleRecords.count} emitters or not aligned.`);
-  }
-  const textureControlEntries: Array<[number, number]> = textureAlphaChunk
-    ? Array.from({ length: textureAlphaChunk.size / 2 }, (_, index) => [
+  let materialTextureControls: Array<[number, number]> = [];
+  let particleTextureControls: Array<[number, number]> = [];
+  if (textureAlphaChunk) {
+    if (textureAlphaChunk.size % 2 !== 0) {
+      throw new Error(`${label}: TXAC chunk size is not aligned to pairs.`);
+    }
+    const pairs = textureAlphaChunk.size / 2;
+    const requiredPairs = materials.length + particleRecords.count;
+    if (pairs < requiredPairs) {
+      throw new Error(`${label}: TXAC must hold ${materials.length} material and ${particleRecords.count} particle entries (${requiredPairs} pairs); found ${pairs}.`);
+    }
+    const readPair = (index: number): [number, number] => [
       source.getUint8(textureAlphaChunk.offset + index * 2),
       source.getUint8(textureAlphaChunk.offset + index * 2 + 1),
-    ]) : [];
+    ];
+    materialTextureControls = Array.from({ length: materials.length }, (_, index) => readPair(index));
+    particleTextureControls = Array.from({ length: particleRecords.count }, (_, index) => readPair(materials.length + index));
+  }
   const particleGeosets = readChunkArray("PGD1", 0, 2, particleRecords.count);
   if (particleGeosets) {
     for (let index = 0; index < particleRecords.count; index += 1) {
@@ -600,18 +637,18 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       throw new Error(`${label}: ${emitterLabel} model particles are unsupported.`);
     }
     const textureId = getUint16(offset + 0x16, `${emitterLabel} texture ID`);
-    const textureIndices = [textureId & 0x1f, (textureId >> 5) & 0x1f, (textureId >> 10) & 0x1f];
     const usesMultipleTextures = (flags & 0x10000000) !== 0;
-    if (!usesMultipleTextures && (textureIndices[1] !== 0 || textureIndices[2] !== 0)) {
-      throw new Error(`${label}: ${emitterLabel} has multi-texture indices without the multi-texture flag.`);
-    }
-    for (const textureIndex of usesMultipleTextures ? textureIndices : textureIndices.slice(0, 1)) {
+    // With the MultiTexture flag the uint16 packs three 5-bit texture indices; without it the full uint16 is one index.
+    const textureIndices = usesMultipleTextures
+      ? [textureId & 0x1f, (textureId >> 5) & 0x1f, (textureId >> 10) & 0x1f]
+      : [textureId];
+    for (const textureIndex of textureIndices) {
       if (textureIndex >= textureFileDataIds.length) {
         throw new Error(`${label}: ${emitterLabel} texture index ${textureIndex} is outside TXID bounds.`);
       }
     }
     const blendingType = source.getUint8(absolute(offset + 0x28, 1, `${emitterLabel} blend`));
-    if (blendingType !== 2 && blendingType !== 4 && blendingType !== 7) {
+    if (blendingType > 7) {
       throw new Error(`${label}: ${emitterLabel} blend ${blendingType} is unsupported.`);
     }
     const emitterType = source.getUint8(absolute(offset + 0x29, 1, `${emitterLabel} type`));
@@ -645,13 +682,25 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       }
     }
     const zSource = parseTrack<number>(offset + 0xf0, `${emitterLabel} zSource`, "float");
+    const readUvParamPair = (base: number): Vector2Tuple => [
+      decodeFixed6Point9(getUint16(base, `${emitterLabel} multi-texture scroll`)),
+      decodeFixed6Point9(getUint16(base + 2, `${emitterLabel} multi-texture scroll`)),
+    ];
+    const readMultiTextureParam = (base: number): [Vector2Tuple, Vector2Tuple] => [readUvParamPair(base), readUvParamPair(base + 4)];
+    const multiTextureParam0 = readMultiTextureParam(offset + 0x1dc);
+    const multiTextureParam1 = readMultiTextureParam(offset + 0x1e4);
+    const multiTextureScale: [number, number] = [
+      decodeMultiTextureScale(source.getUint8(absolute(offset + 0x2c, 1, `${emitterLabel} multi-texture scale 0`))),
+      decodeMultiTextureScale(source.getUint8(absolute(offset + 0x2d, 1, `${emitterLabel} multi-texture scale 1`))),
+    ];
+    const exp2Record = readExp2Record(index);
 
     return {
       index,
       flags,
       position: getVector3(offset + 8, `${emitterLabel} position`),
       boneIndex: getUint16(offset + 0x14, `${emitterLabel} bone`),
-      textureIndices: usesMultipleTextures ? textureIndices : [textureIndices[0]],
+      textureIndices,
       blendingType,
       emitterType,
       priorityPlane: getInt16(offset + 0x2e, `${emitterLabel} priority plane`),
@@ -666,8 +715,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       lifespanVariation: getFloat32(offset + 0xac, `${emitterLabel} lifespan variation`),
       emissionRate: parseTrack(offset + 0xb0, `${emitterLabel} emissionRate`, "float"),
       emissionRateVariation: getFloat32(offset + 0xc4, `${emitterLabel} emission rate variation`),
-      emissionAreaWidth: parseTrack(offset + 0xc8, `${emitterLabel} emissionAreaWidth`, "float"),
-      emissionAreaLength: parseTrack(offset + 0xdc, `${emitterLabel} emissionAreaLength`, "float"),
+      emissionAreaLength: parseTrack(offset + 0xc8, `${emitterLabel} emissionAreaLength`, "float"),
+      emissionAreaWidth: parseTrack(offset + 0xdc, `${emitterLabel} emissionAreaWidth`, "float"),
       zSource,
       color: parseParticleTrack(offset + 0x104, `${emitterLabel} color`, "vector3"),
       alpha: parseParticleTrack(offset + 0x114, `${emitterLabel} alpha`, "fixed16"),
@@ -689,12 +738,16 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
       tumbleMaximum,
       windVector: getVector3(offset + 0x1a0, `${emitterLabel} wind`),
       windTime: getFloat32(offset + 0x1ac, `${emitterLabel} wind time`),
+      multiTextureParam0,
+      multiTextureParam1,
+      multiTextureScale,
       followSpeed1: getFloat32(offset + 0x1b0, `${emitterLabel} follow speed 1`),
       followScale1: getFloat32(offset + 0x1b4, `${emitterLabel} follow scale 1`),
       followSpeed2: getFloat32(offset + 0x1b8, `${emitterLabel} follow speed 2`),
       followScale2: getFloat32(offset + 0x1bc, `${emitterLabel} follow scale 2`),
       enabled: parseTrack(offset + 0x1c8, `${emitterLabel} enabled`, "uint8"),
-      alphaCutoff: readExtendedParticleTrack(index),
+      alphaCutoff: exp2Record?.alphaCutoff ?? { timestamps: [], values: [] },
+      exp2: exp2Record?.exp2,
     };
   });
 
@@ -713,7 +766,8 @@ export function parseNativeM2(sourceBuffer: ArrayBuffer, fileDataId: number): Na
     globalSequenceDurationsMs,
     extensionChunks: [...chunks.keys()].filter((tag) => !["MD21", "SFID", "TXID"].includes(tag)),
     dboc,
-    textureControlEntries,
+    materialTextureControls,
+    particleTextureControls,
     textureFileDataIds,
     textureFlags,
     skinFileDataIds,
@@ -763,8 +817,9 @@ export function parseNativeSkin(sourceBuffer: ArrayBuffer, fileDataId: number, v
   if (indices.some((index) => index >= vertexLookup.length)) throw new Error(`${label}: triangle index is outside SKIN vertex bounds.`);
   const sections = Array.from({ length: sectionArray.count }, (_, index) => {
     const offset = sectionArray.start + index * 0x30;
+    // The section level widens only the triangle index start, never the vertex start.
     const level = view.getUint16(offset + 2, true);
-    const vertexStart = view.getUint16(offset + 4, true) + level * 65536;
+    const vertexStart = view.getUint16(offset + 4, true);
     const vertexCountInSection = view.getUint16(offset + 6, true);
     const indexStart = view.getUint16(offset + 8, true) + level * 65536;
     const indexCount = view.getUint16(offset + 10, true);

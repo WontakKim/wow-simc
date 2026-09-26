@@ -1,22 +1,18 @@
 import {
-  AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
   Camera,
   Color,
   ClampToEdgeWrapping,
-  CustomBlending,
   DataTexture,
   DoubleSide,
   DynamicDrawUsage,
+  FrontSide,
   Group,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   LinearFilter,
   Mesh,
-  NormalBlending,
-  OneFactor,
-  OneMinusSrcAlphaFactor,
   RGBAFormat,
   RepeatWrapping,
   ShaderMaterial,
@@ -28,6 +24,7 @@ import {
 import { decodeNativeBlp } from "./nativeBlp";
 import type { NativeEffectAsset } from "./nativeEffectAssets";
 import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticleEmitter, type NativeRibbonEmitter, type NativeSkinProfile, type Vector3Tuple } from "./nativeM2";
+import { m2BlendParams, m2ParticleAlphaThreshold, m2RenderFlags, selectParticlePixelShader } from "./nativeM2Blend";
 import { applyBonePoint, sampleNativeEmitter, sampleNativeSkinnedNormal, sampleNativeSkinnedVertex, sampleNativeTrack, type NativeParticleSample } from "./nativeParticles";
 
 const ASSET_ROOT = "/model/native-effects";
@@ -59,6 +56,8 @@ interface EmitterBatch {
   uvRects: InstancedBufferAttribute;
   velocities: InstancedBufferAttribute;
   alphaCutoffs: InstancedBufferAttribute;
+  uvScrolls1: InstancedBufferAttribute;
+  uvScrolls2: InstancedBufferAttribute;
   capacity: number;
 }
 
@@ -91,7 +90,8 @@ function createTexture(decoded: ReturnType<typeof decodeNativeBlp>) {
 
 function createEmitterBatch(
   emitter: NativeParticleEmitter,
-  texture: DataTexture,
+  textures: DataTexture[],
+  pixelShader: 0 | 1 | 2,
   maximumInstanceCount: number,
 ): EmitterBatch {
   const capacity = emitterCapacity(emitter) * maximumInstanceCount;
@@ -117,6 +117,8 @@ function createEmitterBatch(
   const uvRects = new InstancedBufferAttribute(new Float32Array(capacity * 4), 4).setUsage(DynamicDrawUsage);
   const velocities = new InstancedBufferAttribute(new Float32Array(capacity * 3), 3).setUsage(DynamicDrawUsage);
   const alphaCutoffs = new InstancedBufferAttribute(new Float32Array(capacity), 1).setUsage(DynamicDrawUsage);
+  const uvScrolls1 = new InstancedBufferAttribute(new Float32Array(capacity * 2), 2).setUsage(DynamicDrawUsage);
+  const uvScrolls2 = new InstancedBufferAttribute(new Float32Array(capacity * 2), 2).setUsage(DynamicDrawUsage);
   geometry.setAttribute("instanceOffset", offsets);
   geometry.setAttribute("instanceSize", sizes);
   geometry.setAttribute("instanceColor", colors);
@@ -124,12 +126,37 @@ function createEmitterBatch(
   geometry.setAttribute("instanceUvRect", uvRects);
   geometry.setAttribute("instanceVelocity", velocities);
   geometry.setAttribute("instanceAlphaCutoff", alphaCutoffs);
+  geometry.setAttribute("instanceUvScroll1", uvScrolls1);
+  geometry.setAttribute("instanceUvScroll2", uvScrolls2);
   geometry.instanceCount = 0;
 
   const velocityOriented = (emitter.flags & 0x4) !== 0;
-  const alphaCutoff = emitter.blendingType === 4 ? "0.0039215686" : "0.0";
+  // PS1 (2ColorTex_3AlphaTex) and PS2 (3ColorTex_3AlphaTex) sample all three
+  // authored textures; the flipbook rect keeps applying to the primary UV only.
+  const usesMultiTexture = pixelShader > 0;
+  const combiner = pixelShader === 2
+    ? "vec4 combined = tex1 * tex2 * tex3 * particleColor;"
+    : pixelShader === 1
+      ? `vec4 combined = vec4(tex1.rgb * tex2.rgb * particleColor.rgb,
+        tex1.a * tex2.a * tex3.a * particleColor.a);`
+      : "vec4 combined = tex1 * particleColor;";
+  const blend = m2BlendParams(emitter.blendingType);
   const material = new ShaderMaterial({
-    uniforms: { map: { value: texture } },
+    uniforms: {
+      map: { value: textures[emitter.textureIndices[0]] },
+      ...(usesMultiTexture ? {
+        map2: { value: textures[emitter.textureIndices[1]] },
+        map3: { value: textures[emitter.textureIndices[2]] },
+      } : {}),
+      uPixelShader: { value: pixelShader },
+      uAlphaTest: { value: m2ParticleAlphaThreshold(emitter.blendingType) },
+      uColorMult: { value: emitter.exp2?.colorMultiplier ?? 1 },
+      uAlphaMult: { value: emitter.exp2?.alphaMultiplier ?? 1 },
+      ...(usesMultiTexture ? {
+        uMultiTexScale1: { value: emitter.multiTextureScale[0] },
+        uMultiTexScale2: { value: emitter.multiTextureScale[1] },
+      } : {}),
+    },
     vertexShader: `
       attribute vec3 instanceOffset;
       attribute vec2 instanceSize;
@@ -138,8 +165,13 @@ function createEmitterBatch(
       attribute vec4 instanceUvRect;
       attribute vec3 instanceVelocity;
       attribute float instanceAlphaCutoff;
+      attribute vec2 instanceUvScroll1;
+      attribute vec2 instanceUvScroll2;
+      uniform float uMultiTexScale1;
+      uniform float uMultiTexScale2;
       varying float particleAlphaCutoff;
       varying vec2 particleUv;
+      ${usesMultiTexture ? "varying vec2 particleUv2;\n      varying vec2 particleUv3;" : ""}
       varying vec4 particleColor;
       void main() {
         vec2 viewScale = vec2(
@@ -158,36 +190,45 @@ function createEmitterBatch(
         vec4 center = modelViewMatrix * vec4(instanceOffset, 1.0);
         gl_Position = projectionMatrix * (center + vec4(rotated, 0.0, 0.0));
         particleUv = instanceUvRect.xy + uv * instanceUvRect.zw;
+        ${usesMultiTexture ? "particleUv2 = uv * uMultiTexScale1 + instanceUvScroll1;\n        particleUv3 = uv * uMultiTexScale2 + instanceUvScroll2;" : ""}
         particleColor = instanceColor;
         particleAlphaCutoff = instanceAlphaCutoff;
       }
     `,
     fragmentShader: `
       uniform sampler2D map;
+      ${usesMultiTexture ? "uniform sampler2D map2;\n      uniform sampler2D map3;" : ""}
+      uniform float uAlphaTest;
+      uniform float uColorMult;
+      uniform float uAlphaMult;
       varying vec2 particleUv;
+      ${usesMultiTexture ? "varying vec2 particleUv2;\n      varying vec2 particleUv3;" : ""}
       varying vec4 particleColor;
       varying float particleAlphaCutoff;
       void main() {
-        vec4 texel = texture2D(map, particleUv);
-        float alpha = texel.a * particleColor.a;
-        if (alpha <= max(${alphaCutoff}, particleAlphaCutoff)) discard;
-        gl_FragColor = vec4(texel.rgb * particleColor.rgb, alpha);
+        vec4 tex1 = texture2D(map, particleUv);
+        ${usesMultiTexture ? "vec4 tex2 = texture2D(map2, particleUv2);\n        vec4 tex3 = texture2D(map3, particleUv3);" : ""}
+        if (tex1.a < uAlphaTest) discard;
+        ${combiner}
+        if (combined.a < uAlphaTest) discard;
+        if (combined.a < particleAlphaCutoff) discard;
+        gl_FragColor = vec4(combined.rgb * uColorMult, combined.a * uAlphaMult);
         #include <colorspace_fragment>
       }
     `,
     transparent: true,
     depthTest: true,
-    depthWrite: false,
-    blending: emitter.blendingType === 2 ? NormalBlending
-      : emitter.blendingType === 7 ? CustomBlending : AdditiveBlending,
-    blendSrc: emitter.blendingType === 7 ? OneMinusSrcAlphaFactor : undefined,
-    blendDst: emitter.blendingType === 7 ? OneFactor : undefined,
-    blendSrcAlpha: emitter.blendingType === 7 ? OneMinusSrcAlphaFactor : undefined,
-    blendDstAlpha: emitter.blendingType === 7 ? OneFactor : undefined,
+    // The original pipeline only writes depth for the opaque and alpha-key modes.
+    depthWrite: emitter.blendingType <= 1,
+    blending: blend.blending,
+    blendSrc: blend.blendSrc,
+    blendDst: blend.blendDst,
+    blendSrcAlpha: blend.blendSrcAlpha,
+    blendDstAlpha: blend.blendDstAlpha,
     fog: false,
   });
 
-  return { emitter, geometry, material, offsets, sizes, colors, rotations, uvRects, velocities, alphaCutoffs, capacity };
+  return { emitter, geometry, material, offsets, sizes, colors, rotations, uvRects, velocities, alphaCutoffs, uvScrolls1, uvScrolls2, capacity };
 }
 
 function squaredDistance(sample: NativeParticleSample, cameraPosition: Vector3) {
@@ -202,7 +243,6 @@ export class NativeParticleEffect {
   readonly model: NativeM2Model;
   readonly renderedEmitterCount: number;
   readonly unsupportedEmitters: string[];
-  readonly primaryOnlyEmitters: number[];
   private readonly textures: DataTexture[];
   private readonly batches: EmitterBatch[];
   readonly ribbonLimitations: string[];
@@ -233,24 +273,41 @@ export class NativeParticleEffect {
     this.skin = skin;
     if (model.vertices.length > 0 && !skin) throw new Error(`FileDataID ${model.fileDataId}: authored mesh requires a pinned SKIN profile.`);
     if (model.vertices.length === 0 && skin) throw new Error(`FileDataID ${model.fileDataId}: SKIN supplied without authored vertices.`);
-    this.unsupportedEmitters = model.emitters
-      .filter((emitter) => (emitter.flags & 0x100000) !== 0)
-      .map((emitter) => `emitter ${emitter.index}: refraction unsupported`);
-    const renderedEmitters = model.emitters.filter((emitter) => (emitter.flags & 0x100000) === 0);
+    // Reference pixel-shader selection: flags and the particle TXAC entry pick a
+    // combiner per emitter; the nonzero-TXAC UV variant (PS3) and refraction
+    // (PS4) are diagnosed instead of rendered.
+    this.unsupportedEmitters = [];
+    const renderedPixelShaders: Array<0 | 1 | 2> = [];
+    const renderedEmitters: NativeParticleEmitter[] = [];
+    for (const emitter of model.emitters) {
+      const control = model.particleTextureControls[emitter.index];
+      const textureControlValue = control ? control[0] | (control[1] << 8) : 0;
+      const pixelShader = selectParticlePixelShader(emitter.flags, textureControlValue);
+      if (pixelShader === 3) {
+        this.unsupportedEmitters.push(`emitter ${emitter.index}: nonzero TXAC UV shader unsupported`);
+        continue;
+      }
+      if (pixelShader === 4) {
+        this.unsupportedEmitters.push(`emitter ${emitter.index}: refraction unsupported`);
+        continue;
+      }
+      renderedEmitters.push(emitter);
+      renderedPixelShaders.push(pixelShader);
+    }
     if (renderedEmitters.length === 0 && model.ribbons.length === 0 && !skin) {
       throw new Error(`FileDataID ${model.fileDataId}: no supported authored emitters; ${this.unsupportedEmitters.join(", ")}.`);
     }
     this.renderedEmitterCount = renderedEmitters.length;
-    this.primaryOnlyEmitters = renderedEmitters
-      .filter((emitter) => emitter.textureIndices.length > 1
-        && emitter.textureIndices.some((textureId) => textureId !== emitter.textureIndices[0]))
-      .map((emitter) => emitter.index);
     this.maximumInstanceCount = maximumInstanceCount;
     this.textures = decodedTextures.map(createTexture);
-    this.batches = renderedEmitters.map((emitter) => {
-      const texture = this.textures[emitter.textureIndices[0]];
-      if (!texture) throw new Error(`FileDataID ${model.fileDataId}: emitter ${emitter.index} texture is unavailable.`);
-      return createEmitterBatch(emitter, texture, maximumInstanceCount);
+    this.batches = renderedEmitters.map((emitter, batchIndex) => {
+      const textureCount = renderedPixelShaders[batchIndex] > 0 ? emitter.textureIndices.length : 1;
+      for (const textureIndex of emitter.textureIndices.slice(0, textureCount)) {
+        if (!this.textures[textureIndex]) {
+          throw new Error(`FileDataID ${model.fileDataId}: emitter ${emitter.index} texture is unavailable.`);
+        }
+      }
+      return createEmitterBatch(emitter, this.textures, renderedPixelShaders[batchIndex], maximumInstanceCount);
     });
 
     for (const batch of this.batches) {
@@ -272,9 +329,8 @@ export class NativeParticleEffect {
       if ((materialSource.flags & ~0x15d) !== 0) {
         throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} material flags 0x${materialSource.flags.toString(16)} contain unsupported bits.`);
       }
-      if (materialSource.blendMode !== 2 && materialSource.blendMode !== 4) {
-        throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} M2BLEND material ${materialSource.blendMode} is unsupported.`);
-      }
+      const ribbonBlend = m2BlendParams(materialSource.blendMode);
+      const ribbonFlags = m2RenderFlags(materialSource.flags);
       if (!(ribbon.edgesPerSecond > 0) || !(ribbon.edgeLifetime > 0) || !Number.isFinite(ribbon.edgesPerSecond * ribbon.edgeLifetime)) {
         throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} invalid authored edge rate or lifetime.`);
       }
@@ -290,21 +346,28 @@ export class NativeParticleEffect {
       const texture = this.textures[ribbon.textureIndices[0]];
       if (!texture) throw new Error(`FileDataID ${model.fileDataId}: ribbon ${ribbon.index} primary texture is unavailable.`);
       const material = new ShaderMaterial({
-        uniforms: { map: { value: texture } },
+        uniforms: {
+          map: { value: texture },
+          uAlphaTest: { value: m2ParticleAlphaThreshold(materialSource.blendMode) },
+        },
         vertexShader: `attribute vec4 ribbonColor; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
           void main() { vRibbonColor = ribbonColor; vRibbonUv = uv;
             gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `uniform sampler2D map; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
+        fragmentShader: `uniform sampler2D map; uniform float uAlphaTest; varying vec4 vRibbonColor; varying vec2 vRibbonUv;
           void main() { gl_FragColor = texture2D(map, vRibbonUv) * vRibbonColor;
-            if (gl_FragColor.a < 0.00392157) discard;
+            if (gl_FragColor.a < uAlphaTest) discard;
             #include <tonemapping_fragment>
             #include <colorspace_fragment>
           }`,
         transparent: true,
-        blending: materialSource.blendMode === 4 ? AdditiveBlending : NormalBlending,
-        depthWrite: (materialSource.flags & 0x10) !== 0,
-        depthTest: (materialSource.flags & 0x8) !== 0,
-        side: DoubleSide,
+        blending: ribbonBlend.blending,
+        blendSrc: ribbonBlend.blendSrc,
+        blendDst: ribbonBlend.blendDst,
+        blendSrcAlpha: ribbonBlend.blendSrcAlpha,
+        blendDstAlpha: ribbonBlend.blendDstAlpha,
+        depthWrite: ribbonFlags.depthWrite,
+        depthTest: ribbonFlags.depthTest,
+        side: ribbonFlags.twoSided ? DoubleSide : FrontSide,
       });
       const mesh = new Mesh(geometry, material);
       mesh.frustumCulled = false;
@@ -319,7 +382,7 @@ export class NativeParticleEffect {
       for (const [index, batch] of skin.batches.entries()) {
         const section = skin.sections[batch.sectionIndex];
         const material = model.materials[batch.materialIndex];
-        if (!material || (material.blendMode !== 2 && material.blendMode !== 4) || (material.flags & ~0x11d5) !== 0
+        if (!material || material.blendMode > 7 || (material.flags & ~0x11d5) !== 0
           || (material.flags & 0x15) !== 0x15 || (material.flags & 0x1000) === 0
           || (batch.shaderId !== 0x4014 && batch.shaderId !== 0x14) || batch.flags !== 0x80 || batch.textureCount !== 2) {
           throw new Error(`FileDataID ${model.fileDataId}: mesh batch ${index} material, flags or shader cannot be rendered with the verified two-unit Mod2x path.`);
@@ -378,6 +441,8 @@ export class NativeParticleEffect {
           if (batch.shaderId === 0x4014) {
             geometry.setAttribute("secondaryUv", new BufferAttribute(new Float32Array(skin.vertexLookup.flatMap((vertexIndex) => model.vertices[vertexIndex].uv[1])), 2));
           }
+          const meshBlend = m2BlendParams(material.blendMode);
+          const meshFlags = m2RenderFlags(material.flags);
           const meshMaterial = new ShaderMaterial({
             uniforms: {
               primaryMap: { value: this.textures[textureIndices[0]] },
@@ -402,12 +467,20 @@ export class NativeParticleEffect {
                 vec4 secondary = texture2D(secondaryMap, secondaryCoordinates);
                 gl_FragColor = vec4(meshColor * primary.rgb * secondary.rgb * 2.0,
                   meshOpacity * primary.a * secondary.a * 2.0);
-                if (gl_FragColor.a < 0.00392157) discard;
+                if (gl_FragColor.a < ${m2ParticleAlphaThreshold(material.blendMode)}) discard;
                 #include <tonemapping_fragment>
                 #include <colorspace_fragment>
               }`,
-            transparent: true, blending: material.blendMode === 4 ? AdditiveBlending : NormalBlending,
-            side: DoubleSide, depthTest: (material.flags & 0x8) === 0, depthWrite: (material.flags & 0x10) !== 0, fog: false,
+            transparent: true,
+            blending: meshBlend.blending,
+            blendSrc: meshBlend.blendSrc,
+            blendDst: meshBlend.blendDst,
+            blendSrcAlpha: meshBlend.blendSrcAlpha,
+            blendDstAlpha: meshBlend.blendDstAlpha,
+            side: meshFlags.twoSided ? DoubleSide : FrontSide,
+            depthTest: meshFlags.depthTest,
+            depthWrite: meshFlags.depthWrite,
+            fog: false,
           });
           const mesh = new Mesh(geometry, meshMaterial);
           mesh.visible = false;
@@ -541,6 +614,8 @@ export class NativeParticleEffect {
         batch.uvRects.setXYZW(index, column * width, 1 - (row + 1) * height, width, height);
         batch.velocities.setXYZ(index, ...velocity);
         batch.alphaCutoffs.setX(index, particle.alphaCutoff);
+        batch.uvScrolls1.setXY(index, ...(particle.uvScrollOffsets?.[0] ?? [0, 0]));
+        batch.uvScrolls2.setXY(index, ...(particle.uvScrollOffsets?.[1] ?? [0, 0]));
       });
       batch.geometry.instanceCount = particles.length;
       totalParticleCount += particles.length;
@@ -551,6 +626,8 @@ export class NativeParticleEffect {
       batch.uvRects.needsUpdate = true;
       batch.velocities.needsUpdate = true;
       batch.alphaCutoffs.needsUpdate = true;
+      batch.uvScrolls1.needsUpdate = true;
+      batch.uvScrolls2.needsUpdate = true;
     }
     return totalParticleCount;
   }

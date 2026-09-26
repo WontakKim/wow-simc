@@ -2,7 +2,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
   DoubleSide,
@@ -11,15 +10,17 @@ import {
   CustomBlending,
   OneFactor,
   OneMinusSrcAlphaFactor,
+  SrcAlphaFactor,
+  ZeroFactor,
   InstancedBufferGeometry,
   Mesh,
-  NormalBlending,
   ShaderMaterial,
   PerspectiveCamera,
 } from "three";
 import { describe, expect, it } from "vitest";
 import { decodeNativeBlp } from "./nativeBlp";
 import { parseNativeM2, parseNativeSkin } from "./nativeM2";
+import { m2BlendParams } from "./nativeM2Blend";
 import { NativeParticleEffect } from "./NativeParticleEffect";
 import * as particleSampling from "./nativeParticles";
 
@@ -35,7 +36,13 @@ describe("original Lava Burst ribbon rendering", () => {
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const effect = new NativeParticleEffect(model, textures, 2);
     const ribbons = effect.group.children.slice(-3) as Mesh<BufferGeometry, ShaderMaterial>[];
-    expect(ribbons.map((mesh) => mesh.material.blending)).toEqual([AdditiveBlending, NormalBlending, NormalBlending]);
+    expect(ribbons.map((mesh) => mesh.material.blending)).toEqual([CustomBlending, CustomBlending, CustomBlending]);
+    expect(ribbons.map((mesh) => [mesh.material.blendSrc, mesh.material.blendDst,
+      mesh.material.blendSrcAlpha, mesh.material.blendDstAlpha])).toEqual([
+      [SrcAlphaFactor, OneFactor, ZeroFactor, OneFactor],
+      [SrcAlphaFactor, OneMinusSrcAlphaFactor, OneFactor, OneMinusSrcAlphaFactor],
+      [SrcAlphaFactor, OneMinusSrcAlphaFactor, OneFactor, OneMinusSrcAlphaFactor],
+    ]);
     const instance = { timeSeconds: 0.415, emissionEndSeconds: 0.8, modelScale: 0.38,
       sourceTranslationAtTime: (time: number): [number, number, number] => [-4 + time * 10, 0, 0] };
     const camera = new PerspectiveCamera();
@@ -79,7 +86,13 @@ describe("original Lightning Bolt missile rendering", () => {
     expect(effect.unsupportedMeshBatches.join(" ")).not.toContain("material flags 0x80");
     expect(effect.group.children).toHaveLength(9);
     const meshes = effect.group.children.slice(5) as Mesh<BufferGeometry, ShaderMaterial>[];
-    expect(meshes.every((mesh) => mesh.material.blending === AdditiveBlending
+    expect(meshes.every((mesh) => mesh.material.blending === CustomBlending
+      && mesh.material.blendSrc === SrcAlphaFactor
+      && mesh.material.blendDst === OneFactor
+      && mesh.material.blendSrcAlpha === ZeroFactor
+      && mesh.material.blendDstAlpha === OneFactor
+      && mesh.material.depthWrite === false
+      && mesh.material.depthTest === true
       && mesh.material.uniforms.primaryMap.value === mesh.material.uniforms.secondaryMap.value
       && mesh.material.fragmentShader.includes("primary.rgb * secondary.rgb * 2.0")
       && mesh.material.fragmentShader.includes("primary.a * secondary.a * 2.0")
@@ -113,9 +126,12 @@ describe("NativeParticleEffect source rendering", () => {
 
     expect(meshes).toHaveLength(6);
     for (const [index, mesh] of meshes.entries()) {
-      expect(mesh.material.blending).toBe(
-        model.emitters[index].blendingType === 2 ? NormalBlending : AdditiveBlending,
-      );
+      const blend = m2BlendParams(model.emitters[index].blendingType);
+      expect(mesh.material.blending).toBe(CustomBlending);
+      expect([mesh.material.blendSrc, mesh.material.blendDst,
+        mesh.material.blendSrcAlpha, mesh.material.blendDstAlpha]).toEqual(
+        [blend.blendSrc, blend.blendDst, blend.blendSrcAlpha, blend.blendDstAlpha]);
+      expect(mesh.material.depthWrite).toBe(false);
       expect(mesh.geometry.getAttribute("position").itemSize).toBe(3);
       expect(mesh.material.vertexShader).not.toMatch(/attribute vec[23] (position|uv)/);
       expect(mesh.material.vertexShader).toContain("length(modelViewMatrix[0].xyz)");
@@ -125,20 +141,49 @@ describe("NativeParticleEffect source rendering", () => {
     effect.dispose();
   });
 
-  it("uses inverse-source-alpha additive factors for original blend 7 and skips only the refraction emitter", () => {
+  it("uses original blend 7 premultiplied factors and skips nonzero-TXAC and refraction emitters", () => {
     const model = parseNativeM2(loadAsset(4006621, "m2"), 4006621);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const effect = new NativeParticleEffect(model, textures);
-    expect(effect.renderedEmitterCount).toBe(8);
-    expect(effect.unsupportedEmitters).toEqual(["emitter 4: refraction unsupported"]);
-    expect(effect.group.children).toHaveLength(8);
+    expect(effect.renderedEmitterCount).toBe(5);
+    expect(effect.unsupportedEmitters).toEqual([
+      "emitter 0: nonzero TXAC UV shader unsupported",
+      "emitter 2: nonzero TXAC UV shader unsupported",
+      "emitter 4: refraction unsupported",
+      "emitter 6: nonzero TXAC UV shader unsupported",
+    ]);
+    expect(effect.group.children).toHaveLength(5);
+    // Rendered children keep emitter order [e1, e3, e5, e7, e8]; e3 is the first blend-7 emitter.
     const blendSeven = model.emitters.findIndex((emitter) => emitter.blendingType === 7);
-    const material = (effect.group.children[blendSeven] as Mesh<InstancedBufferGeometry, ShaderMaterial>).material;
+    expect(blendSeven).toBe(3);
+    const material = (effect.group.children[1] as Mesh<InstancedBufferGeometry, ShaderMaterial>).material;
     expect(material.blending).toBe(CustomBlending);
-    expect(material.blendSrc).toBe(OneMinusSrcAlphaFactor);
-    expect(material.blendDst).toBe(OneFactor);
-    expect(material.blendSrcAlpha).toBe(OneMinusSrcAlphaFactor);
-    expect(material.blendDstAlpha).toBe(OneFactor);
+    expect(material.blendSrc).toBe(OneFactor);
+    expect(material.blendDst).toBe(OneMinusSrcAlphaFactor);
+    expect(material.blendSrcAlpha).toBe(OneFactor);
+    expect(material.blendDstAlpha).toBe(OneMinusSrcAlphaFactor);
+    effect.dispose();
+  });
+
+  it("combines the three authored textures per emitter with scrolled secondary UVs", () => {
+    const model = parseNativeM2(loadAsset(6211617, "m2"), 6211617);
+    const skin = parseNativeSkin(loadAsset(6212146, "skin"), 6212146, model.vertices.length);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures, 1, skin);
+    const emitters = effect.group.children.slice(0, 5) as Mesh<InstancedBufferGeometry, ShaderMaterial>[];
+    expect(emitters.map((mesh) => mesh.material.uniforms.uPixelShader.value)).toEqual([2, 2, 2, 1, 2]);
+    for (const [index, mesh] of emitters.entries()) {
+      const emitter = model.emitters[index];
+      const textureUniforms = [mesh.material.uniforms.map, mesh.material.uniforms.map2, mesh.material.uniforms.map3];
+      for (const [unit, uniform] of textureUniforms.entries()) {
+        expect(uniform.value.image.data).toBe(textures[emitter.textureIndices[unit]].pixels);
+      }
+      expect(mesh.geometry.getAttribute("instanceUvScroll1").itemSize).toBe(2);
+      expect(mesh.geometry.getAttribute("instanceUvScroll2").itemSize).toBe(2);
+    }
+    expect(emitters[0].material.fragmentShader).toContain("tex1 * tex2 * tex3 * particleColor");
+    expect(emitters[3].material.fragmentShader).toContain("tex1.a * tex2.a * tex3.a * particleColor.a");
+    expect(emitters[3].material.fragmentShader).not.toContain("tex1 * tex2 * tex3 * particleColor");
     effect.dispose();
   });
 
@@ -235,7 +280,14 @@ describe("original mesh component rendering", () => {
     const skin = parseNativeSkin(loadAsset(4291424, "skin"), 4291424, model.vertices.length);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const effect = new NativeParticleEffect(model, textures, 1, skin);
-    expect(effect.group.children).toHaveLength(5);
+    // Emitters 0 and 3 use the nonzero-TXAC UV combiner; they stay diagnosed, so
+    // children are [emitter 1, emitter 2, mesh].
+    expect(effect.renderedEmitterCount).toBe(2);
+    expect(effect.unsupportedEmitters).toEqual([
+      "emitter 0: nonzero TXAC UV shader unsupported",
+      "emitter 3: nonzero TXAC UV shader unsupported",
+    ]);
+    expect(effect.group.children).toHaveLength(3);
     expect(effect.meshTriangleCount).toBe(900);
     expect(skin.batches[0].shaderId).toBe(0x4014);
     expect(skin.batches[0].textureCount).toBe(2);
@@ -245,12 +297,12 @@ describe("original mesh component rendering", () => {
     const renamedModel = new NativeParticleEffect({ ...model, fileDataId: 9999 }, textures, 1, skin);
     expect(renamedModel.animationSequenceIndex).toBe(2);
     renamedModel.dispose();
-    const mesh = effect.group.children[4] as Mesh;
+    const mesh = effect.group.children[2] as Mesh;
     expect(mesh.geometry.getAttribute("position").count).toBe(612);
     expect(mesh.geometry.index?.count).toBe(2700);
     const material = mesh.material as ShaderMaterial;
     expect(material.side).toBe(DoubleSide);
-    expect(material.depthWrite).toBe(true);
+    expect(material.depthWrite).toBe(false);
     expect(material.depthTest).toBe(true);
     expect(material.uniforms.primaryMap.value.wrapS).toBe(RepeatWrapping);
     expect(material.uniforms.secondaryMap.value.image.width).toBe(256);

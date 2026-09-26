@@ -9,12 +9,26 @@ const MODEL_BASE = 8;
 const PARTICLE_OFFSET = 0x300;
 const PARTICLE_STRIDE = 0x1ec;
 
-function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean; zSource?: number; version?: number; extension?: string; includeRibbon?: boolean } = {}) {
+function buildM2Fixture(options: {
+  emitterCount?: number;
+  includeExp2?: boolean;
+  exp2Records?: Array<{ zSource?: number; colorMultiplier?: number; alphaMultiplier?: number }>;
+  zSource?: number;
+  version?: number;
+  extension?: string;
+  includeRibbon?: boolean;
+  textureCount?: number;
+  blends?: number[];
+  emitterFlags?: number[];
+  textureIds?: number[];
+  materialCount?: number;
+  txacPairs?: Array<[number, number]>;
+} = {}) {
   const emitterCount = options.emitterCount ?? 6;
   const payload = new ArrayBuffer(0x3000);
   const view = new DataView(payload);
   const bytes = new Uint8Array(payload);
-  let allocationOffset = 0x1200;
+  let allocationOffset = Math.max(0x1200, PARTICLE_OFFSET + emitterCount * PARTICLE_STRIDE);
 
   const writeUint16 = (offset: number, value: number) => view.setUint16(offset, value, true);
   const writeInt16 = (offset: number, value: number) => view.setInt16(offset, value, true);
@@ -83,19 +97,29 @@ function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean;
   writeFloat32(0x210, -0.5);
   writeFloat32(0x214, 0.75);
 
-  writeArray(0x50, 2, 0x240);
+  const textureCount = options.textureCount ?? 2;
+  writeArray(0x50, textureCount, allocate(textureCount * 16));
+  const materialCount = options.materialCount ?? 0;
+  if (materialCount > 0) {
+    const materialOffset = allocate(materialCount * 4);
+    writeArray(0x70, materialCount, materialOffset);
+    for (let index = 0; index < materialCount; index += 1) {
+      writeUint16(materialOffset + index * 4, 0x11);
+      writeUint16(materialOffset + index * 4 + 2, 2);
+    }
+  }
   writeArray(0x128, emitterCount, PARTICLE_OFFSET);
 
   for (let index = 0; index < emitterCount; index += 1) {
     const offset = PARTICLE_OFFSET + index * PARTICLE_STRIDE;
     writeUint32(offset, 0xffffffff);
-    writeUint32(offset + 4, index === 0 ? 0x820025 : 0x20021);
+    writeUint32(offset + 4, options.emitterFlags?.[index] ?? (index === 0 ? 0x820025 : 0x20021));
     writeFloat32(offset + 8, index + 0.25);
     writeFloat32(offset + 12, -0.5);
     writeFloat32(offset + 16, 0.75);
     writeUint16(offset + 0x14, 0);
-    writeUint16(offset + 0x16, index % 2);
-    view.setUint8(offset + 0x28, index === 1 ? 2 : 4);
+    writeUint16(offset + 0x16, options.textureIds?.[index] ?? index % 2);
+    view.setUint8(offset + 0x28, options.blends?.[index] ?? (index === 1 ? 2 : 4));
     view.setUint8(offset + 0x29, index % 2 === 0 ? 1 : 2);
     writeInt16(offset + 0x2e, index - 2);
     writeUint16(offset + 0x30, 2);
@@ -152,11 +176,31 @@ function buildM2Fixture(options: { emitterCount?: number; includeExp2?: boolean;
   const skin = new ArrayBuffer(4);
   new DataView(skin).setUint32(0, 9001, true);
   addChunk("SFID", skin);
-  const textures = new ArrayBuffer(8);
-  new DataView(textures).setUint32(0, 1001, true);
-  new DataView(textures).setUint32(4, 1002, true);
+  const textures = new ArrayBuffer(textureCount * 4);
+  const textureIds = new DataView(textures);
+  for (let index = 0; index < textureCount; index += 1) textureIds.setUint32(index * 4, 1001 + index, true);
   addChunk("TXID", textures);
-  if (options.includeExp2) addChunk("EXP2", new ArrayBuffer(4));
+  if (options.txacPairs) {
+    const txac = new ArrayBuffer(options.txacPairs.length * 2);
+    const txacView = new DataView(txac);
+    options.txacPairs.forEach(([first, second], index) => {
+      txacView.setUint8(index * 2, first);
+      txacView.setUint8(index * 2 + 1, second);
+    });
+    addChunk("TXAC", txac);
+  }
+  if (options.includeExp2 || options.exp2Records) {
+    const exp2 = new ArrayBuffer(8 + emitterCount * 28);
+    const exp2View = new DataView(exp2);
+    exp2View.setUint32(0, emitterCount, true);
+    exp2View.setUint32(4, 8, true);
+    for (let index = 0; index < emitterCount; index += 1) {
+      exp2View.setFloat32(8 + index * 28, options.exp2Records?.[index]?.zSource ?? 0, true);
+      exp2View.setFloat32(8 + index * 28 + 4, options.exp2Records?.[index]?.colorMultiplier ?? 1, true);
+      exp2View.setFloat32(8 + index * 28 + 8, options.exp2Records?.[index]?.alphaMultiplier ?? 1, true);
+    }
+    addChunk("EXP2", exp2);
+  }
   if (options.extension) addChunk(options.extension, new ArrayBuffer(4));
 
   const result = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
@@ -236,6 +280,114 @@ describe("parseNativeM2", () => {
 
     expect(parseNativeM2(buildM2Fixture({ zSource: 0.1 }), 707).emitters[0].zSource.sequences[0].values[0])
       .toBeCloseTo(0.1);
+  });
+});
+
+describe("authored blend modes and multi-texture fields", () => {
+  it("accepts every authored blend mode 0 through 7 and rejects modes beyond 7", () => {
+    const model = parseNativeM2(buildM2Fixture({ emitterCount: 8, blends: [0, 1, 2, 3, 4, 5, 6, 7] }), 708);
+    expect(model.emitters.map((emitter) => emitter.blendingType)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(() => parseNativeM2(buildM2Fixture({ emitterCount: 1, blends: [8] }), 709)).toThrow(/FileDataID 709.*emitter 0.*blend 8/);
+  });
+
+  it("reads the full uint16 texture index without the multi-texture flag and packed indices with it", () => {
+    const source = buildM2Fixture({
+      emitterCount: 2,
+      textureCount: 40,
+      emitterFlags: [0x10020021, 0x20021],
+      textureIds: [0x881, 35],
+    });
+    const model = parseNativeM2(source, 710);
+    expect(model.emitters[0].textureIndices).toEqual([1, 4, 2]);
+    expect(model.emitters[1].textureIndices).toEqual([35]);
+  });
+
+  it("decodes the multi-texture scroll parameters and packed scale bytes", () => {
+    const source = buildM2Fixture({ emitterCount: 2, emitterFlags: [0x10020021, 0x20021] });
+    const view = new DataView(source);
+    const offset = PARTICLE_OFFSET;
+    view.setUint16(MODEL_BASE + offset + 0x1dc, 0x0200, true);
+    view.setUint16(MODEL_BASE + offset + 0x1de, 0x8200, true);
+    view.setUint16(MODEL_BASE + offset + 0x1e0, 0x0080, true);
+    view.setUint16(MODEL_BASE + offset + 0x1e2, 0x8080, true);
+    view.setUint16(MODEL_BASE + offset + 0x1e4, 0x0300, true);
+    view.setUint8(MODEL_BASE + offset + 0x2c, 0x21);
+    view.setUint8(MODEL_BASE + offset + 0x2d, 0x41);
+    const model = parseNativeM2(source, 711);
+    expect(model.emitters[0].multiTextureParam0).toEqual([[1, -1], [0.25, -0.25]]);
+    expect(model.emitters[0].multiTextureParam1).toEqual([[1.5, 0], [0, 0]]);
+    expect(model.emitters[0].multiTextureScale).toEqual([1.03125, 2.03125]);
+    expect(model.emitters[1].multiTextureParam0).toEqual([[0, 0], [0, 0]]);
+    expect(model.emitters[1].multiTextureScale).toEqual([0, 0]);
+  });
+
+  it("splits TXAC pairs into material entries followed by particle entries", () => {
+    const pairs: Array<[number, number]> = [[1, 0], [0, 2], [3, 0], [0, 0], [5, 6], [0, 0], [0, 1], [9, 9]];
+    const model = parseNativeM2(buildM2Fixture({ materialCount: 2, txacPairs: pairs }), 712);
+    expect(model.materialTextureControls).toEqual([[1, 0], [0, 2]]);
+    expect(model.particleTextureControls).toEqual([[3, 0], [0, 0], [5, 6], [0, 0], [0, 1], [9, 9]]);
+    expect(() => parseNativeM2(buildM2Fixture({ materialCount: 2, txacPairs: pairs.slice(0, 7) }), 713))
+      .toThrow(/FileDataID 713.*TXAC.*2 material.*6 particle.*8 pairs.*7/);
+  });
+
+  it("names the emission area length/X at 0xc8 and width/Y at 0xdc", () => {
+    const model = parseNativeM2(buildM2Fixture(), 714);
+    expect(model.emitters[0].emissionAreaLength.sequences[0].values[0]).toBeCloseTo(0.4);
+    expect(model.emitters[0].emissionAreaWidth.sequences[0].values[0]).toBeCloseTo(0.2);
+  });
+
+  it("exposes the EXP2 static z-source and color/alpha multipliers with the alpha cutoff track", () => {
+    const model = parseNativeM2(buildM2Fixture({
+      exp2Records: [{ zSource: 2.5, colorMultiplier: 1.5, alphaMultiplier: 0.75 }],
+    }), 715);
+    expect(model.emitters[0].exp2).toEqual({ zSource: 2.5, colorMultiplier: 1.5, alphaMultiplier: 0.75 });
+    expect(model.emitters[1].exp2).toEqual({ zSource: 0, colorMultiplier: 1, alphaMultiplier: 1 });
+    expect(model.emitters[0].alphaCutoff).toEqual({ timestamps: [], values: [] });
+  });
+
+  it("parses float32 quaternion rotation keys for texture transforms", () => {
+    const source = buildM2Fixture({ emitterCount: 1 });
+    const view = new DataView(source);
+    const writeArray = (offset: number, count: number, dataOffset: number) => {
+      view.setUint32(MODEL_BASE + offset, count, true);
+      view.setUint32(MODEL_BASE + offset + 4, dataOffset, true);
+    };
+    const transform = 0xa80;
+    writeArray(0x60, 1, transform);
+    view.setInt16(MODEL_BASE + transform + 2, -1, true);
+    view.setUint16(MODEL_BASE + transform + 20, 0, true);
+    view.setInt16(MODEL_BASE + transform + 22, -1, true);
+    view.setInt16(MODEL_BASE + transform + 42, -1, true);
+    writeArray(transform + 24, 1, 0xb00);
+    writeArray(transform + 32, 1, 0xb10);
+    writeArray(0xb00, 1, 0xb20);
+    writeArray(0xb10, 1, 0xb30);
+    view.setUint32(MODEL_BASE + 0xb20, 0, true);
+    for (const [index, value] of [0.1, -0.2, 0.3, 0.9].entries()) {
+      view.setFloat32(MODEL_BASE + 0xb30 + index * 4, value, true);
+    }
+    const model = parseNativeM2(source, 716);
+    expect(model.textureTransforms[0].rotation.sequences[0].values[0]).toEqual(
+      [0.1, -0.2, 0.3, 0.9].map((value) => expect.closeTo(value, 5)),
+    );
+  });
+});
+
+describe("multi-texture fixed-point decoding", () => {
+  it("decodes signed sign-magnitude 6.9 values", () => {
+    expect(nativeM2.decodeFixed6Point9(0x0200)).toBe(1);
+    expect(nativeM2.decodeFixed6Point9(0x0300)).toBe(1.5);
+    expect(nativeM2.decodeFixed6Point9(0x0080)).toBe(0.25);
+    expect(nativeM2.decodeFixed6Point9(0x8200)).toBe(-1);
+    expect(nativeM2.decodeFixed6Point9(0x8080)).toBe(-0.25);
+    expect(nativeM2.decodeFixed6Point9(0)).toBe(0);
+  });
+
+  it("decodes packed multi-texture scale bytes", () => {
+    expect(nativeM2.decodeMultiTextureScale(0)).toBe(0);
+    expect(nativeM2.decodeMultiTextureScale(0x20)).toBe(1);
+    expect(nativeM2.decodeMultiTextureScale(0x21)).toBe(1.03125);
+    expect(nativeM2.decodeMultiTextureScale(0x41)).toBe(2.03125);
   });
 });
 
@@ -461,6 +613,36 @@ describe("original skin profile", () => {
       vertexLookup: [2, 1, 0], indices: [0, 1, 2],
       sections: [expect.objectContaining({ vertexCount: 3, indexCount: 3 })],
       batches: [expect.objectContaining({ shaderId: 0x4014, textureCount: 2 })],
+    });
+  });
+
+  it("extends only the triangle index start by the SKIN section level", () => {
+    const indexStart = 64 + 65536;
+    const source = new ArrayBuffer(0x20200);
+    const view = new DataView(source);
+    new Uint8Array(source).set(new TextEncoder().encode("SKIN"));
+    const array = (offset: number, count: number, start: number) => {
+      view.setUint32(offset, count, true);
+      view.setUint32(offset + 4, start, true);
+    };
+    array(4, 6, 0x40);
+    array(12, indexStart + 3 + 7, 0x50);
+    array(20, 6, 0x200f0);
+    array(28, 1, 0x20120);
+    array(36, 1, 0x20150);
+    for (let index = 0; index < 6; index += 1) view.setUint16(0x40 + index * 2, index, true);
+    for (let offset = 0; offset < 3; offset += 1) view.setUint16(0x50 + (indexStart + offset) * 2, 3 + offset, true);
+    view.setUint16(0x20120 + 2, 1, true);
+    view.setUint16(0x20120 + 4, 3, true);
+    view.setUint16(0x20120 + 6, 3, true);
+    view.setUint16(0x20120 + 8, 64, true);
+    view.setUint16(0x20120 + 10, 3, true);
+    view.setUint16(0x20120 + 12, 1, true);
+    view.setUint16(0x20150 + 4, 0, true);
+    view.setUint16(0x20150 + 14, 1, true);
+    const skin = (nativeM2 as Record<string, unknown>).parseNativeSkin as ((bytes: ArrayBuffer, fileId: number, count: number) => unknown) | undefined;
+    expect(skin?.(source, 9002, 6)).toMatchObject({
+      sections: [{ vertexStart: 3, vertexCount: 3, indexStart, indexCount: 3, boneCount: 1 }],
     });
   });
 });

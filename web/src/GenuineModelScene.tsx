@@ -496,9 +496,6 @@ async function loadModel(loader: GLTFLoader, asset: (typeof MODEL_ASSETS)[keyof 
 }
 
 function describeNativeEffectLimitations(effect: NativeParticleEffect) {
-  const blendSevenEmitters = effect.model.emitters
-    .filter((emitter) => emitter.blendingType === 7)
-    .map((emitter) => emitter.index);
   return [
     ...effect.unsupportedEmitters,
     ...effect.unsupportedMeshBatches,
@@ -513,11 +510,8 @@ function describeNativeEffectLimitations(effect: NativeParticleEffect) {
     ...(effect.model.dboc ? [`DBOC four authored values (${[...effect.model.dboc.floats, ...effect.model.dboc.integers].join(", ")}) parsed but unused; purpose undocumented`] : []),
     ...effect.model.emitters.flatMap((emitter) => (emitter.flags & 0x8000000) !== 0
       ? [`emitter ${emitter.index}: flag 0x8000000 not reconstructed (meaning unverified)`] : []),
-    ...(effect.primaryOnlyEmitters.length > 0
-      ? [`secondary original textures not combined for emitters ${effect.primaryOnlyEmitters.join(", ")}`]
-      : []),
-    ...effect.model.textureControlEntries.flatMap(([first, second], index) =>
-      first || second ? [`TXAC ${index < effect.model.emitters.length ? `emitter ${index}` : `extra entry ${index}`} (${first},${second}) texture controls not implemented`] : []),
+    ...effect.model.materialTextureControls.flatMap(([first, second], index) =>
+      first || second ? [`material ${index} TXAC (${first},${second}) parsed but unused by the mesh texture units`] : []),
     ...effect.model.emitters.flatMap((emitter) =>
       (emitter.flags & 0x1) !== 0 ? [`emitter ${emitter.index} flag 0x1 particle shading not reconstructed (unlit billboard)`] : []),
     ...effect.model.emitters.flatMap((emitter) =>
@@ -526,18 +520,10 @@ function describeNativeEffectLimitations(effect: NativeParticleEffect) {
       (emitter.flags & 0x8000) !== 0 ? [`emitter ${emitter.index} flag 0x8000 squirt burst emission not reproduced; continuous-rate sampling only`] : []),
     ...effect.model.emitters.flatMap((emitter) =>
       (emitter.flags & 0x40) !== 0 ? [`emitter ${emitter.index} parent-particle velocity inheritance not modeled`] : []),
-    ...effect.model.emitters.flatMap((emitter) => {
-      const colorFlags = [
-        (emitter.flags & 0x20000000) !== 0 ? "Modx4" : null,
-        (emitter.flags & 0x40000000) !== 0 ? "three-color" : null,
-      ].filter(Boolean);
-      return colorFlags.length > 0
-        ? [`emitter ${emitter.index}: ${colorFlags.join(" + ")} flags not reproduced (${(emitter.flags & 0x10000000) !== 0 ? "MultiTexture on" : "MultiTexture off; meaning unknown"})`]
-        : [];
-    }),
-    ...(blendSevenEmitters.length > 0
-      ? [`blend 7 uses unverified EGxBlend factors for emitters ${blendSevenEmitters.join(", ")}`]
-      : []),
+    ...effect.model.emitters.flatMap((emitter) =>
+      (emitter.flags & 0x20000000) !== 0
+        ? [`emitter ${emitter.index}: Modx4 color flag not applied (no invented multiply rule)`]
+        : []),
   ].join(" · ");
 }
 
@@ -1247,7 +1233,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             <p data-testid="replay-effect-status">
               <strong>{replayAssetIds.size > 0 ? "Original components ready" : "No original components required for this trace"}</strong>
               {replayAssetIds.has(6211617) && <span> · Lightning Bolt: 5 of 5 original emitters + 1 of 1 original LOD0 mesh batches (64 triangles, two original texture units combined (shader 0x14, UV0/UV0; shared BLP)) · FileDataID 6211617</span>}
-              {replayAssetIds.has(4329984) && <span> · Shared Lava Burst / Elemental Blast missile: 10 of 10 emitters + 3 of 3 original ribbons (partially reconstructed) · FileDataID 4329984</span>}
+              {replayAssetIds.has(4329984) && <span> · Shared Lava Burst / Elemental Blast missile: 6 of 10 emitters + 3 of 3 original ribbons (partially reconstructed) · FileDataID 4329984</span>}
               {replayAssetIds.has(794788) && <span> · Elemental Blast: 12 of 12 authored emitters ready in its two additional bodies · 9 original BLP textures · FileDataID 4329984 + 794788 + 613807</span>}
               <span> · Trace FileDataIDs: {[...replayAssetIds].join(", ") || "none"}</span>
               <small> · {replayAssetIds.has(794788) ? "Partial original Elemental Blast components and partial other spell components" : "Partial source-linked components only"}, not complete spells or verified native timing.</small>
@@ -1301,7 +1287,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
                   const limitation = replayEffectLimitations[component.fileDataId];
                   if (!limitation) return `FileDataID ${component.fileDataId}: unavailable`;
                   return `FileDataID ${component.fileDataId}: ${limitation.renderedEmitters} of ${limitation.expectedEmitters} authored emitters${limitation.ribbonCount ? `; ${limitation.ribbonCount} of ${limitation.ribbonCount} authored ribbons (partial)` : ""}; ${limitation.unsupportedEmitters.join(", ") || "no omitted emitters"}`;
-                }).join(" · ")} · when authored, secondary textures, TXAC, color flags and blend 7 have renderer limitations (expand for per-emitter details).
+                }).join(" · ")} · when authored, Modx4 color flags and mesh material TXAC have renderer limitations (expand for per-emitter details).
               </summary>
               {selectedReplaySpell.components.map((component) => (
                 <p key={component.fileDataId}>FileDataID {component.fileDataId}: {describeReplayComponentAnchor(selectedReplayEvent!.id!, component)} · {replayEffectLimitations[component.fileDataId]?.details || "No additional renderer limitations recorded."}</p>

@@ -19,6 +19,8 @@ export interface NativeParticleSample {
   size: Vector2Tuple;
   rotation: number;
   uvFrame: number;
+  /** Secondary and tertiary UV scroll offsets, present only for multi-texture emitters. */
+  uvScrollOffsets?: [Vector2Tuple, Vector2Tuple];
 }
 
 export interface NativeEmitterSampleOptions {
@@ -34,11 +36,42 @@ function clamp(value: number, minimum: number, maximum: number) {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+function slerpQuaternion(first: QuaternionTuple, second: QuaternionTuple, ratio: number): QuaternionTuple {
+  const start = normalizeQuaternion(first);
+  const target = normalizeQuaternion(second);
+  const dot = start[0] * target[0] + start[1] * target[1] + start[2] * target[2] + start[3] * target[3];
+  // q and -q describe the same rotation; flip the target so the arc stays shortest.
+  const end = dot < 0 ? [-target[0], -target[1], -target[2], -target[3]] as QuaternionTuple : target;
+  const alignedDot = Math.abs(dot);
+  if (alignedDot > 0.9995) {
+    return normalizeQuaternion([
+      start[0] + (end[0] - start[0]) * ratio,
+      start[1] + (end[1] - start[1]) * ratio,
+      start[2] + (end[2] - start[2]) * ratio,
+      start[3] + (end[3] - start[3]) * ratio,
+    ]);
+  }
+  const theta = Math.acos(clamp(alignedDot, -1, 1));
+  const sine = Math.sin(theta);
+  const startWeight = Math.sin((1 - ratio) * theta) / sine;
+  const endWeight = Math.sin(ratio * theta) / sine;
+  return normalizeQuaternion([
+    start[0] * startWeight + end[0] * endWeight,
+    start[1] * startWeight + end[1] * endWeight,
+    start[2] * startWeight + end[2] * endWeight,
+    start[3] * startWeight + end[3] * endWeight,
+  ]);
+}
+
 function interpolateValue<T>(first: T, second: T, ratio: number): T {
   if (typeof first === "number" && typeof second === "number") {
     return (first + (second - first) * ratio) as T;
   }
   if (Array.isArray(first) && Array.isArray(second)) {
+    // Four-component track values are rotations, which interpolate on the unit sphere.
+    if (first.length === 4 && second.length === 4) {
+      return slerpQuaternion(first as QuaternionTuple, second as QuaternionTuple, ratio) as T;
+    }
     return first.map((component, index) => component + (second[index] - component) * ratio) as T;
   }
   return first;
@@ -379,7 +412,10 @@ export function sampleNativeEmitter(
 
     const emission = sampleEmission(emitter, spawn.spawnIndex, spawnTimeMs, sequenceDurationMs, globalSequenceDurationsMs, sequenceIndex);
     const localOrigin = add(emitter.position, emission.offset);
-    const authoredZSource = sampleNativeTrack(emitter.zSource, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
+    // A static EXP2 z-source replaces the legacy per-emitter track when the chunk exists.
+    const authoredZSource = emitter.exp2
+      ? emitter.exp2.zSource
+      : sampleNativeTrack(emitter.zSource, spawnTimeMs, sequenceDurationMs, 0, globalSequenceDurationsMs, sequenceIndex);
     const localDirection = authoredZSource > 0
       ? normalize([-localOrigin[0], -localOrigin[1], authoredZSource - localOrigin[2]])
       : emission.direction;
@@ -440,6 +476,21 @@ export function sampleNativeEmitter(
       uvFrame = Math.min(tileCount - 1, Math.floor(progress * tileCount));
     }
 
+    // Secondary/tertiary texture UVs scroll by an initial random offset plus a
+    // per-particle velocity; the flipbook rect applies to the primary UV only.
+    const uvScrollOffsets = (emitter.flags & 0x10000000) !== 0
+      ? [0, 1].map((channel): Vector2Tuple => {
+        const sharedVelocity = randomUnit(emitter.index, spawn.spawnIndex, 20 + channel) * 2 - 1;
+        const axisOffset = (axis: 0 | 1) => {
+          const initial = randomUnit(emitter.index, spawn.spawnIndex, 22 + channel * 2 + axis) ** 2;
+          const velocity = emitter.multiTextureParam0[channel][axis] + sharedVelocity * emitter.multiTextureParam1[channel][axis];
+          const offset = initial + velocity * age;
+          return offset - Math.floor(offset);
+        };
+        return [axisOffset(0), axisOffset(1)];
+      }) as [Vector2Tuple, Vector2Tuple]
+      : undefined;
+
     result.push({
       spawnIndex: spawn.spawnIndex,
       position,
@@ -450,6 +501,7 @@ export function sampleNativeEmitter(
       size,
       rotation: (initialSpin + spinSpeed * age) * reverseSpin,
       uvFrame: ((uvFrame % tileCount) + tileCount) % tileCount,
+      uvScrollOffsets,
     });
   }
   return result;

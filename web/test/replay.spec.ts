@@ -493,9 +493,9 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await seek.fill("1.1");
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621,4329984,4006618,3980244/);
   expect((await canvas.screenshot()).equals(lavaFrame)).toBe(true);
-  await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText("FileDataID 4006621: 8 of 9 authored emitters; emitter 4: refraction unsupported");
+  await expect(scene.locator("[data-testid='replay-effect-limitations'] summary")).toContainText("FileDataID 4006621: 5 of 9 authored emitters; emitter 4: refraction unsupported");
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
-  await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("blend 7 uses unverified EGxBlend factors");
+  await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("emitter 1: Modx4 color flag not applied");
 
   await page.getByRole("button", { name: /Timeline mark.*Ancestral Swiftness/i }).first().click();
   await expect(scene.locator("[data-testid='replay-spell-components']")).toContainText("Ancestral Swiftness (443454): no verified component; no substitute rendered");
@@ -539,7 +539,8 @@ test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combi
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4290517");
   const nativeStatus = scene.locator("[data-testid='native-effect-status']");
-  await expect(nativeStatus).toContainText("4 of 4 authored emitters ready", { timeout: 30_000 });
+  await expect(nativeStatus).toContainText("2 of 4 authored emitters ready", { timeout: 30_000 });
+  await expect(nativeStatus).toContainText("emitter 0: nonzero TXAC UV shader unsupported");
   await expect(nativeStatus).toContainText("LOD0 mesh 1 of 1 batches, 900 triangles");
   await expect(nativeStatus).toContainText("two original textures combined (shader 0x4014, UV0/UV1)");
   await expect(nativeStatus).not.toContainText("primary texture only");
@@ -1089,27 +1090,31 @@ test("identifies both Stormkeeper bone origins and the unapplied kit offset", as
   expect((await canvas.screenshot()).equals(beforeSeek)).toBe(true);
 });
 
-test("loads a version 274 original component with every authored emitter", async ({ page }) => {
+test("loads a version 274 original component and reports its unsupported TXAC emitter", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4006618");
   await expect(scene.locator("[data-testid='native-effect-status']"))
-    .toContainText("3 of 3 authored emitters ready", { timeout: 30_000 });
+    .toContainText("2 of 3 authored emitters ready", { timeout: 30_000 });
+  await expect(scene.locator("[data-testid='native-effect-status']"))
+    .toContainText("emitter 0: nonzero TXAC UV shader unsupported");
 });
 
 
-test("reports the exact unsupported refraction emitter without dropping its original component", async ({ page }) => {
+test("reports every unsupported emitter without dropping its original component", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   await scene.getByRole("button", { name: "Native M2 component preview" }).click();
   await scene.getByRole("combobox", { name: "Original M2 component" }).selectOption("4006621");
   await expect(scene.locator("[data-testid='native-effect-status']"))
-    .toContainText("8 of 9 authored emitters ready", { timeout: 30_000 });
+    .toContainText("5 of 9 authored emitters ready", { timeout: 30_000 });
   await expect(scene.locator("[data-testid='native-effect-status']"))
     .toContainText("emitter 4: refraction unsupported");
+  await expect(scene.locator("[data-testid='native-effect-status']"))
+    .toContainText("emitter 0: nonzero TXAC UV shader unsupported");
 });
 
 
@@ -1121,9 +1126,9 @@ test("reports authored and supported emitter counts for all original particle so
   const selector = scene.getByRole("combobox", { name: "Original M2 component" });
   const status = scene.locator("[data-testid='native-effect-status']");
   for (const [fileDataId, rendered, authored] of [
-    [4006618, 3, 3], [3980244, 6, 6], [1598036, 4, 4], [1355634, 2, 2],
-    [1284864, 11, 11], [1109885, 6, 6], [4006621, 8, 9], [6211617, 5, 5], [6211618, 4, 4],
-    [1571475, 2, 2], [4392095, 4, 4], [4050773, 7, 7],
+    [4006618, 2, 3], [3980244, 3, 6], [1598036, 4, 4], [1355634, 2, 2],
+    [1284864, 11, 11], [1109885, 6, 6], [4006621, 5, 9], [6211617, 5, 5], [6211618, 3, 4],
+    [1571475, 2, 2], [4392095, 2, 4], [4050773, 4, 7],
   ]) {
     await selector.selectOption(String(fileDataId));
     await expect(status).toContainText(`${rendered} of ${authored} authored emitters ready`, { timeout: 30_000 });
@@ -1136,11 +1141,10 @@ test("reports authored and supported emitter counts for all original particle so
       await expect(status).toContainText("emitter 3 parent-particle velocity inheritance not modeled");
     }
     if (fileDataId === 1598036) {
-      await expect(status).toContainText("emitter 0: Modx4 + three-color flags not reproduced (MultiTexture off; meaning unknown)");
-      await expect(status).toContainText("blend 7 uses unverified EGxBlend factors for emitters 0, 1, 2");
+      await expect(status).toContainText("emitter 0: Modx4 color flag not applied (no invented multiply rule)");
     }
     if (fileDataId === 4006621) {
-      await expect(status).toContainText("emitter 1: Modx4 + three-color flags not reproduced (MultiTexture off; meaning unknown)");
+      await expect(status).toContainText("emitter 1: Modx4 color flag not applied (no invented multiply rule)");
     }
   }
 });

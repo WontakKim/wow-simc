@@ -73,6 +73,9 @@ function makeEmitter(overrides: Partial<NativeParticleEmitter> = {}): NativePart
     tumbleMaximum: [0, 0, 0],
     windVector: [0, 0, 0],
     windTime: 0,
+    multiTextureParam0: [[0, 0], [0, 0]],
+    multiTextureParam1: [[0, 0], [0, 0]],
+    multiTextureScale: [0, 0],
     followSpeed1: 0,
     followScale1: 0,
     followSpeed2: 0,
@@ -325,5 +328,73 @@ describe("original emitter extensions", () => {
   it("samples the authored EXP2 lifetime alpha cutoff", () => {
     const emitter = makeEmitter({ alphaCutoff: particleTrack([0, 32767], [0, 0.5]), emissionRate: constantTrack(1) });
     expect(sampleNativeEmitter(emitter, undefined, 667, 1)[0].alphaCutoff).toBeCloseTo(0.25);
+  });
+
+  it("prefers the EXP2 static z-source over the legacy track", () => {
+    const emitter = makeEmitter({
+      position: [1, 2, 0],
+      emissionSpeed: constantTrack(1),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+      zSource: constantTrack(0),
+      exp2: { zSource: 2, colorMultiplier: 1, alphaMultiplier: 1 },
+      emissionRate: constantTrack(1),
+    });
+    const particle = sampleNativeEmitter(emitter, undefined, 667, 0)[0];
+    expect(particle.velocity[0]).toBeCloseTo(-1 / 3);
+    expect(particle.velocity[1]).toBeCloseTo(-2 / 3);
+    expect(particle.velocity[2]).toBeCloseTo(2 / 3);
+  });
+
+  it("scrolls secondary and tertiary UVs from the authored multi-texture parameters", () => {
+    const scrollEmitter = makeEmitter({
+      flags: 0x10020021,
+      emissionRate: constantTrack(1),
+      lifespan: constantTrack(4),
+      multiTextureParam0: [[0.5, 0], [0, 0]],
+      multiTextureParam1: [[0, 0], [0, 0]],
+    });
+    const sampleAt = (time: number) => sampleNativeEmitter(scrollEmitter, undefined, 667, time)
+      .find((sample) => sample.spawnIndex === 0)!;
+
+    const initial = sampleAt(0).uvScrollOffsets;
+    expect(initial).toBeDefined();
+    expect(initial!.flat().every((value) => value >= 0 && value < 1)).toBe(true);
+    expect(sampleAt(1).uvScrollOffsets![1]).toEqual(initial![1]);
+
+    const half = sampleAt(1).uvScrollOffsets!;
+    expect(half[0][0]).toBeCloseTo(initial![0][0] < 0.5 ? initial![0][0] + 0.5 : initial![0][0] - 0.5, 10);
+    expect(half[0][1]).toBeCloseTo(initial![0][1], 10);
+    expect(sampleAt(2).uvScrollOffsets![0][0]).toBeCloseTo(initial![0][0], 10);
+    expect(sampleAt(1).uvScrollOffsets).toEqual(half);
+
+    const plain = makeEmitter({ emissionRate: constantTrack(1) });
+    expect(sampleNativeEmitter(plain, undefined, 667, 1)[0].uvScrollOffsets).toBeUndefined();
+  });
+});
+
+describe("quaternion track interpolation", () => {
+  const rotationTrack = (values: QuaternionTuple[]): NativeTrack<QuaternionTuple> => ({
+    interpolation: 1,
+    globalSequence: -1,
+    sequences: [{ timestamps: values.map((_, index) => index * 1000), values }],
+  });
+
+  it("slerps bone rotations along the shortest arc", () => {
+    const half = Math.SQRT1_2;
+    const mid = sampleNativeTrack(rotationTrack([[0, 0, 0, 1], [0, 0, half, half]]), 500, 1000, [0, 0, 0, 1]);
+    expect(mid[0]).toBeCloseTo(0, 5);
+    expect(mid[1]).toBeCloseTo(0, 5);
+    expect(mid[2]).toBeCloseTo(Math.sin(Math.PI / 8), 5);
+    expect(mid[3]).toBeCloseTo(Math.cos(Math.PI / 8), 5);
+  });
+
+  it("resolves antipodal key pairs to the same rotation", () => {
+    const half = Math.SQRT1_2;
+    const identity = sampleNativeTrack(rotationTrack([[0, 0, 0, 1], [0, 0, 0, -1]]), 500, 1000, [0, 0, 0, 1]);
+    expect(identity).toEqual([expect.closeTo(0), expect.closeTo(0), expect.closeTo(0), expect.closeTo(1)]);
+
+    const negated = sampleNativeTrack(rotationTrack([[0, 0, half, half], [0, 0, -half, -half]]), 250, 1000, [0, 0, 0, 1]);
+    expect(negated[2]).toBeCloseTo(half, 5);
+    expect(negated[3]).toBeCloseTo(half, 5);
   });
 });
