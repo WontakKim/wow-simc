@@ -15,6 +15,7 @@ import {
   REPLAY_COMPONENT_INSTANCE_LIMITS,
   arrangeCombatants,
   frameModels,
+  getPreparedComponentPlacements,
   getReplayEffectAnchors,
   getReplayEffectSourceAnchor,
   isReplayClipMissing,
@@ -137,6 +138,38 @@ describe("logged native replay scheduling", () => {
     expect(impact.components.some((component) => component.anchor === "target")).toBe(true);
     expect(impact.components.some((component) => component.anchor === "projectile")).toBe(false);
   });
+  it("keeps source-linked hand rows, authored offset, and Base missile attachment distinct", () => {
+    const precast = getPreparedComponentPlacements(51505, { fileDataId: 4006621, anchor: "caster" });
+    expect(precast.map((placement) => placement.attachmentId)).toEqual([22, 21]);
+    const atCast = resolveLoggedEffectOccurrences(timeline, 3.2).filter((effect) => effect.spellId === 51505);
+    expect(atCast.flatMap((effect) => effect.components).filter((component) => component.fileDataId === 4006621)
+      .map((component) => component.placement?.attachmentId)).toEqual([22, 21]);
+    expect(getPreparedComponentPlacements(191634, { fileDataId: 1284864, anchor: "caster" })[0])
+      .toMatchObject({ attachmentId: 22, offset: [0, expect.closeTo(0.15), 0], sourceRowId: 321824 });
+    expect(getPreparedComponentPlacements(188196, { fileDataId: 6211617, anchor: "projectile" })[0])
+      .toMatchObject({ attachmentId: 19, sourceRowId: 25628 });
+    expect(getPreparedComponentPlacements(192106, { fileDataId: 1598036, anchor: "caster" })
+      .map((placement) => placement.positionerId)).toEqual([24, 23]);
+    expect(resolveLoggedEffectOccurrences(timeline, 1.7).flatMap((effect) => effect.components)
+      .filter((component) => component.fileDataId === 1598036)).toHaveLength(1);
+  });
+
+  it("starts the delayed Lightning Bolt cast effect after the release kit delay", () => {
+    const isolated = { ...timeline, occurrences: timeline.occurrences.filter((occurrence) =>
+      occurrence.actionName === "lightning_bolt" && occurrence.castFinish === 31.598) };
+    const active = (time: number) => resolveLoggedEffectOccurrences(isolated, time)
+      .flatMap((effect) => effect.components).filter((component) => component.fileDataId === 6211618);
+    expect(active(31.797)).toHaveLength(0);
+    expect(active(31.81)).toHaveLength(1);
+  });
+
+  it("waits for the authored Flame Shock impact kit delay", () => {
+    const active = (time: number) => resolveLoggedEffectOccurrences(timeline, time)
+      .flatMap((effect) => effect.components).some((component) => component.fileDataId === 4392095);
+    expect(active(0.049)).toBe(false);
+    expect(active(0.051)).toBe(true);
+  });
+
   it("preserves aura visibility until loss and uses the final logged hit for playback bounds", () => {
     expect(resolveLoggedEffectOccurrences(timeline, 3.6).some((effect) => effect.spellId === 191634)).toBe(true);
     expect(resolveLoggedEffectOccurrences(timeline, 3.655).some((effect) => effect.spellId === 191634)).toBe(false);
@@ -164,11 +197,21 @@ describe("logged native replay scheduling", () => {
 
   it("reports missing mapped native clips rather than substituting stand or another cast", () => {
     const active = resolveLoggedAnimation(timeline, 3.2);
-    expect(active).toMatchObject({ kind: "motion", animationId: 1148 });
+    expect(active).toMatchObject({ kind: "motion", animationId: 828, status: expect.stringContaining("AnimKit segment") });
     expect(isReplayClipMissing(active, ["Stand (ID 0 variation 0)"])).toBe(true);
     expect(isReplayClipMissing(active, [active.clipName])).toBe(false);
     const isolated = { ...timeline, occurrences: timeline.occurrences.filter((occurrence) => occurrence.actionName === "lava_burst" && occurrence.castStart === 2.574) };
     expect(isReplayClipMissing(resolveLoggedAnimation(isolated, 3.9), ["Stand (ID 0 variation 0)"])).toBe(false);
+  });
+
+  it("loops the authored ready clip until the logged cast finish", () => {
+    const isolated = { ...timeline, occurrences: timeline.occurrences.filter((occurrence) =>
+      occurrence.actionName === "lava_burst" && occurrence.castStart === 2.574) };
+    const durations = new Map([[828, 200], [862, 300], [830, 150]]);
+    expect(resolveLoggedAnimation(isolated, 3.3, undefined, durations)).toMatchObject({
+      animationId: 862, clipTime: expect.closeTo(0.226), status: expect.stringContaining("AnimKit segment"),
+    });
+    expect(resolveLoggedAnimation(isolated, 3.65, undefined, durations)).toMatchObject({ animationId: 830, clipTime: 0 });
   });
 
   it("blends stand into the logged Lava Burst precast and release into stand without shifting either boundary", () => {
@@ -179,14 +222,15 @@ describe("logged native replay scheduling", () => {
     const middle = resolveLoggedMotionBlend(isolated, 2.649);
     const release = resolveLoggedMotionBlend(isolated, 3.65);
     const settle = resolveLoggedMotionBlend(isolated, 3.725);
-    const completed = resolveLoggedMotionBlend(isolated, 3.8);
+    const completed = resolveLoggedMotionBlend(isolated, 3.951);
     expect(before.incoming.kind).toBe("settled");
-    expect(boundary).toMatchObject({ incoming: { kind: "motion", animationId: 1148, clipTime: 0 },
+    expect(boundary).toMatchObject({ incoming: { kind: "motion", animationId: 828, clipTime: 0 },
       outgoing: { kind: "settled", animationId: 0 }, incomingWeight: 0 });
     expect(middle.incomingWeight).toBeCloseTo(0.5);
-    expect(release.incoming.kind).toBe("motion");
-    expect(release.incoming.clipTime).toBeCloseTo(1.076);
-    expect(settle).toMatchObject({ incoming: { kind: "settled" }, outgoing: { kind: "motion", animationId: 1148 }, incomingWeight: expect.closeTo(0.5) });
+    expect(release).toMatchObject({ incoming: { kind: "motion", animationId: 830, clipTime: 0 },
+      outgoing: { kind: "motion", animationId: 828 }, incomingWeight: 0 });
+    expect(settle).toMatchObject({ incoming: { kind: "motion", animationId: 830, clipTime: expect.closeTo(0.075) },
+      outgoing: { kind: "motion", animationId: 828 }, incomingWeight: expect.closeTo(0.5) });
     expect(completed.outgoing).toBeNull();
   });
 
@@ -194,11 +238,11 @@ describe("logged native replay scheduling", () => {
     const preceding = resolveLoggedMotionBlend(timeline, 33.34);
     const boundary = resolveLoggedMotionBlend(timeline, 33.345);
     const middle = resolveLoggedMotionBlend(timeline, 33.42);
-    const complete = resolveLoggedMotionBlend(timeline, 33.495);
-    expect(preceding.incoming).toMatchObject({ kind: "motion", animationId: 830, clipTime: expect.closeTo(0.988) });
+    const complete = resolveLoggedMotionBlend(timeline, 33.5);
+    expect(preceding.incoming).toMatchObject({ kind: "motion", animationId: 53, clipTime: 0 });
     expect(boundary.incomingWeight).toBe(0);
     expect(middle.incoming).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.075) });
-    expect(middle.outgoing).toMatchObject({ kind: "motion", clipTime: expect.closeTo(0.988) });
+    expect(middle.outgoing).toMatchObject({ kind: "motion", animationId: 53, clipTime: expect.closeTo(0.005) });
     expect(middle.incomingWeight).toBeCloseTo(0.5);
     expect(complete.outgoing).toBeNull();
   });
@@ -347,7 +391,8 @@ describe("published replay attachment placement", () => {
   it("keeps unmapped components at the bounds anchor and fails on missing mapped attachments", () => {
     const boundsAnchor = new Vector3(1, 2, 3);
     const noAttachments = () => null;
-    expect(getReplayEffectSourceAnchor(188196, 6211617, noAttachments, boundsAnchor)).toBe(boundsAnchor);
+    expect(() => getReplayEffectSourceAnchor(188196, 6211617, noAttachments, boundsAnchor))
+      .toThrow(/FileDataID 6211617.*attachment 19/);
     expect(getReplayEffectSourceAnchor(188196, 6211618, noAttachments, boundsAnchor)).toBe(boundsAnchor);
     expect(() => getReplayEffectSourceAnchor(117014, 4329984, noAttachments, boundsAnchor))
       .toThrow(/FileDataID 4329984.*attachment 21/);

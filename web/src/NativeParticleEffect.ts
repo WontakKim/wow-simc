@@ -12,16 +12,18 @@ import {
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   LinearFilter,
+  Matrix4,
   Mesh,
   RGBAFormat,
   RepeatWrapping,
   ShaderMaterial,
   NoColorSpace,
+  Quaternion,
   UnsignedByteType,
   Vector2,
   Vector3,
 } from "three";
-import { nativeToThreePoint as nativeToThree } from "./m2/coordinates";
+import { nativeToThreeMatrix, nativeToThreePoint as nativeToThree } from "./m2/coordinates";
 import { decodeNativeBlp } from "./nativeBlp";
 import type { NativeEffectAsset } from "./nativeEffectAssets";
 import { parseNativeM2, parseNativeSkin, type NativeM2Model, type NativeParticleEmitter, type NativeRibbonEmitter, type NativeSkinProfile, type Vector3Tuple } from "./nativeM2";
@@ -255,7 +257,7 @@ function createEmitterBatch(
         if (combined.a < uAlphaTest) discard;
         if (combined.a < particleAlphaCutoff) discard;
         float alpha = combined.a * uAlphaMult;
-        gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult, alpha), alpha);
+        gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult ${emitter.blendingType === 7 ? "* alpha" : ""}, alpha), alpha);
         #include <colorspace_fragment>
       }
     `,
@@ -689,9 +691,12 @@ export class NativeParticleEffect {
       positions.needsUpdate = true;
       normals.needsUpdate = true;
       const transform = instance.sourceTransformAtTime(instance.timeSeconds);
-      const source = nativeToThree([transform[12], transform[13], transform[14]]);
-      batch.mesh.position.set(...source);
-      batch.mesh.scale.setScalar(instance.modelScale);
+      const source = nativeToThreeMatrix(transform);
+      const orientation = new Quaternion();
+      const authoredScale = new Vector3();
+      new Matrix4().fromArray(source).decompose(batch.mesh.position, orientation, authoredScale);
+      batch.mesh.quaternion.copy(orientation);
+      batch.mesh.scale.copy(authoredScale.multiplyScalar(instance.modelScale));
       let opacity = 1;
       const color = new Color(1, 1, 1);
       if (batch.colorIndex >= 0) {

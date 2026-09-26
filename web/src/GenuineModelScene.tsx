@@ -34,7 +34,7 @@ import { compileGeosetVisibility } from "./m2/appearance";
 import { isCreatureGeosetVisible } from "./m2/geosets";
 import previewStageJson from "./previewStage.json";
 import { parsePreviewStage } from "./m2/previewStage";
-import { NATIVE_TO_THREE_BASIS, threeToNativePoint } from "./m2/coordinates";
+import { NATIVE_TO_THREE_BASIS, nativeToThreePoint, threeToNativePoint } from "./m2/coordinates";
 import { STAND_ANIMATION_ID, animationOptionLabel } from "./m2/animations";
 import {
   blendBoneMatrices,
@@ -44,6 +44,7 @@ import {
 } from "./m2/sampler";
 import { createNativeM2Actor, type NativeM2Actor } from "./m2/renderer";
 import type { M2Sequence } from "./m2/model";
+import { composeAttachmentTransform, getPreviewVisual, resolveVisualAnimation, sampleKitStart, scheduleVisualPhases } from "./spellVisuals";
 
 // resolveJsonModule widens the asset `kind` strings; the manifest is generated
 // by script/prepare-native-models.mjs and pinned by SHA-256 per asset.
@@ -71,7 +72,9 @@ const REPLAY_POSE_BLEND_SECONDS = 0.15;
 const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
 const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
 type ReplayEffectAnchor = "caster" | "target" | "projectile";
-type ReplayComponent = { fileDataId: number; anchor: ReplayEffectAnchor };
+type ReplayComponent = { fileDataId: number; anchor: ReplayEffectAnchor; placement?: PreparedPlacement };
+type PreparedPlacement = { attachmentId: number; positionerId: number; offset: [number, number, number];
+  angles: [number, number, number]; scale: number; startDelay: number; sourceRowId: number; eventId?: number };
 interface ReplaySpellEffect {
   actionName: string;
   components: ReplayComponent[];
@@ -93,16 +96,55 @@ const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
 // including overloads, impact decay, and shared assets across spell families.
 export const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
   [794788, 4], [613807, 4], [4006618, 8], [1598036, 1],
-  [1355634, 1], [1284864, 1], [1109885, 1], [4006621, 3],
-  [3980244, 8], [4329984, 7], [6211617, 4], [6211618, 4], [1571475, 7], [4392095, 1], [4050773, 1],
+  [1355634, 1], [1284864, 1], [1109885, 2], [4006621, 3],
+  [3980244, 8], [4329984, 7], [6211617, 4], [6211618, 3], [1571475, 7], [4392095, 1], [4050773, 1],
 ]);
 // SpellVisualMissile rows 28854 and 28867–28869 and SpellVisualKitModelAttach rows 321812/321824, build 12.1.0.69933.
 // Mapped to native M2 attachment ids on the caster model (21 SpellHandL, 22 SpellHandR, 34 Chest).
 export const REPLAY_SOURCE_ATTACHMENTS: Record<number, Record<number, number>> = {
   191634: { 1355634: 22, 1284864: 22 },
+  188196: { 6211617: 19 },
   51505: { 4329984: 34 },
   117014: { 4329984: 21, 794788: 22, 613807: 34 },
 };
+interface PreparedVisual {
+  MissileDestinationAttachment: number;
+  events: Array<{ ID: number; SpellVisualID: number; StartEvent: number; EndEvent: number; TargetType: number; SpellVisualKitID: number;
+    StartMinOffsetMs: number; StartMaxOffsetMs: number; kit: { DelayMin: number; DelayMax: number; effects: Array<{
+      modelAttach?: { ID: number; AttachmentID: number; PositionerID: number; Offset_0: number; Offset_1: number; Offset_2: number;
+        Yaw: number; Pitch: number; Roll: number; Scale: number; StartDelay: number;
+        effectName: { ModelFileDataID: number } };
+      visualAnim?: { InitialAnimID: number; LoopAnimID: number; AnimKitID: number;
+        animKit: { segments: Array<{ AnimID: number; OrderIndex: number }> } | null };
+    }> } }>;
+  missiles: Array<{ ID: number; Attachment: number; DestinationAttachment: number; CastPositionerID: number;
+    CastOffset_0: number; CastOffset_1: number; CastOffset_2: number;
+    effectName: { ModelFileDataID: number } }>;
+}
+
+function preparedVisual(spellId: number): PreparedVisual | null {
+  return getPreviewVisual(spellId) as unknown as PreparedVisual | null;
+}
+
+export function getPreparedComponentPlacements(spellId: number, component: ReplayComponent): PreparedPlacement[] {
+  const visual = preparedVisual(spellId);
+  if (!visual) return [];
+  if (component.anchor === "projectile") return visual.missiles
+    .filter((missile) => missile.effectName.ModelFileDataID === component.fileDataId)
+    .map((missile) => ({ attachmentId: missile.Attachment, positionerId: missile.CastPositionerID,
+      offset: [missile.CastOffset_0, missile.CastOffset_1, missile.CastOffset_2], angles: [0, 0, 0],
+      scale: 1, startDelay: 0, sourceRowId: missile.ID } satisfies PreparedPlacement));
+  return visual.events.flatMap((event) => event.kit.effects.flatMap((effect) => {
+    if (component.anchor === "target" && event.TargetType !== 4) return [];
+    const attach = effect.modelAttach;
+    if (!attach || attach.effectName.ModelFileDataID !== component.fileDataId) return [];
+    return [{ attachmentId: attach.AttachmentID, positionerId: attach.PositionerID,
+      offset: [attach.Offset_0, attach.Offset_1, attach.Offset_2],
+      angles: [attach.Yaw, attach.Pitch, attach.Roll], scale: attach.Scale,
+      startDelay: attach.StartDelay, sourceRowId: attach.ID, eventId: event.ID } satisfies PreparedPlacement];
+  }));
+}
+
 const NATIVE_REPLAY_BASE_SCALE = 0.38;
 
 const ELEMENTAL_SHAMAN_ANIMATIONS = new Map<number, { actionName: string; animationId: number }>([
@@ -203,6 +245,12 @@ function roundReplayTime(value: number) {
 
 const LOGGED_EFFECT_DECAY_SECONDS = 1.5;
 
+function getRenderablePlacements(placements: PreparedPlacement[]): Array<PreparedPlacement | undefined> {
+  const resolved = placements.filter((placement) => placement.attachmentId >= 0);
+  // Distinct unresolved positioners cannot be separated by the bounds fallback.
+  return resolved.length ? resolved : placements.length ? placements.slice(0, 1) : [undefined];
+}
+
 function getLoggedSpell(actionName: string) {
   const family = actionName.replace(/(?:_overload)?_asc$|_overload$/, "");
   return [...REPLAY_SPELL_EFFECTS.values()].find((spell) => spell.actionName === family);
@@ -225,11 +273,27 @@ export function resolveLoggedEffectOccurrences(timeline: CombatTimeline, cursor:
     const spell = getLoggedSpell(occurrence.actionName);
     if (!spell) continue;
     const sourceActor = occurrence.actor;
+    const visual = preparedVisual(occurrence.spellId);
+    const kitTimes = visual ? scheduleVisualPhases({ occurrences: [occurrence], auras: [], unmatched: [] }, visual.events, occurrence.spellId).kits : [];
     const add = (components: ReplayComponent[], start: number | null, end: number, travelDuration?: number) => {
-      if (!components.length || start === null || cursor < start || cursor >= end) return;
-      effects.push({ eventKey: occurrence.key, eventTime: occurrence.castFinish ?? start,
-        elapsedSeconds: roundReplayTime(cursor - start), componentTimeSeconds: roundReplayTime(cursor - start),
-        spellId: occurrence.spellId, components, travelDuration, sourceActor });
+      if (!components.length || start === null) return;
+      const groups = new Map<number, ReplayComponent[]>();
+      for (const component of components) {
+        const placements = getPreparedComponentPlacements(occurrence.spellId, component);
+        for (const placement of getRenderablePlacements(placements)) {
+          const kitTime = placement?.eventId
+            ? kitTimes.find((kit) => kit.sourceRowId === placement.eventId)?.time : undefined;
+          const time = roundReplayTime((kitTime ?? start) + (placement?.startDelay ?? 0));
+          const activeEnd = component.anchor === "caster" ? Math.max(end, time + OTHER_REPLAY_EMISSION_SECONDS) : end;
+          if (cursor < time || cursor >= activeEnd) continue;
+          const group = groups.get(time) ?? [];
+          group.push({ ...component, placement });
+          groups.set(time, group);
+        }
+      }
+      for (const [time, active] of groups) effects.push({ eventKey: occurrence.key, eventTime: occurrence.castFinish ?? start,
+        elapsedSeconds: roundReplayTime(cursor - time), componentTimeSeconds: roundReplayTime(cursor - time),
+        spellId: occurrence.spellId, components: active, travelDuration, sourceActor });
     };
     const components = spell.components;
     const impact = occurrence.impacts[0]?.time ?? null;
@@ -258,7 +322,10 @@ export function resolveLoggedEffectOccurrences(timeline: CombatTimeline, cursor:
       && `${event.actor}/${event.name}` === actor && event.stacks === 0)?.time;
     effects.push({ eventKey: `aura-${aura.ordinal}`, eventTime: aura.time,
       elapsedSeconds: roundReplayTime(cursor - aura.time), componentTimeSeconds: roundReplayTime(cursor - aura.time),
-      spellId: aura.spellId, components: spell.components, emissionDuration: (nextLoss ?? 45) - aura.time });
+      spellId: aura.spellId, components: spell.components.flatMap((component) => {
+        const placements = getPreparedComponentPlacements(aura.spellId, component);
+        return getRenderablePlacements(placements).map((placement) => ({ ...component, placement }));
+      }), emissionDuration: (nextLoss ?? 45) - aura.time });
   }
   return effects;
 }
@@ -278,23 +345,35 @@ function getLoggedForegroundCasts(timeline: CombatTimeline) {
   });
 }
 
-function createLoggedCastAnimation(occurrence: CombatTimeline["occurrences"][number], cursor: number): ReplayAnimationResolution {
-  const animationId = ELEMENTAL_SHAMAN_ANIMATIONS.get(occurrence.spellId)!.animationId;
+function createLoggedCastAnimation(occurrence: CombatTimeline["occurrences"][number], cursor: number,
+  phase: "prepare" | "release", clipDurations?: Map<number, number>): ReplayAnimationResolution {
+  const fallback = ELEMENTAL_SHAMAN_ANIMATIONS.get(occurrence.spellId)!.animationId;
+  const visual = preparedVisual(occurrence.spellId);
+  const event = visual?.events.find((row) => row.StartEvent === (phase === "prepare" ? 1 : 3));
+  const authored = event?.kit.effects.find((effect) => effect.visualAnim)?.visualAnim ?? null;
+  const initial = resolveVisualAnimation(authored, phase, fallback);
+  const elapsed = cursor - (phase === "prepare" ? occurrence.castStart! : occurrence.castFinish!);
+  const duration = clipDurations?.get(initial.animationId);
+  const isLoop = phase === "prepare" && duration !== undefined && duration > 0 && elapsed * 1000 >= duration;
+  const selection = isLoop ? resolveVisualAnimation(authored, "loop", fallback) : initial;
+  const loopDuration = isLoop ? clipDurations?.get(selection.animationId) : undefined;
+  const clipTime = isLoop && selection.provenance !== "viewer fallback"
+    ? loopDuration && loopDuration > 0 ? (elapsed - duration / 1000) % (loopDuration / 1000) : elapsed - duration / 1000
+    : elapsed;
   return { kind: "motion", eventLabel: occurrence.actionName.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join(" "),
-    clipName: animationOptionLabel(animationId, 0), animationId,
-    clipTime: cursor - (occurrence.castStart ?? occurrence.castFinish!),
-    status: occurrence.castStart === null ? `Instant release at ${occurrence.castFinish!.toFixed(3)}s (SimC log); pose blend after release is presentation only.`
-      : `Logged cast ${occurrence.castStart.toFixed(3)}–${occurrence.castFinish!.toFixed(3)}s; native pose holds at clip end until release.` };
+    clipName: animationOptionLabel(selection.animationId, 0), animationId: selection.animationId, clipTime,
+    status: `${phase === "prepare" ? `Logged cast ${occurrence.castStart!.toFixed(3)}–${occurrence.castFinish!.toFixed(3)}s` : `Release at ${occurrence.castFinish!.toFixed(3)}s`}; ${selection.provenance} from preview visual ${visual ? "DB2" : "unresolved"}${selection.provenance === "viewer fallback" ? ` (clip ${fallback})` : ""}.` };
 }
 
-export function resolveLoggedAnimation(timeline: CombatTimeline, cursor: number, selectedEvent?: ReplayEvent): ReplayAnimationResolution {
+export function resolveLoggedAnimation(timeline: CombatTimeline, cursor: number, selectedEvent?: ReplayEvent,
+  clipDurations?: Map<number, number>): ReplayAnimationResolution {
   const casts = getLoggedForegroundCasts(timeline);
-  const current = casts.filter((occurrence) => (occurrence.castStart ?? occurrence.castFinish!) <= cursor
-    && cursor <= occurrence.castFinish!).at(-1);
-  if (current) return createLoggedCastAnimation(current, cursor);
-  const instant = casts.filter((occurrence) => occurrence.castStart === null
-    && occurrence.castFinish! < cursor && cursor < occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS).at(-1);
-  if (instant) return createLoggedCastAnimation(instant, cursor);
+  const current = casts.filter((occurrence) => occurrence.castStart !== null && occurrence.castStart <= cursor
+    && cursor < occurrence.castFinish!).at(-1);
+  if (current) return createLoggedCastAnimation(current, cursor, "prepare", clipDurations);
+  const release = casts.filter((occurrence) => occurrence.castFinish! <= cursor
+    && cursor < occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS).at(-1);
+  if (release) return createLoggedCastAnimation(release, cursor, "release", clipDurations);
 
   const idle = (kind: ReplayAnimationKind, status: string): ReplayAnimationResolution => ({
     kind, eventLabel: selectedEvent && kind !== "settled" ? getEventLabel(selectedEvent) : "No active foreground cast",
@@ -310,35 +389,35 @@ export function resolveLoggedAnimation(timeline: CombatTimeline, cursor: number,
   return idle("settled", "Idle between logged casts; background procs do not restart the caster pose.");
 }
 
-export function resolveLoggedMotionBlend(timeline: CombatTimeline, cursor: number, selectedEvent?: ReplayEvent): ReplayMotionBlend {
-  const incoming = resolveLoggedAnimation(timeline, cursor, selectedEvent);
+export function resolveLoggedMotionBlend(timeline: CombatTimeline, cursor: number, selectedEvent?: ReplayEvent,
+  clipDurations?: Map<number, number>): ReplayMotionBlend {
+  const incoming = resolveLoggedAnimation(timeline, cursor, selectedEvent, clipDurations);
   const casts = getLoggedForegroundCasts(timeline);
-  const active = casts.filter((occurrence) => (occurrence.castStart ?? occurrence.castFinish!) <= cursor
-    && cursor <= occurrence.castFinish!).at(-1);
-  const instant = active ?? casts.filter((occurrence) => occurrence.castStart === null
-    && occurrence.castFinish! < cursor && cursor < occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS).at(-1);
-  if (instant && incoming.kind === "motion") {
-    const boundary = instant.castStart ?? instant.castFinish!;
-    const elapsed = roundReplayTime(cursor - boundary);
-    if (elapsed < REPLAY_POSE_BLEND_SECONDS) {
-      const previous = casts.filter((occurrence) => occurrence.ordinal < instant.ordinal
-        && occurrence.castFinish! <= boundary).at(-1);
-      const outgoing = previous && boundary - previous.castFinish! < REPLAY_POSE_BLEND_SECONDS
-        ? createLoggedCastAnimation(previous, previous.castFinish!)
-        : { kind: "settled" as const, eventLabel: "No active foreground cast", clipName: STAND_CLIP_NAME,
-          animationId: STAND_ANIMATION_ID, clipTime: 0, status: "Idle before the logged cast." };
-      return { incoming, outgoing, incomingWeight: elapsed / REPLAY_POSE_BLEND_SECONDS };
-    }
-    return { incoming, outgoing: null, incomingWeight: 1 };
+  const stand: ReplayAnimationResolution = { kind: "settled", eventLabel: "No active foreground cast", clipName: STAND_CLIP_NAME,
+    animationId: STAND_ANIMATION_ID, clipTime: 0, status: "Idle before the logged cast." };
+  const active = casts.filter((occurrence) => occurrence.castStart !== null
+    && occurrence.castStart <= cursor && cursor < occurrence.castFinish!).at(-1);
+  if (active && cursor - active.castStart! < REPLAY_POSE_BLEND_SECONDS) {
+    const previous = casts.filter((occurrence) => occurrence.ordinal < active.ordinal
+      && occurrence.castFinish! <= active.castStart!).at(-1);
+    const outgoing = previous && active.castStart! - previous.castFinish! < REPLAY_POSE_BLEND_SECONDS
+      ? createLoggedCastAnimation(previous, active.castStart!, "release", clipDurations) : stand;
+    return { incoming, outgoing, incomingWeight: roundReplayTime(cursor - active.castStart!) / REPLAY_POSE_BLEND_SECONDS };
   }
-  const finished = casts.filter((occurrence) => occurrence.castFinish! < cursor
-    && cursor < occurrence.castFinish! + (occurrence.castStart === null ? 2 : 1) * REPLAY_POSE_BLEND_SECONDS).at(-1);
+  if (active) return { incoming, outgoing: null, incomingWeight: 1 };
+  const release = casts.filter((occurrence) => occurrence.castFinish! <= cursor
+    && cursor < occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS).at(-1);
+  if (release) {
+    const outgoing = release.castStart !== null
+      ? createLoggedCastAnimation(release, release.castFinish!, "prepare", clipDurations) : stand;
+    return { incoming, outgoing, incomingWeight: roundReplayTime(cursor - release.castFinish!) / REPLAY_POSE_BLEND_SECONDS };
+  }
+  const finished = casts.filter((occurrence) => occurrence.castFinish! + REPLAY_POSE_BLEND_SECONDS <= cursor
+    && cursor < occurrence.castFinish! + 2 * REPLAY_POSE_BLEND_SECONDS).at(-1);
   if (!finished) return { incoming, outgoing: null, incomingWeight: 1 };
-  const boundary = finished.castFinish! + (finished.castStart === null ? REPLAY_POSE_BLEND_SECONDS : 0);
-  const elapsed = roundReplayTime(cursor - boundary);
-  if (elapsed < 0 || elapsed >= REPLAY_POSE_BLEND_SECONDS) return { incoming, outgoing: null, incomingWeight: 1 };
-  return { incoming, outgoing: createLoggedCastAnimation(finished, boundary),
-    incomingWeight: elapsed / REPLAY_POSE_BLEND_SECONDS };
+  return { incoming, outgoing: createLoggedCastAnimation(finished, finished.castFinish! + REPLAY_POSE_BLEND_SECONDS,
+    "release", clipDurations), incomingWeight: roundReplayTime(cursor - finished.castFinish! - REPLAY_POSE_BLEND_SECONDS)
+      / REPLAY_POSE_BLEND_SECONDS };
 }
 
 export function getReplayEffectAnchors(caster: Group, target: Group) {
@@ -367,27 +446,40 @@ export function getReplayEffectSourceAnchor(
 }
 
 const M2_ATTACHMENT_NAMES = new Map<number, string>([
+  [19, "Base"],
   [21, "SpellHandL"],
   [22, "SpellHandR"],
   [34, "Chest"],
 ]);
 
+function hasCasterAttachment(spellId: number, component: ReplayComponent) {
+  return component.anchor !== "target" && (getPreparedComponentPlacements(spellId, component)
+    .some((placement) => placement.attachmentId >= 0)
+    || REPLAY_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId] !== undefined);
+}
+
 function describeReplayComponentAnchor(spellId: number, component: ReplayComponent) {
-  const attachmentId = REPLAY_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId];
+  const placements = getPreparedComponentPlacements(spellId, component);
+  const sourced = placements.filter((placement) => placement.attachmentId >= 0);
+  const attachmentId = sourced[0]?.attachmentId ?? REPLAY_SOURCE_ATTACHMENTS[spellId]?.[component.fileDataId];
   const attachmentName = attachmentId !== undefined ? M2_ATTACHMENT_NAMES.get(attachmentId) : undefined;
   if (attachmentId !== undefined && component.anchor === "caster") {
-    return `native caster attachment ${attachmentId} (${attachmentName}) origin sampled at the replay time${component.fileDataId === 1284864 ? "; kit offset (0, 0.15, 0) unapplied (attachment-local frame unavailable)" : ""}`;
+    const sources = [...new Set(sourced.map((placement) => placement.attachmentId))];
+    const detail = sources.length > 1 ? `; source-linked attachments ${sources.join(" and ")}` : "";
+    return `native caster attachment ${attachmentId} (${attachmentName}) frame sampled at the replay time${detail}${component.fileDataId === 1284864 ? "; attachment-local kit offset (0, 0.15, 0) applied" : ""}`;
   }
   if (attachmentId !== undefined) {
     return `native caster attachment ${attachmentId} (${attachmentName}) origin for launch · dummy attachment 34 (Chest) translation for arrival${spellId === 117014 ? "; impact positioner 712 unresolved" : ""}`;
   }
   if (component.anchor === "projectile") {
-    return "60%-bounds anchored launch (source attachment 19 Base or -1 with positioner 513, Lightning Bolt branch unresolved) · dummy attachment 34 (Chest) translation for arrival";
+    return "60%-bounds anchored launch (missile source attachment unresolved) · dummy attachment 34 (Chest) translation for arrival";
   }
   if (component.anchor === "target") {
-    return "native dummy attachment 34 (Chest) transform from the current pose; historical orientation not reconstructed";
+    const positioners = [...new Set(placements.map((placement) => placement.positionerId).filter(Boolean))];
+    return `native dummy attachment 34 (Chest) transform from the current pose; historical orientation not reconstructed${positioners.length ? `; source positioner ${positioners.join("/")} unresolved` : ""}`;
   }
-  return "60%-bounds anchored at caster (source attachment not established for this component)";
+  const positioners = [...new Set(placements.map((placement) => placement.positionerId).filter(Boolean))];
+  return `60%-bounds anchored at caster${positioners.length ? `; source positioner ${positioners.join("/")} unresolved` : "; source attachment not established"}`;
 }
 
 function threeToNative(value: Vector3): [number, number, number] {
@@ -533,6 +625,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const [loadedModelCount, setLoadedModelCount] = useState(0);
   const [actorStatusLines, setActorStatusLines] = useState<string[]>([]);
   const [animationNames, setAnimationNames] = useState<string[]>([]);
+  const [clipDurations, setClipDurations] = useState<Map<number, number>>(new Map());
   const [selectedAnimationIndex, setSelectedAnimationIndex] = useState(0);
   const [animationMode, setAnimationMode] = useState<AnimationMode>("replay");
   const [isManualPlaying, setIsManualPlaying] = useState(false);
@@ -557,7 +650,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
   const replayStateRef = useRef(replay);
 
   const replayMotionBlend = replay?.timeline
-    ? resolveLoggedMotionBlend(replay.timeline, replay.cursor, replay.events[replay.selectedIndex])
+    ? resolveLoggedMotionBlend(replay.timeline, replay.cursor, replay.events[replay.selectedIndex], clipDurations)
     : { incoming: { kind: "unavailable" as const, eventLabel: "No combat log", clipName: STAND_CLIP_NAME,
       animationId: STAND_ANIMATION_ID, clipTime: 0, status: "No combat log timing is available for this report; native cast replay is idle." },
       outgoing: null, incomingWeight: 1 };
@@ -782,23 +875,41 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             .filter((component) => component.fileDataId === asset.fileDataId)
             .map((component) => ({ occurrence, component })));
           const instances: NativeParticleRenderInstance[] = matching.map(({ occurrence, component }) => {
-            const source = getReplayEffectSourceAnchor(occurrence.spellId, component.fileDataId, sampleCasterAttachment, anchors.caster);
-            const attachmentId = REPLAY_SOURCE_ATTACHMENTS[occurrence.spellId]?.[component.fileDataId];
-            // The pose sampler currently supplies the attachment's rotation at
-            // the displayed frame; past caster rotations are not reconstructed.
-            const casterTransform = attachmentId === undefined ? null
-              : sampleAttachmentEffectTransform(vulperaActor!, attachmentId);
+            const placement = component.placement;
+            const attachmentId = placement?.attachmentId ?? REPLAY_SOURCE_ATTACHMENTS[occurrence.spellId]?.[component.fileDataId];
+            // The current displayed pose supplies rotation; historical bone
+            // matrices are not recorded by the combat log.
+            const attachmentFrame = attachmentId !== undefined && attachmentId >= 0
+              ? sampleAttachmentEffectTransform(component.anchor === "target" ? dummyActor! : vulperaActor!, attachmentId)
+              : null;
+            if (attachmentId !== undefined && attachmentId >= 0 && !attachmentFrame) {
+              throw new Error(`FileDataID ${component.fileDataId}: native attachment ${attachmentId} is unavailable.`);
+            }
+            const authoredFrame = attachmentFrame && placement
+              ? composeAttachmentTransform(attachmentFrame, placement.offset, placement.angles, placement.scale)
+              : attachmentFrame;
+            const source = authoredFrame ? new Vector3(...nativeToThreePoint([
+              authoredFrame[12], authoredFrame[13], authoredFrame[14],
+            ])) : anchors.caster;
+            const sourceFrame = authoredFrame ?? effectTranslationMatrix(source);
+            const destination = component.anchor === "target" && authoredFrame ? authoredFrame : targetTransform;
             return {
               timeSeconds: occurrence.componentTimeSeconds,
               emissionEndSeconds: occurrence.emissionDuration ?? (component.anchor === "projectile"
                 ? occurrence.travelDuration ?? 0 : OTHER_REPLAY_EMISSION_SECONDS),
               modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
-              occurrenceSeed: occurrence.eventKey,
-              sourceTransformAtTime: (timeSeconds) => component.anchor === "projectile"
-                ? effectTranslationMatrix(source.clone().lerp(targetAnchor,
-                  Math.max(0, Math.min(1, timeSeconds / (occurrence.travelDuration ?? 1)))))
-                : component.anchor === "caster" ? casterTransform ?? effectTranslationMatrix(source) : targetTransform,
+              occurrenceSeed: `${occurrence.eventKey}/${placement?.sourceRowId ?? component.fileDataId}`,
+              sourceTransformAtTime: (timeSeconds) => {
+                if (component.anchor === "target") return destination;
+                if (component.anchor === "caster") return sourceFrame;
+                const position = source.clone().lerp(targetAnchor,
+                  Math.max(0, Math.min(1, timeSeconds / (occurrence.travelDuration ?? 1))));
+                const [x, y, z] = threeToNative(position);
+                const frame = [...sourceFrame];
+                frame[12] = x; frame[13] = y; frame[14] = z;
+                return frame;
+              },
             };
           });
           particleCount += effect.setReplayInstances(instances, camera);
@@ -1101,6 +1212,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         resetCamera,
       };
       setAnimationNames(animationClipNames);
+      setClipDurations(new Map(sequences.map((sequence) => [sequence.animationId, sequence.durationMs])));
       setSelectedAnimationIndex(defaultClipIndex);
       if (animationModeRef.current === "replay") {
         applyReplayAnimation(replayAnimationRef.current);
@@ -1343,8 +1455,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           )}
           {selectedReplaySpell && (
             <p data-testid="replay-anchor-status">
-              Across the mapped spell list, 6 of 19 mapped components use native caster attachment origins and 13 remain bounds-anchored. Placement: {selectedReplaySpell.components.filter((component) =>
-                Boolean(REPLAY_SOURCE_ATTACHMENTS[selectedReplayEvent!.id!]?.[component.fileDataId])).length} of {selectedReplaySpell.components.length} components use native caster attachment origins; remaining components use 60%-bounds anchors.
+              Across the mapped spell list, {[...REPLAY_SPELL_EFFECTS].reduce((total, [spellId, spell]) => total + spell.components.filter((component) => hasCasterAttachment(spellId, component)).length, 0)} of {[...REPLAY_SPELL_EFFECTS.values()].reduce((total, spell) => total + spell.components.length, 0)} mapped components use native caster attachment frames. Placement: {selectedReplaySpell.components.filter((component) =>
+                hasCasterAttachment(selectedReplayEvent!.id!, component)).length} of {selectedReplaySpell.components.length} components use native caster attachment origins; others use the dummy Chest or bounds fallback. Authored kit offsets and delays apply only to resolved attachment rows; conditional visual branches and positioners 513, 36, 216, 1172 and 712 are not reconstructed.
               {selectedReplaySpell.components.map((component) =>
                 ` FileDataID ${component.fileDataId}: ${describeReplayComponentAnchor(selectedReplayEvent!.id!, component)}.`).join("")}
             </p>

@@ -400,7 +400,8 @@ test("synchronizes native cast poses to replay controls deterministically", asyn
   await expect(motionStatus).toContainText("No active foreground cast");
   await scene.getByRole("button", { name: "Reset", exact: true }).click();
   await expect(motionStatus).toContainText("Flame Shock");
-  await expect(motionStatus).toContainText("Instant release at 0.000s");
+  await expect(motionStatus).toContainText("Required native sequence missing (Animation 1292");
+  await expect(motionStatus).toHaveAttribute("data-animation-kind", "missing");
 });
 
 test("applies the latest replay pose when the Vulpera finishes loading late", async ({ page }) => {
@@ -845,15 +846,15 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   const canvas = scene.locator("canvas");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Lightning Bolt: 5 of 5 original emitters", { timeout: 30_000 });
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 0 of 3 components use native caster attachment origins");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: 60%-bounds anchored launch");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 1 of 3 components use native caster attachment origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: native caster attachment 19 (Base) origin for launch");
   await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("dummy attachment 34 (Chest) translation for arrival");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)");
   await seek.fill("2");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "1");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "2");
   await expect(canvas).toHaveAttribute("data-replay-native-mesh-triangles", "64");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "6211617");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "6211618,6211617");
   await scene.locator("[data-testid='replay-effect-limitations'] summary").click();
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("DBOC four authored values");
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).not.toContainText("shader 0x14 native combiner");
@@ -884,7 +885,7 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("4329984", { timeout: 30_000 });
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 1 of 4 components use native caster attachment origins");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 2 of 4 components use native caster attachment origins");
   await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 4329984: native caster attachment 34 (Chest) origin for launch");
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("3980281: 1 of 2 original missile bodies omitted");
   await expect(scene.locator("[data-testid='replay-missile-blocker']")).toContainText("LOD0 SKIN has 2 of 2 mesh batches");
@@ -1232,17 +1233,17 @@ test("rejects unsupported native source bytes visibly and preserves mobile frami
 });
 
 
-test("identifies both Stormkeeper attachment origins and the unapplied kit offset", async ({ page }) => {
+test("identifies both Stormkeeper attachment frames and the applied kit offset", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
   await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
   const stormkeeper = page.locator(".event-hit-target").filter({ hasText: "Stormkeeper" }).first();
   await stormkeeper.click();
   const placement = scene.getByTestId("replay-anchor-status");
-  await expect(placement).toContainText("6 of 19 mapped components use native caster attachment origins");
+  await expect(placement).toContainText("9 of 19 mapped components use native caster attachment frames");
   await expect(placement).toContainText("Placement: 2 of 2 components use native caster attachment origins");
-  await expect(placement).toContainText("FileDataID 1355634: native caster attachment 22 (SpellHandR) origin sampled at the replay time");
-  await expect(placement).toContainText("FileDataID 1284864: native caster attachment 22 (SpellHandR) origin sampled at the replay time; kit offset (0, 0.15, 0) unapplied");
+  await expect(placement).toContainText("FileDataID 1355634: native caster attachment 22 (SpellHandR) frame sampled at the replay time");
+  await expect(placement).toContainText("FileDataID 1284864: native caster attachment 22 (SpellHandR) frame sampled at the replay time; attachment-local kit offset (0, 0.15, 0) applied");
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   await seek.fill("0.15");

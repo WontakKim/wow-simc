@@ -6,6 +6,8 @@ import {
   BufferGeometry,
   DoubleSide,
   MeshBasicMaterial,
+  Matrix4,
+  Quaternion,
   RepeatWrapping,
   CustomBlending,
   OneFactor,
@@ -16,9 +18,11 @@ import {
   Mesh,
   ShaderMaterial,
   PerspectiveCamera,
+  Vector3,
 } from "three";
 import { describe, expect, it } from "vitest";
 import { decodeNativeBlp } from "./nativeBlp";
+import { nativeToThreeMatrix } from "./m2/coordinates";
 import { parseNativeM2, parseNativeSkin } from "./nativeM2";
 import { m2BlendParams } from "./nativeM2Blend";
 import { NativeParticleEffect } from "./NativeParticleEffect";
@@ -64,6 +68,46 @@ describe("original Lava Burst ribbon rendering", () => {
     expect(() => effect.setReplayInstances([instance, instance, instance], camera)).toThrow(/FileDataID 4329984.*3 simultaneous.*2-instance/i);
     effect.clearInstances();
     expect(ribbons.every((mesh) => mesh.geometry.drawRange.count === 0)).toBe(true);
+    effect.dispose();
+  });
+});
+
+describe("authored mesh attachment frame", () => {
+  it("applies the source orientation and scale to the original missile mesh", () => {
+    const model = parseNativeM2(loadAsset(6211617, "m2"), 6211617);
+    const skin = parseNativeSkin(loadAsset(6212146, "skin"), 6212146, model.vertices.length);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures, 1, skin);
+    const authored = new Matrix4().makeRotationZ(Math.PI / 2)
+      .scale(new Vector3(1.5, 1.5, 1.5)).setPosition(1, 2, 3).toArray();
+    effect.setReplayInstances([{ timeSeconds: 0.1, emissionEndSeconds: 0.2, modelScale: 0.38,
+      sourceTransformAtTime: () => authored }], new PerspectiveCamera());
+    const mesh = effect.group.children.slice(5).find((child) => child.visible) as Mesh;
+    const expectedPosition = new Vector3();
+    const expectedRotation = new Quaternion();
+    const expectedScale = new Vector3();
+    new Matrix4().fromArray(nativeToThreeMatrix(authored))
+      .decompose(expectedPosition, expectedRotation, expectedScale);
+    expect(mesh.position.distanceTo(expectedPosition)).toBeLessThan(1e-6);
+    expect(mesh.quaternion.angleTo(expectedRotation)).toBeLessThan(1e-6);
+    expect(mesh.scale.distanceTo(expectedScale.multiplyScalar(0.38))).toBeLessThan(1e-6);
+    effect.dispose();
+  });
+});
+
+describe("original Lightning Bolt cast artifact", () => {
+  it("premultiplies blend-7 cast billboards before the ONE/ONE_MINUS_SRC_ALPHA blend", () => {
+    const model = parseNativeM2(loadAsset(6211618, "m2"), 6211618);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const texture = textures[3];
+    expect(Array.from({ length: texture.pixels.length / 4 }, (_, pixel) => pixel)
+      .some((pixel) => texture.pixels[pixel * 4 + 3] === 0
+        && (texture.pixels[pixel * 4] || texture.pixels[pixel * 4 + 1] || texture.pixels[pixel * 4 + 2]))).toBe(true);
+    const effect = new NativeParticleEffect(model, textures);
+    const blendAdd = (effect.group.children as Mesh<InstancedBufferGeometry, ShaderMaterial>[])
+      .find((mesh) => mesh.material.uniforms.uFogBlendMode.value === 7)!;
+    expect(blendAdd.material.blendSrc).toBe(OneFactor);
+    expect(blendAdd.material.fragmentShader).toContain("combined.rgb * uColorMult * alpha");
     effect.dispose();
   });
 });
