@@ -34,6 +34,19 @@ mat4 boneMatrix(int index) {
   return mat4(c0, c1, c2, c3);
 }
 
+vec3 surfaceNormal(mat3 transform, vec3 direction) {
+  vec3 cofactor0 = cross(transform[1], transform[2]);
+  float determinant = dot(transform[0], cofactor0);
+  if (determinant == 0.0) {
+    // A collapsed surface has no unique normal; retain a finite direction for shading.
+    vec3 fallback = transform * direction;
+    return normalize(dot(fallback, fallback) > 0.0 ? fallback : direction);
+  }
+  mat3 cofactors = mat3(cofactor0, cross(transform[2], transform[0]), cross(transform[0], transform[1]));
+  // Cofactors are det(transform) * inverse-transpose; retain orientation across reflections.
+  return normalize((determinant > 0.0 ? 1.0 : -1.0) * cofactors * direction);
+}
+
 vec2 calcEnvCoord(vec3 posView, vec3 normalView) {
   // WWV posToTexCoord uses the negative projection sign; wow.export uses the opposite sign.
   vec3 r = reflect(normalize(posView), normalize(normalView));
@@ -65,9 +78,8 @@ void main() {
   vec4 viewPos = modelViewMatrix * skinnedPos;
   gl_Position = projectionMatrix * viewPos;
 
-  vec3 skinnedNormal = mat3(boneTransform) * normal;
-  v_normal_world = normalize(mat3(modelMatrix) * skinnedNormal);
-  v_normal_view = normalize(mat3(modelViewMatrix) * skinnedNormal);
+  v_normal_world = surfaceNormal(mat3(modelMatrix) * mat3(boneTransform), normal);
+  v_normal_view = surfaceNormal(mat3(modelViewMatrix) * mat3(boneTransform), normal);
   v_position_view = viewPos.xyz;
 
   vec2 envCoord = calcEnvCoord(v_position_view, v_normal_view);
