@@ -700,69 +700,193 @@ test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combi
   await expect(nativeStatus).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)", { timeout: 30_000 });
 });
 
-test("renders isolated Flame Shock particles beside the dummy at its own emission time", async ({ page }) => {
-  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
-    const response = await route.fetch();
-    const fixture = await response.json() as {
-      sim: { players: Array<{ collected_data: {
-        action_sequence: Array<{ id?: number }>;
-        action_sequence_precombat: Array<unknown>;
-      } }> };
-    };
-    const sequence = fixture.sim.players[0].collected_data;
-    sequence.action_sequence = [sequence.action_sequence.find((event) => event.id === 188389)!];
-    sequence.action_sequence_precombat = [];
-    keepSelectedActionLog(fixture);
-    await route.fulfill({ response, json: fixture });
-  });
-  await page.goto("/");
-  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
-  const canvas = scene.locator("canvas");
-  const seek = scene.getByRole("slider", { name: "Seek playback" });
-  await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Original components ready", { timeout: 30_000 });
-  await seek.fill("22.58");
-  await expect(canvas).toHaveAttribute("data-replay-native-particles", "0");
-  const before = await canvas.screenshot();
-
-  await seek.fill("22.72");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "4006618,3980244,4392095,4050773");
-  await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
-  const during = await canvas.screenshot();
-  const targetPixels = await page.evaluate(async ([beforeUrl, duringUrl]) => {
-    const readPixels = async (url: string) => {
-      const image = new Image();
-      image.src = url;
-      await image.decode();
-      const sample = document.createElement("canvas");
-      sample.width = image.width;
-      sample.height = image.height;
-      const context = sample.getContext("2d");
-      if (!context) throw new Error("Could not inspect the Flame Shock frame.");
-      context.drawImage(image, 0, 0);
-      return { width: image.width, height: image.height, pixels: context.getImageData(0, 0, image.width, image.height).data };
-    };
-    const beforeFrame = await readPixels(beforeUrl);
-    const duringFrame = await readPixels(duringUrl);
-    let count = 0;
-    for (let y = Math.floor(beforeFrame.height * 0.3); y < Math.floor(beforeFrame.height * 0.75); y += 1) {
-      for (let x = Math.floor(beforeFrame.width * 0.8); x < beforeFrame.width; x += 1) {
-        const offset = (y * beforeFrame.width + x) * 4;
-        const red = duringFrame.pixels[offset];
-        const green = duringFrame.pixels[offset + 1];
-        if (red - beforeFrame.pixels[offset] > 35
-          && green - beforeFrame.pixels[offset + 1] > 10
-          && red > green * 1.35) count += 1;
+test("renders isolated Flame Shock particles beside the dummy at its own emission time", async ({ page }, testInfo) => {
+  const hiddenPage = await page.context().newPage();
+  let actionTime = 0;
+  const interceptedModules: number[] = [];
+  for (const [index, currentPage] of [page, hiddenPage].entries()) {
+    await currentPage.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+      const response = await route.fetch();
+      const fixture = await response.json() as {
+        sim: { players: Array<{ collected_data: {
+          action_sequence: Array<{ id?: number; name?: string; time: number }>;
+          action_sequence_precombat: Array<unknown>;
+        } }> };
+      };
+      const sequence = fixture.sim.players[0].collected_data;
+      const selected = sequence.action_sequence.find((event) => event.id === 188389);
+      if (!selected) throw new Error("Flame Shock action 188389 is absent from the pinned report.");
+      actionTime = selected.time;
+      sequence.action_sequence = [selected];
+      sequence.action_sequence_precombat = [];
+      keepSelectedActionLog(fixture);
+      await route.fulfill({ response, json: fixture });
+    });
+    interceptedModules[index] = 0;
+    await currentPage.route("**/src/GenuineModelScene.tsx*", async (route) => {
+      const response = await route.fetch();
+      let source = await response.text();
+      const probePoint = "const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 100);";
+      const replayVisibility = 'effect.group.visible = animationModeRef.current === "replay";';
+      const modeVisibility = "effect.group.visible = isVisible;";
+      for (const marker of [probePoint, replayVisibility, modeVisibility, "const OTHER_REPLAY_EMISSION_SECONDS = 0.2;"]) {
+        if (source.split(marker).length !== 2) throw new Error(`Flame Shock scene hook changed: ${marker}`);
       }
+      source = source.replace(probePoint, `${probePoint}
+        window.__flameShockProbe = () => {
+          const target = dummyActor && dummyMount
+            ? sampleAttachmentWorldPosition(dummyActor, dummyMount, 34) : null;
+          if (!target) throw new Error("Dummy chest attachment 34 is unavailable.");
+          const projected = target.project(camera);
+          const bounds = new Box3().setFromObject(dummyMount);
+          const screenBounds = new Box3();
+          for (const x of [bounds.min.x, bounds.max.x])
+            for (const y of [bounds.min.y, bounds.max.y])
+              for (const z of [bounds.min.z, bounds.max.z])
+                screenBounds.expandByPoint(new Vector3(x, y, z).project(camera));
+          const centerX = (projected.x + 1) / 2;
+          const centerY = (1 - projected.y) / 2;
+          // A full projected dummy width on either side bounds the target-local scene.
+          const radius = (screenBounds.max.x - screenBounds.min.x) / 2;
+          return {
+            target: [centerX, centerY],
+            region: [centerX - radius, centerY - radius, centerX + radius, centerY + radius],
+            calls: renderer.info.render.calls,
+            groups: replayEffects.map(({ effect }) => {
+              let visible = true;
+              for (let node = effect.group; node; node = node.parent) visible &&= node.visible;
+              return { id: effect.model.fileDataId, visible };
+            }),
+          };
+        };`);
+      if (index === 1) {
+        source = source.replace(replayVisibility, "effect.group.visible = false;")
+          .replace(modeVisibility, "effect.group.visible = false;");
+      }
+      interceptedModules[index] += 1;
+      await route.fulfill({ response, body: source });
+    });
+    await currentPage.goto("/");
+    await expect(currentPage.locator("[data-testid='replay-effect-status']"))
+      .toContainText("Original components ready", { timeout: 30_000 });
+  }
+  expect(interceptedModules).toEqual([1, 1]);
+  expect(actionTime).toBe(22.592);
+
+  const authoredColor = await page.evaluate(async () => {
+    const { parseNativeM2 } = await import("/src/nativeM2.ts");
+    const { decodeNativeBlp } = await import("/src/nativeBlp.ts");
+    const source = await fetch("/model/native-effects/4006618.m2");
+    if (!source.ok) throw new Error("Pinned Flame Shock M2 is missing.");
+    const model = parseNativeM2(await source.arrayBuffer(), 4006618);
+    const emitter = model.emitters[0];
+    const textureId = model.textureFileDataIds[emitter.textureIndices[0]];
+    const response = await fetch(`/model/native-effects/${textureId}.blp`);
+    if (!response.ok) throw new Error(`Pinned Flame Shock texture ${textureId} is missing.`);
+    const texture = decodeNativeBlp(await response.arrayBuffer(), textureId);
+    let opaqueTexels = 0;
+    let maximumTextureChannelSpread = 0;
+    for (let offset = 0; offset < texture.pixels.length; offset += 4) {
+      if (texture.pixels[offset + 3] <= 32) continue;
+      const channels = Array.from(texture.pixels.slice(offset, offset + 3));
+      maximumTextureChannelSpread = Math.max(maximumTextureChannelSpread,
+        Math.max(...channels) - Math.min(...channels));
+      opaqueTexels += 1;
     }
-    return count;
-  }, [
-    `data:image/png;base64,${before.toString("base64")}`,
-    `data:image/png;base64,${during.toString("base64")}`,
-  ]);
-  // The visible impact is the authored fire blob of the supported emitters:
-  // both Flame Shock kits gate their nonzero-TXAC emitters (disclosed in the
-  // limitations summary), so the cluster beside the dummy is compact.
-  expect(targetPixels).toBeGreaterThan(40);
+    return { blendMode: emitter.blendingType, colors: emitter.color.values, textureId,
+      opaqueTexels, maximumTextureChannelSpread };
+  });
+  expect(authoredColor.blendMode).toBe(2);
+  expect(authoredColor.colors.every(([red, green, blue]) => red > green && green > blue)).toBe(true);
+  expect(authoredColor.opaqueTexels).toBeGreaterThan(0);
+  expect(authoredColor.maximumTextureChannelSpread).toBeLessThan(16);
+
+  const capture = async (currentPage: Page, time: number) => {
+    const scene = currentPage.getByRole("region", { name: "Genuine WoW model scene" });
+    const canvas = scene.locator("canvas");
+    await scene.getByRole("slider", { name: "Seek playback" }).fill(String(Number(time.toFixed(3))));
+    await currentPage.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    const screenshot = await canvas.screenshot();
+    await currentPage.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    expect(await canvas.screenshot()).toEqual(screenshot);
+    const probe = await currentPage.evaluate(() => window.__flameShockProbe());
+    return { screenshot, probe, particles: Number(await canvas.getAttribute("data-replay-native-particles")),
+      ids: await canvas.getAttribute("data-replay-native-file-data-ids") };
+  };
+  const preEmissionTime = actionTime - 0.012;
+  const before = await capture(page, preEmissionTime);
+  const hiddenBefore = await capture(hiddenPage, preEmissionTime);
+  expect(before.particles).toBe(0);
+  expect(hiddenBefore.particles).toBe(0);
+  expect(before.screenshot).toEqual(hiddenBefore.screenshot);
+
+  const observations = [];
+  for (const elapsed of [0.1, 0.13, 0.18]) {
+    const time = Number((actionTime + elapsed).toFixed(3));
+    const visible = await capture(page, time);
+    const hidden = await capture(hiddenPage, time);
+    expect(visible.ids).toBe("4006618,3980244,4392095,4050773");
+    expect(hidden.ids).toBe(visible.ids);
+    expect(visible.particles).toBeGreaterThan(0);
+    expect(hidden.particles).toBe(visible.particles);
+    expect(visible.probe.groups.map(({ visible: isVisible }) => isVisible)).toEqual([true, true, true, true]);
+    expect(hidden.probe.groups.map(({ visible: isVisible }) => isVisible)).toEqual([false, false, false, false]);
+    expect(visible.probe.calls).toBeGreaterThan(hidden.probe.calls);
+    expect(hidden.probe.target).toEqual(visible.probe.target);
+    expect(hidden.probe.region).toEqual(visible.probe.region);
+    const pixels = await page.evaluate(async ({ shown, suppressed, target, region }) => {
+      const decode = async (url: string) => {
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Could not inspect the Flame Shock frame.");
+        context.drawImage(image, 0, 0);
+        return { width: image.width, height: image.height,
+          data: context.getImageData(0, 0, image.width, image.height).data };
+      };
+      const on = await decode(shown);
+      const off = await decode(suppressed);
+      if (on.width !== off.width || on.height !== off.height) throw new Error("Effect frame sizes differ.");
+      let changed = 0;
+      let outside = 0;
+      let colored = 0;
+      for (let y = 0; y < on.height; y += 1) {
+        for (let x = 0; x < on.width; x += 1) {
+          const offset = (y * on.width + x) * 4;
+          const red = on.data[offset] - off.data[offset];
+          const green = on.data[offset + 1] - off.data[offset + 1];
+          const blue = on.data[offset + 2] - off.data[offset + 2];
+          if (!red && !green && !blue) continue;
+          changed += 1;
+          if ((x + 0.5) / on.width < region[0] || (x + 0.5) / on.width > region[2]
+            || (y + 0.5) / on.height < region[1] || (y + 0.5) / on.height > region[3]) outside += 1;
+          // With source-alpha blending, ON - OFF = alpha * (source - OFF).
+          // Ordered deltas over a warm OFF pixel imply warmer source channel gaps.
+          if (off.data[offset] >= off.data[offset + 1]
+            && off.data[offset + 1] >= off.data[offset + 2]
+            && red > 0 && red > green && green > blue) colored += 1;
+        }
+      }
+      return { changed, outside, colored, target, region };
+    }, { shown: `data:image/png;base64,${visible.screenshot.toString("base64")}`,
+      suppressed: `data:image/png;base64,${hidden.screenshot.toString("base64")}`,
+      target: visible.probe.target, region: visible.probe.region });
+    observations.push({ time, particles: visible.particles, onCalls: visible.probe.calls,
+      offCalls: hidden.probe.calls, ...pixels });
+  }
+  await testInfo.attach("flame-shock-visibility", {
+    body: JSON.stringify({ actionTime, authoredColor, observations }, null, 2), contentType: "application/json",
+  });
+  for (const { time, changed, outside, colored } of observations) {
+    expect(changed, `effect pixels at ${time}s`).toBeGreaterThan(0);
+    expect(outside, `pixels outside dummy attachment at ${time}s`).toBe(0);
+    expect(colored, `source-warm effect pixels at ${time}s`).toBeGreaterThan(0);
+  }
+  await hiddenPage.close();
 });
 
 test("loads only a selected Lava Burst trace and fails the whole kit when its original is missing", async ({ page }) => {

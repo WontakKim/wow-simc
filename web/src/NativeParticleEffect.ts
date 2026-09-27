@@ -258,9 +258,9 @@ function createEmitterBatch(
         if (combined.a < particleAlphaCutoff) discard;
         float alpha = combined.a * uAlphaMult;
         gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult, alpha), alpha);
-        #include <colorspace_fragment>
       }
     `,
+    toneMapped: false,
     transparent: true,
     depthTest: true,
     // The original pipeline only writes depth for the opaque and alpha-key modes.
@@ -406,9 +406,8 @@ export class NativeParticleEffect {
           void main() { gl_FragColor = texture2D(map, vRibbonUv) * vRibbonColor;
             if (gl_FragColor.a < uAlphaTest) discard;
             gl_FragColor.rgb = applyEffectFog(gl_FragColor.rgb, gl_FragColor.a);
-            #include <tonemapping_fragment>
-            #include <colorspace_fragment>
           }`,
+        toneMapped: false,
         transparent: true,
         blending: ribbonBlend.blending,
         blendSrc: ribbonBlend.blendSrc,
@@ -526,9 +525,8 @@ export class NativeParticleEffect {
                   meshOpacity * primary.a * secondary.a * 2.0);
                 if (gl_FragColor.a < ${m2ParticleAlphaThreshold(material.blendMode)}) discard;
                 gl_FragColor.rgb = applyEffectFog(gl_FragColor.rgb, gl_FragColor.a);
-                #include <tonemapping_fragment>
-                #include <colorspace_fragment>
               }`,
+            toneMapped: false,
             transparent: true,
             blending: meshBlend.blending,
             blendSrc: meshBlend.blendSrc,

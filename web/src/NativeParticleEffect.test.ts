@@ -45,6 +45,9 @@ describe("original Lava Burst ribbon rendering", () => {
     const effect = new NativeParticleEffect(model, textures, 2);
     const ribbons = effect.group.children.slice(-3) as Mesh<BufferGeometry, ShaderMaterial>[];
     expect(ribbons.map((mesh) => mesh.material.blending)).toEqual([CustomBlending, CustomBlending, CustomBlending]);
+    expect(ribbons.every((mesh) => mesh.material.toneMapped === false
+      && !mesh.material.fragmentShader.includes("<tonemapping_fragment>")
+      && !mesh.material.fragmentShader.includes("<colorspace_fragment>"))).toBe(true);
     expect(ribbons.map((mesh) => [mesh.material.blendSrc, mesh.material.blendDst,
       mesh.material.blendSrcAlpha, mesh.material.blendDstAlpha])).toEqual([
       [SrcAlphaFactor, OneFactor, ZeroFactor, OneFactor],
@@ -170,6 +173,9 @@ describe("original Lightning Bolt missile rendering", () => {
       && mesh.material.uniforms.primaryMap.value === mesh.material.uniforms.secondaryMap.value
       && mesh.material.fragmentShader.includes("primary.rgb * secondary.rgb * 2.0")
       && mesh.material.fragmentShader.includes("primary.a * secondary.a * 2.0")
+      && mesh.material.toneMapped === false
+      && !mesh.material.fragmentShader.includes("<tonemapping_fragment>")
+      && !mesh.material.fragmentShader.includes("<colorspace_fragment>")
       && !mesh.geometry.hasAttribute("secondaryUv")
       && mesh.material.vertexShader.includes("secondaryCoordinates = uv"))).toBe(true);
     const camera = new PerspectiveCamera();
@@ -209,7 +215,9 @@ describe("NativeParticleEffect source rendering", () => {
       expect(mesh.geometry.getAttribute("position").itemSize).toBe(3);
       expect(mesh.material.vertexShader).not.toMatch(/attribute vec[23] (position|uv)/);
       expect(mesh.material.vertexShader).toContain("length(modelViewMatrix[0].xyz)");
-      expect(mesh.material.fragmentShader).toContain("#include <colorspace_fragment>");
+      expect(mesh.material.toneMapped).toBe(false);
+      expect(mesh.material.fragmentShader).not.toContain("<tonemapping_fragment>");
+      expect(mesh.material.fragmentShader).not.toContain("<colorspace_fragment>");
     }
 
     effect.dispose();
