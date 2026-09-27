@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CustomBlending, DataTexture, DoubleSide, FrontSide, Matrix4, RepeatWrapping, ClampToEdgeWrapping } from "three";
+import { CustomBlending, DataTexture, DoubleSide, FrontSide, Matrix4, RepeatWrapping, ClampToEdgeWrapping, Vector3, Vector4 } from "three";
 import { buildM2ModelFixture, buildSkinFixture } from "./fixtures";
 import { parseM2File, parseSkinFile } from "./model";
 import { createNativeM2Actor } from "./renderer";
@@ -198,6 +198,56 @@ describe("createNativeM2Actor", () => {
     const after = boneTexture.image.data as Float32Array;
     expect(after[12]).toBeCloseTo(5, 6);
     expect(Array.from(after)).not.toEqual(Array.from(before));
+  });
+
+  it("applies the first texture weight once to mesh opacity without sampling adjacent batch stages", () => {
+    const model = parseM2File(buildM2ModelFixture({
+      sequences: [{ animationId: 0, durationMs: 1000, flags: 0x20 }],
+      sequenceLookup: [0],
+      bones: [{ pivot: [0, 0, 0] }],
+      vertices: Array.from({ length: 3 }, () => ({ boneWeights: [255, 0, 0, 0] as [number, number, number, number] })),
+      textures: [{ type: 0 }],
+      textureLookup: [0],
+      materials: [{ flags: 1, blendMode: 2 }],
+      textureWeights: [0, 16384, 32767].map((weight) => ({
+        sequences: [{ timestamps: [0], values: [[weight]] }],
+      })),
+      textureWeightLookup: [0, 1, 2, 65535],
+    }), 9020);
+    const skin = parseSkinFile(buildSkinFixture({
+      vertexLookup: [0, 1, 2], indices: [0, 1, 2],
+      sections: [{ meshPartId: 0, vertexStart: 0, vertexCount: 3, indexStart: 0, indexCount: 3 }],
+      batches: [
+        { shaderId: 0x10, textureCount: 1, textureWeightComboIndex: 0 },
+        { shaderId: 0x10, textureCount: 1, textureWeightComboIndex: 1 },
+        { shaderId: 0x10, textureCount: 1, textureWeightComboIndex: 2 },
+        { shaderId: 0, textureCount: 1, textureWeightComboIndex: 0, flags: 0x40 },
+        { shaderId: 0, textureCount: 0, textureWeightComboIndex: 0 },
+        { shaderId: 0, textureCount: 1, textureWeightComboIndex: 8 },
+        { shaderId: 0, textureCount: 1, textureWeightComboIndex: 3 },
+        { shaderId: 0x8010, textureCount: 2, textureWeightComboIndex: 1, flags: 0x40 },
+      ],
+    }), 9021);
+    const actor = createNativeM2Actor({ model, skin, label: "opacity-fixture", textures: new Map() });
+    actor.updateAnimatedTracks(resolveSequence(model, 0)!, 0);
+
+    const opacity = actor.batches.map(({ material }) => (material.uniforms.u_mesh_color.value as Vector4).w);
+    expect(opacity).toEqual([0, 0.5, 32767 / 32768, 1, 1, 1, 1, 1]);
+    const weights = actor.batches.map(({ material }) => (material.uniforms.u_tex_sample_alpha.value as Vector3).toArray());
+    expect(weights).toEqual([
+      [0, 1, 1], [0.5, 1, 1], [32767 / 32768, 1, 1], [0, 1, 1],
+      [1, 1, 1], [1, 1, 1], [1, 1, 1], [0.5, 32767 / 32768, 1],
+    ]);
+    expect(actor.batches.map(({ material }) => material.visible)).toEqual([false, true, true, true, true, true, true, true]);
+    actor.dispose();
+
+    const emptyLookupActor = createNativeM2Actor({
+      model: { ...model, textureWeightLookup: [] }, skin, label: "empty-lookup-fixture", textures: new Map(),
+    });
+    emptyLookupActor.updateAnimatedTracks(resolveSequence(model, 0)!, 0);
+    expect(emptyLookupActor.batches[0].material.uniforms.u_mesh_color.value.w).toBe(1);
+    expect((emptyLookupActor.batches[0].material.uniforms.u_tex_sample_alpha.value as Vector3).toArray()).toEqual([1, 1, 1]);
+    emptyLookupActor.dispose();
   });
 
   it("samples animated UV transform matrices per texture unit", () => {

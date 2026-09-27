@@ -339,12 +339,16 @@ export function createNativeM2Actor(options: NativeM2ActorOptions): NativeM2Acto
 
         const weights = material.uniforms.u_tex_sample_alpha.value as Vector3;
         for (let unit = 0; unit < 3; unit += 1) {
-          const weightIndex = model.textureWeightLookup[batch.textureWeightComboIndex + unit] ?? -1;
-          const value = weightIndex >= 0 ? sampleM2TextureWeight(model, resolution, weightIndex, timeMs) : 1;
+          const weightIndex = unit < batch.textureCount
+            ? model.textureWeightLookup[batch.textureWeightComboIndex + unit] : undefined;
+          const value = weightIndex !== undefined && weightIndex < model.textureWeights.length
+            ? sampleM2TextureWeight(model, resolution, weightIndex, timeMs) : 1;
           if (unit === 0) weights.x = value;
           else if (unit === 1) weights.y = value;
           else weights.z = value;
         }
+        if (batch.textureCount > 0 && (batch.flags & 0x40) === 0) meshColor.w *= weights.x;
+        material.visible = meshColor.w >= 0.0001;
       }
     },
     setLightPreset,

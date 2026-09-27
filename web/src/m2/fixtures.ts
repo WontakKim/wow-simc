@@ -178,6 +178,7 @@ export interface M2FixtureOptions {
   viewCount?: number;
   textures?: Array<{ type?: number; flags?: number }>;
   materials?: Array<{ flags?: number; blendMode?: number }>;
+  textureWeights?: FixtureTrack[];
   textureTransforms?: Array<{ translation?: FixtureTrack; rotation?: FixtureTrack; scale?: FixtureTrack }>;
   replaceableLookup?: number[];
   boneLookup?: number[];
@@ -206,6 +207,7 @@ export function buildM2ModelFixture(options: M2FixtureOptions = {}): ArrayBuffer
   const vertices = options.vertices ?? [];
   const textures = options.textures ?? [];
   const materials = options.materials ?? [];
+  const textureWeights = options.textureWeights ?? [];
   const textureTransforms = options.textureTransforms ?? [];
   const attachments = options.attachments ?? [];
 
@@ -294,6 +296,10 @@ export function buildM2ModelFixture(options: M2FixtureOptions = {}): ArrayBuffer
     view.setUint32(textureOffset + i * 16 + 4, texture.flags ?? 0, true);
   });
   writer.array(0x50, textures.length, textureOffset);
+
+  const weightOffset = writer.alloc(textureWeights.length * 0x14);
+  textureWeights.forEach((weight, i) => writer.writeTrack(weightOffset + i * 0x14, weight, trackSlots, "int16"));
+  writer.array(0x58, textureWeights.length, weightOffset);
 
   const transformOffset = writer.alloc(textureTransforms.length * 0x3c);
   textureTransforms.forEach((transform, i) => {
