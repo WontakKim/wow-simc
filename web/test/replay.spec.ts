@@ -245,6 +245,47 @@ test("automatically opens the bundled full-state replay and drives its controls"
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("advances the replay cursor at the chosen speed without accumulating paused time", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await expect(page.getByRole("status").filter({ hasText: "Loaded bundled Elemental Shaman reference" })).toBeVisible();
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  await seek.fill("2");
+  await expect(scene.getByTestId("replay-effect-status")).toContainText(/Original components ready|No original components required/, { timeout: 30_000 });
+
+  const measureProgress = () => page.evaluate(async () => {
+    const slider = document.querySelector<HTMLInputElement>('input[aria-label="Seek playback"]');
+    if (!slider) throw new Error("Replay seek control is missing.");
+    const start = performance.now();
+    const initial = Number(slider.value);
+    for (let frame = 0; frame < 25; frame += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    return { elapsed: (performance.now() - start) / 1000, advanced: Number(slider.value) - initial };
+  });
+
+  await scene.getByLabel("Speed").selectOption("0.5");
+  await scene.getByRole("button", { name: "Play", exact: true }).click();
+  const halfSpeed = await measureProgress();
+  expect(halfSpeed.advanced).toBeGreaterThan(halfSpeed.elapsed * 0.35);
+  expect(halfSpeed.advanced).toBeLessThan(halfSpeed.elapsed * 0.65);
+
+  await scene.getByRole("button", { name: "Pause", exact: true }).click();
+  const paused = await measureProgress();
+  expect(paused.advanced).toBe(0);
+
+  await seek.fill("2");
+  await scene.getByLabel("Speed").selectOption("2");
+  await scene.getByRole("button", { name: "Play", exact: true }).click();
+  const doubleSpeed = await measureProgress();
+  await testInfo.attach("replay-clock-samples", {
+    body: JSON.stringify({ halfSpeed, paused, doubleSpeed }), contentType: "application/json",
+  });
+  expect(doubleSpeed.advanced).toBeGreaterThan(doubleSpeed.elapsed * 1.7);
+  expect(doubleSpeed.advanced).toBeLessThan(doubleSpeed.elapsed * 2.3);
+});
+
 test("keeps the genuine scene usable through reference failure and retry", async ({ page }) => {
   let referenceRequests = 0;
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {

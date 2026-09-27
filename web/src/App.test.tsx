@@ -1,5 +1,5 @@
 import * as matchers from "@testing-library/jest-dom/matchers";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -281,6 +281,155 @@ describe("App", () => {
   });
 
 
+
+  it("accumulates every animation-frame interval before React commits", async () => {
+    let nextFrame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    stubFixture(statefulReportFixture());
+    const user = userEvent.setup();
+    render(<App />);
+
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    await within(scene).findByTestId("scene-replay-state");
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      nextFrame?.(1000);
+      nextFrame?.(1250);
+      nextFrame?.(1500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.50s · 1×");
+
+    act(() => {
+      nextFrame?.(2000);
+      nextFrame?.(3000);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Last Combat · 2.00s · 1×");
+    expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
+  });
+
+  it("keeps paused time out of playback and resumes from the latest seek at half speed", async () => {
+    let nextFrame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    stubFixture(statefulReportFixture());
+    const user = userEvent.setup();
+    render(<App />);
+
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    await within(scene).findByTestId("scene-replay-state");
+    await user.selectOptions(within(scene).getByRole("combobox", { name: /speed/i }), "0.5");
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      nextFrame?.(1000);
+      nextFrame?.(1500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.25s · 0.5×");
+
+    await user.click(within(scene).getByRole("button", { name: /^Pause$/ }));
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      nextFrame?.(5000);
+      nextFrame?.(5500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.50s · 0.5×");
+
+    fireEvent.change(within(scene).getByRole("slider", { name: /seek playback/i }), { target: { value: "0" } });
+    expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("0.00s · 0.5×");
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      nextFrame?.(8000);
+      nextFrame?.(8500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.25s · 0.5×");
+  });
+
+  it("resets the running clock when changing trace actors", async () => {
+    let nextFrame: FrameRequestCallback | null = null;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      nextFrame = callback;
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    stubFixture(reportFixture());
+    const user = userEvent.setup();
+    render(<App />);
+
+    const actorPicker = await screen.findByRole("combobox", { name: /trace actor/i });
+    await user.selectOptions(actorPicker, "actor-0");
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      nextFrame?.(1000);
+      nextFrame?.(1500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Frostbolt · 0.50s · 1×");
+
+    await user.selectOptions(actorPicker, "actor-1");
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("1.00s · 1×");
+    expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
+    await user.selectOptions(actorPicker, "actor-0");
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Frostbolt · 0.00s · 1×");
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      nextFrame?.(5000);
+      nextFrame?.(5500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Frostbolt · 0.50s · 1×");
+  });
+
+  it("honors Pause clicked after an endpoint frame but before React commits", async () => {
+    const queuedFrames = new Map<number, FrameRequestCallback>();
+    let nextFrameId = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const frameId = ++nextFrameId;
+      queuedFrames.set(frameId, callback);
+      return frameId;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frameId: number) => queuedFrames.delete(frameId));
+    const runFrame = (now: number) => {
+      const frame = queuedFrames.entries().next().value;
+      if (!frame) throw new Error("No replay frame is queued.");
+      const [frameId, callback] = frame;
+      queuedFrames.delete(frameId);
+      callback(now);
+    };
+    stubFixture(statefulReportFixture());
+    const user = userEvent.setup();
+    render(<App />);
+
+    const scene = screen.getByRole("region", { name: /genuine wow model scene/i });
+    await within(scene).findByTestId("scene-replay-state");
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    act(() => {
+      runFrame(1000);
+      runFrame(1500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("0.50s · 1×");
+
+    act(() => {
+      runFrame(4000);
+      fireEvent.click(within(scene).getByRole("button", { name: /^Pause$/ }));
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("Last Combat · 2.00s · 1×");
+    expect(within(scene).getByRole("button", { name: /^Play$/ })).toBeInTheDocument();
+    expect(queuedFrames.size).toBe(0);
+
+    await user.click(within(scene).getByRole("button", { name: /^Play$/ }));
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.00s · 1×");
+    act(() => {
+      runFrame(5000);
+      runFrame(5500);
+    });
+    expect(within(scene).getByTestId("scene-replay-state")).toHaveTextContent("First Combat · 0.50s · 1×");
+  });
 
   it("applies speed to the replay clock and handles endpoint restart and reset", async () => {
     let nextFrame: FrameRequestCallback | null = null;

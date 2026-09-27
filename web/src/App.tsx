@@ -309,6 +309,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const lastFrameRef = useRef<number | null>(null);
+  const cursorRef = useRef(0);
   const referenceRequestRef = useRef(0);
 
   const actor = report?.actors.find((candidate) => candidate.id === selectedActorId) ?? null;
@@ -334,8 +335,9 @@ export function App() {
     let frameId = 0;
     const advance = (now: number) => {
       const previous = lastFrameRef.current ?? now;
-      const nextCursor = Math.min(playbackEndTime, cursor + ((now - previous) / 1000) * speed);
+      const nextCursor = Math.min(playbackEndTime, cursorRef.current + ((now - previous) / 1000) * speed);
       lastFrameRef.current = now;
+      cursorRef.current = nextCursor;
       setCursor(nextCursor);
       setSelectedIndex(findEventAtOrBefore(actor.events, nextCursor));
       if (nextCursor >= playbackEndTime) {
@@ -346,12 +348,14 @@ export function App() {
     };
     frameId = requestAnimationFrame(advance);
     return () => cancelAnimationFrame(frameId);
-  }, [actor, cursor, isPlaying, playbackEndTime, speed]);
+  }, [actor, isPlaying, playbackEndTime, speed]);
 
   const resetSelection = (nextActor: ReplayActor | null) => {
     setIsPlaying(false);
     setSelectedIndex(0);
-    setCursor(nextActor?.events[0]?.time ?? 0);
+    const nextCursor = nextActor?.events[0]?.time ?? 0;
+    cursorRef.current = nextCursor;
+    setCursor(nextCursor);
   };
 
   const applyReport = (nextReport: ReplayReport) => {
@@ -408,25 +412,30 @@ export function App() {
     if (!actor || index < 0 || index >= actor.events.length) return;
     setIsPlaying(false);
     setSelectedIndex(index);
-    setCursor(actor.events[index].time);
+    cursorRef.current = actor.events[index].time;
+    setCursor(cursorRef.current);
   };
 
   const seek = (time: number) => {
     if (!actor) return;
     setIsPlaying(false);
+    cursorRef.current = time;
     setCursor(time);
     setSelectedIndex(findEventAtOrBefore(actor.events, time));
   };
 
   const toggleReplayPlayback = () => {
     if (!actor || playbackEndTime === 0) return;
-    if (cursor >= playbackEndTime) {
-      setCursor(0);
-      setSelectedIndex(findEventAtOrBefore(actor.events, 0));
-      setIsPlaying(true);
+    if (isPlaying) {
+      setIsPlaying(false);
       return;
     }
-    setIsPlaying((current) => !current);
+    if (cursorRef.current >= playbackEndTime) {
+      cursorRef.current = 0;
+      setCursor(0);
+      setSelectedIndex(findEventAtOrBefore(actor.events, 0));
+    }
+    setIsPlaying(true);
   };
 
   useEffect(() => {
