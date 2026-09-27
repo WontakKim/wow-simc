@@ -123,17 +123,17 @@ export function buildCombatTimeline(events: CombatLogEvent[]): CombatTimeline {
       occurrence.travelStart = event.time;
       occurrence.travelDuration = event.duration!;
     } else if (event.kind === "impact") {
-      const candidates = occurrences.filter((occurrence) => occurrence.actor === event.actor
+      const traveling = occurrences.filter((occurrence) => occurrence.actor === event.actor
         && occurrence.actionName === event.actionName && occurrence.spellId === event.spellId
         && occurrence.travelStart !== null && occurrence.travelDuration !== null
-        && Math.abs(occurrence.travelStart + occurrence.travelDuration - event.time) <= 0.002
-        && occurrence.impacts.length === 0);
-      const direct = occurrences.find((occurrence) => occurrence.actor === event.actor
+        && Math.abs(occurrence.travelStart + occurrence.travelDuration - event.time) <= 0.002);
+      const direct = occurrences.filter((occurrence) => occurrence.actor === event.actor
         && occurrence.actionName === event.actionName && occurrence.spellId === event.spellId
         && occurrence.travelStart === null
-        && Math.abs((occurrence.castFinish ?? occurrence.castStart ?? -1) - event.time) <= 0.002
-        && occurrence.impacts.length === 0);
-      const occurrence = candidates[0] ?? direct;
+        && Math.abs((occurrence.castFinish ?? occurrence.castStart ?? -1) - event.time) <= 0.002);
+      const compatible = [...traveling, ...direct];
+      const occurrence = compatible.find((candidate) => candidate.impacts.length === 0)
+        ?? (compatible.length === 1 ? compatible[0] : undefined);
       if (!occurrence) { unmatched.push(event); continue; }
       occurrence.impacts.push({ time: event.time, ordinal: event.ordinal, target: event.target ?? "", result: event.result ?? "unknown" });
     }

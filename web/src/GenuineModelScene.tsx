@@ -21,6 +21,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { ReplayEvent } from "./replay";
 import type { CombatTimeline } from "./combatLog";
 import {
+  getNativeEffectTailBound,
   loadNativeParticleEffect,
   type NativeParticleEffect,
   type NativeParticleRenderInstance,
@@ -69,12 +70,12 @@ const WEBGL_ERROR =
 const STAND_CLIP_NAME = animationOptionLabel(STAND_ANIMATION_ID, 0);
 const CAMERA_FOV = 32; // fixed vertical FOV for both default framing and reset
 const REPLAY_POSE_BLEND_SECONDS = 0.15;
-const NATIVE_REPLAY_INSTANCE_LIMIT = 16;
-const OTHER_REPLAY_EMISSION_SECONDS = 0.2;
+const PREVIEW_TRANSIENT_EMISSION_SECONDS = 0.2;
+const PREVIEW_UNKNOWN_TAIL_SECONDS = 1.5;
 type ReplayEffectAnchor = "caster" | "target" | "projectile";
 type ReplayComponent = { fileDataId: number; anchor: ReplayEffectAnchor; placement?: PreparedPlacement };
 type PreparedPlacement = { attachmentId: number; positionerId: number; offset: [number, number, number];
-  angles: [number, number, number]; scale: number; startDelay: number; sourceRowId: number; eventId?: number };
+  angles: [number, number, number]; scale: number; startDelay: number; sourceRowId: number; eventId?: number; targetType?: number };
 interface ReplaySpellEffect {
   actionName: string;
   components: ReplayComponent[];
@@ -92,12 +93,12 @@ const REPLAY_SPELL_EFFECTS = new Map<number, ReplaySpellEffect>([
   [443454, { actionName: "ancestral_swiftness", components: [] }],
 ]);
 
-// Peak simultaneous component counts measured from the pinned paired combat log,
-// including overloads, impact decay, and shared assets across spell families.
+// Baseline simultaneous component counts measured from the pinned paired combat log.
+// Loaded replay capacity also includes the selected timeline's source-bound tails.
 export const REPLAY_COMPONENT_INSTANCE_LIMITS = new Map<number, number>([
   [794788, 4], [613807, 4], [4006618, 8], [1598036, 1],
   [1355634, 1], [1284864, 1], [1109885, 2], [4006621, 3],
-  [3980244, 8], [4329984, 7], [6211617, 4], [6211618, 3], [1571475, 7], [4392095, 1], [4050773, 1],
+  [3980244, 8], [4329984, 11], [6211617, 7], [6211618, 7], [1571475, 7], [4392095, 1], [4050773, 1],
 ]);
 // SpellVisualMissile rows 28854 and 28867–28869 and SpellVisualKitModelAttach rows 321812/321824, build 12.1.0.69933.
 // Mapped to native M2 attachment ids on the caster model (21 SpellHandL, 22 SpellHandR, 34 Chest).
@@ -135,13 +136,12 @@ export function getPreparedComponentPlacements(spellId: number, component: Repla
       offset: [missile.CastOffset_0, missile.CastOffset_1, missile.CastOffset_2], angles: [0, 0, 0],
       scale: 1, startDelay: 0, sourceRowId: missile.ID } satisfies PreparedPlacement));
   return visual.events.flatMap((event) => event.kit.effects.flatMap((effect) => {
-    if (component.anchor === "target" && event.TargetType !== 4) return [];
     const attach = effect.modelAttach;
     if (!attach || attach.effectName.ModelFileDataID !== component.fileDataId) return [];
     return [{ attachmentId: attach.AttachmentID, positionerId: attach.PositionerID,
       offset: [attach.Offset_0, attach.Offset_1, attach.Offset_2],
       angles: [attach.Yaw, attach.Pitch, attach.Roll], scale: attach.Scale,
-      startDelay: attach.StartDelay, sourceRowId: attach.ID, eventId: event.ID } satisfies PreparedPlacement];
+      startDelay: attach.StartDelay, sourceRowId: attach.ID, eventId: event.ID, targetType: event.TargetType } satisfies PreparedPlacement];
   }));
 }
 
@@ -167,6 +167,9 @@ export type ReplayAnimationKind = "motion" | "settled" | "before" | "wait" | "fa
 export interface ReplayEffectOccurrence {
   eventKey: string;
   eventTime: number;
+  startTime: number;
+  emissionStopTime: number;
+  renderEndTime: number;
   elapsedSeconds: number;
   componentTimeSeconds: number;
   spellId: number;
@@ -243,7 +246,7 @@ function roundReplayTime(value: number) {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-const LOGGED_EFFECT_DECAY_SECONDS = 1.5;
+const LOGGED_EFFECT_DECAY_SECONDS = PREVIEW_UNKNOWN_TAIL_SECONDS;
 
 function getRenderablePlacements(placements: PreparedPlacement[]): Array<PreparedPlacement | undefined> {
   const resolved = placements.filter((placement) => placement.attachmentId >= 0);
@@ -265,76 +268,120 @@ function getLoggedAssetIds(timeline: CombatTimeline | undefined): Set<number> {
     : []);
 }
 
-export function resolveLoggedEffectOccurrences(timeline: CombatTimeline, cursor: number): ReplayEffectOccurrence[] {
-  const effects: ReplayEffectOccurrence[] = [];
+type ScheduledReplayEffect = Omit<ReplayEffectOccurrence, "elapsedSeconds" | "componentTimeSeconds">;
+
+function getLoggedEffectIntervals(timeline: CombatTimeline,
+  tailBounds: ReadonlyMap<number, number>): ScheduledReplayEffect[] {
+  const effects: ScheduledReplayEffect[] = [];
+  const schedules = new Map<number, ReturnType<typeof scheduleVisualPhases>["kits"]>();
+  const getKits = (spellId: number) => {
+    if (!schedules.has(spellId)) {
+      const visual = preparedVisual(spellId);
+      schedules.set(spellId, visual ? scheduleVisualPhases(timeline, visual.events, spellId).kits : []);
+    }
+    return schedules.get(spellId)!;
+  };
+  const add = (spellId: number, component: ReplayComponent, placement: PreparedPlacement | undefined,
+    eventKey: string, eventTime: number, startTime: number, stopTime: number | undefined,
+    sourceActor: string, travelDuration?: number) => {
+    const emissionStopTime = stopTime ?? roundReplayTime(startTime + PREVIEW_TRANSIENT_EMISSION_SECONDS);
+    if (emissionStopTime <= startTime) return;
+    const tail = tailBounds.get(component.fileDataId) ?? PREVIEW_UNKNOWN_TAIL_SECONDS;
+    const renderEndTime = emissionStopTime + tail;
+    effects.push({ eventKey, eventTime, startTime, emissionStopTime, renderEndTime,
+      emissionDuration: roundReplayTime(emissionStopTime - startTime),
+      spellId, components: [{ ...component, placement }], travelDuration, sourceActor });
+  };
   for (const occurrence of timeline.occurrences) {
     // No native pet actor is loaded. Do not move pet missiles to the player.
     if (/_ancestor|_elemental|_wolf|_guardian/.test(occurrence.actor)) continue;
     const spell = getLoggedSpell(occurrence.actionName);
     if (!spell) continue;
-    const sourceActor = occurrence.actor;
-    const visual = preparedVisual(occurrence.spellId);
-    const kitTimes = visual ? scheduleVisualPhases({ occurrences: [occurrence], auras: [], unmatched: [] }, visual.events, occurrence.spellId).kits : [];
-    const add = (components: ReplayComponent[], start: number | null, end: number, travelDuration?: number) => {
-      if (!components.length || start === null) return;
-      const groups = new Map<number, ReplayComponent[]>();
-      for (const component of components) {
-        const placements = getPreparedComponentPlacements(occurrence.spellId, component);
-        for (const placement of getRenderablePlacements(placements)) {
-          const kitTime = placement?.eventId
-            ? kitTimes.find((kit) => kit.sourceRowId === placement.eventId)?.time : undefined;
-          const time = roundReplayTime((kitTime ?? start) + (placement?.startDelay ?? 0));
-          const activeEnd = component.anchor === "caster" ? Math.max(end, time + OTHER_REPLAY_EMISSION_SECONDS) : end;
-          if (cursor < time || cursor >= activeEnd) continue;
-          const group = groups.get(time) ?? [];
-          group.push({ ...component, placement });
-          groups.set(time, group);
+    for (const component of spell.components) {
+      if (component.anchor === "projectile") {
+        const start = occurrence.travelStart;
+        const stop = occurrence.impacts[0]?.time ?? (start !== null && occurrence.travelDuration !== null
+          ? roundReplayTime(start + occurrence.travelDuration) : null);
+        if (start === null || stop === null || stop <= start) continue;
+        for (const placement of getRenderablePlacements(getPreparedComponentPlacements(occurrence.spellId, component))) {
+          add(occurrence.spellId, component, placement, occurrence.key, occurrence.castFinish ?? start,
+            start, stop, occurrence.actor, occurrence.travelDuration ?? undefined);
+        }
+        continue;
+      }
+      for (const placement of getRenderablePlacements(getPreparedComponentPlacements(occurrence.spellId, component))) {
+        if (!placement?.eventId) continue;
+        for (const kit of getKits(occurrence.spellId)) {
+          if (kit.occurrenceKey !== occurrence.key || kit.sourceRowId !== placement.eventId) continue;
+          const start = roundReplayTime(kit.time + placement.startDelay);
+          const anchor = placement.targetType === 4 ? "target" : "caster";
+          const key = kit.impactOrdinal === undefined ? occurrence.key
+            : `${occurrence.key}/impact-${kit.impactOrdinal}/${kit.impactTarget}`;
+          add(occurrence.spellId, { ...component, anchor }, placement, key,
+            occurrence.castFinish ?? start, start, kit.endTime, occurrence.actor);
         }
       }
-      for (const [time, active] of groups) effects.push({ eventKey: occurrence.key, eventTime: occurrence.castFinish ?? start,
-        elapsedSeconds: roundReplayTime(cursor - time), componentTimeSeconds: roundReplayTime(cursor - time),
-        spellId: occurrence.spellId, components: active, travelDuration, sourceActor });
-    };
-    const components = spell.components;
-    const impact = occurrence.impacts[0]?.time ?? null;
-    // Buff visuals follow their aura transitions below, not the execution's arbitrary tail.
-    if ([318038, 192106, 191634, 1219480].includes(occurrence.spellId)) continue;
-    const release = occurrence.castFinish;
-    add(components.filter((component) => component.anchor === "caster"),
-      occurrence.castStart ?? release, (release ?? 0) + 0.2);
-    add(components.filter((component) => component.anchor === "projectile"),
-      occurrence.travelStart, impact ?? (occurrence.travelStart ?? 0) + (occurrence.travelDuration ?? 0), occurrence.travelDuration ?? undefined);
-    if (impact !== null) add(components.filter((component) => component.anchor === "target"), impact, impact + LOGGED_EFFECT_DECAY_SECONDS);
-  }
-  const auraNames = new Set(["stormkeeper", "ascendance", "lightning_shield", "flametongue_weapon"]);
-  const state = new Map<string, { time: number; ordinal: number; spellId: number; name: string }>();
-  for (const aura of timeline.auras) {
-    if (!auraNames.has(aura.name) || aura.time > cursor) continue;
-    if (aura.stacks === 0) state.delete(`${aura.actor}/${aura.name}`);
-    else if (aura.transition === "gain" || aura.transition === "refresh") {
-      state.set(`${aura.actor}/${aura.name}`, { time: aura.time, ordinal: aura.ordinal, spellId: aura.spellId, name: aura.name });
     }
   }
-  for (const [actor, aura] of state) {
+  for (const aura of timeline.auras) {
+    if (aura.transition !== "gain" && aura.transition !== "refresh") continue;
     const spell = getLoggedSpell(aura.name);
     if (!spell) continue;
-    const nextLoss = timeline.auras.find((event) => event.ordinal > aura.ordinal && event.name === aura.name
-      && `${event.actor}/${event.name}` === actor && event.stacks === 0)?.time;
-    effects.push({ eventKey: `aura-${aura.ordinal}`, eventTime: aura.time,
-      elapsedSeconds: roundReplayTime(cursor - aura.time), componentTimeSeconds: roundReplayTime(cursor - aura.time),
-      spellId: aura.spellId, components: spell.components.flatMap((component) => {
-        const placements = getPreparedComponentPlacements(aura.spellId, component);
-        return getRenderablePlacements(placements).map((placement) => ({ ...component, placement }));
-      }), emissionDuration: (nextLoss ?? 45) - aura.time });
+    for (const component of spell.components) {
+      if (component.anchor === "projectile") continue;
+      for (const placement of getRenderablePlacements(getPreparedComponentPlacements(aura.spellId, component))) {
+        if (!placement?.eventId) continue;
+        const kit = getKits(aura.spellId).find((candidate) => candidate.occurrenceKey === `aura-${aura.ordinal}`
+          && candidate.sourceRowId === placement.eventId);
+        if (!kit) continue;
+        const start = roundReplayTime(kit.time + placement.startDelay);
+        add(aura.spellId, { ...component, anchor: placement.targetType === 4 ? "target" : "caster" },
+          placement, `aura-${aura.ordinal}`, aura.time, start,
+          kit.endTime ?? Number.POSITIVE_INFINITY, aura.actor);
+      }
+    }
   }
   return effects;
 }
 
+export function resolveLoggedEffectOccurrences(timeline: CombatTimeline, cursor: number,
+  tailBounds: ReadonlyMap<number, number> = new Map()): ReplayEffectOccurrence[] {
+  return getLoggedEffectIntervals(timeline, tailBounds)
+    .filter((effect) => effect.startTime <= cursor && cursor < effect.renderEndTime)
+    .map((effect) => {
+      const elapsedSeconds = roundReplayTime(cursor - effect.startTime);
+      return { ...effect, elapsedSeconds, componentTimeSeconds: elapsedSeconds };
+    });
+}
+
+export function getReplayComponentPeak(timeline: CombatTimeline, fileDataId: number, tailBound: number) {
+  const boundaries = getLoggedEffectIntervals(timeline, new Map([[fileDataId, tailBound]]))
+    .filter((effect) => effect.components.some((component) => component.fileDataId === fileDataId))
+    .flatMap((effect) => [{ time: effect.startTime, change: 1 }, { time: effect.renderEndTime, change: -1 }])
+    .sort((left, right) => left.time - right.time || left.change - right.change);
+  let active = 0;
+  let peak = 0;
+  for (const boundary of boundaries) {
+    active += boundary.change;
+    peak = Math.max(peak, active);
+  }
+  return peak;
+}
+
+const playbackEndTimes = new WeakMap<CombatTimeline, number>();
+
 export function getLoggedPlaybackEndTime(timeline: CombatTimeline) {
-  return Math.max(0, ...timeline.occurrences.flatMap((occurrence) => occurrence.impacts.map((impact) => impact.time + LOGGED_EFFECT_DECAY_SECONDS)),
+  const cached = playbackEndTimes.get(timeline);
+  if (cached !== undefined) return cached;
+  let endTime = Math.max(0, ...timeline.occurrences.flatMap((occurrence) => occurrence.impacts.map((impact) => impact.time + LOGGED_EFFECT_DECAY_SECONDS)),
     ...timeline.occurrences.map((occurrence) => occurrence.castFinish ?? occurrence.castStart ?? 0),
     ...timeline.auras.map((aura) => aura.time),
     ...timeline.unmatched.map((event) => event.time));
+  for (const effect of getLoggedEffectIntervals(timeline, new Map())) {
+    if (Number.isFinite(effect.renderEndTime)) endTime = Math.max(endTime, effect.renderEndTime);
+  }
+  playbackEndTimes.set(timeline, endTime);
+  return endTime;
 }
 
 function getLoggedForegroundCasts(timeline: CombatTimeline) {
@@ -864,7 +911,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       const sampleCasterAttachment = (attachmentId: number) =>
         sampleAttachmentWorldPosition(vulperaActor!, vulperaMount!, attachmentId);
       const occurrences = replayState.timeline
-        ? resolveLoggedEffectOccurrences(replayState.timeline, replayState.cursor) : [];
+        ? resolveLoggedEffectOccurrences(replayState.timeline, replayState.cursor,
+          new Map(replayEffects.map(({ asset, effect }) => [asset.fileDataId, getNativeEffectTailBound(effect.model)]))) : [];
       let particleCount = 0;
       let meshTriangles = 0;
       const activeFileDataIds: number[] = [];
@@ -895,8 +943,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             const destination = component.anchor === "target" && authoredFrame ? authoredFrame : targetTransform;
             return {
               timeSeconds: occurrence.componentTimeSeconds,
-              emissionEndSeconds: occurrence.emissionDuration ?? (component.anchor === "projectile"
-                ? occurrence.travelDuration ?? 0 : OTHER_REPLAY_EMISSION_SECONDS),
+              emissionEndSeconds: occurrence.emissionDuration!,
               modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
                 ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
               occurrenceSeed: `${occurrence.eventKey}/${placement?.sourceRowId ?? component.fileDataId}`,
@@ -913,7 +960,8 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             };
           });
           particleCount += effect.setReplayInstances(instances, camera);
-          meshTriangles += instances.filter((instance) => instance.timeSeconds >= 0).length * effect.meshTriangleCount;
+          meshTriangles += instances.filter((instance) => instance.timeSeconds >= 0
+            && instance.timeSeconds < instance.emissionEndSeconds).length * effect.meshTriangleCount;
           componentCount += matching.length;
         }
       } catch (caught) {
@@ -1165,14 +1213,16 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
           const generation = ++replayEffectGeneration;
           for (const { effect } of replayEffects) effect.dispose();
           replayEffects = [];
-          const requiredIds = getLoggedAssetIds(replayStateRef.current?.timeline ?? undefined);
+          const timeline = replayStateRef.current?.timeline ?? undefined;
+          const requiredIds = getLoggedAssetIds(timeline);
           const assets = NATIVE_EFFECT_ASSETS.filter((asset) => requiredIds.has(asset.fileDataId));
           const missing = [...requiredIds].filter((fileDataId) => !assets.some((asset) => asset.fileDataId === fileDataId));
           if (missing.length > 0) throw new Error(`Missing pinned replay FileDataID ${missing.join(", ")}. No substitute effect was rendered.`);
           const results = await Promise.allSettled(assets.map(async (asset) => {
             const instanceLimit = REPLAY_COMPONENT_INSTANCE_LIMITS.get(asset.fileDataId);
             if (!instanceLimit) throw new Error(`FileDataID ${asset.fileDataId}: no measured replay instance bound. No substitute effect was rendered.`);
-            const effect = await loadNativeParticleEffect(asset, instanceLimit);
+            const effect = await loadNativeParticleEffect(asset, (model) => Math.max(instanceLimit,
+              timeline ? getReplayComponentPeak(timeline, asset.fileDataId, getNativeEffectTailBound(model)) : 0));
             effect.setFog(stage.fog);
             return { asset, effect };
           }));
@@ -1442,7 +1492,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
               {replayAssetIds.has(4329984) && <span> · Shared Lava Burst / Elemental Blast missile: 6 of 10 emitters + 3 of 3 original ribbons (partially reconstructed) · FileDataID 4329984</span>}
               {replayAssetIds.has(794788) && <span> · Elemental Blast: 12 of 12 authored emitters ready in its two additional bodies · 9 original BLP textures · FileDataID 4329984 + 794788 + 613807</span>}
               <span> · Trace FileDataIDs: {[...replayAssetIds].join(", ") || "none"}</span>
-              <small> · Partial original components only; combat-log timestamps drive cast, travel and impact (native VFX fidelity is not verified).</small>
+              <small> · Partial original components only; combat-log timestamps drive cast, travel and impact. Unbound event ends use a 0.2s preview emission; authored lifespan bounds retain particles and ribbons, not exact retail expiration. Ranged event offsets are sampled deterministically for preview (native VFX fidelity is not verified).</small>
             </p>
           )}
           {selectedReplaySpell?.components.some((component) => component.anchor === "projectile") && replay?.timeline && (

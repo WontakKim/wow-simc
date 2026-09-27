@@ -61,6 +61,35 @@ describe("combat log timing", () => {
       occurrence.isBackground && occurrence.castStart === null && occurrence.impacts[0]?.time === 1)).toBe(true);
   });
 
+  it("retains separate targets on one uniquely timed cast without borrowing a different cast", () => {
+    const timeline = buildCombatTimeline(parseCombatLog([
+      `1.000 ${player} performs Action 'lightning_bolt' (188196) (275000)`,
+      `1.000 ${player} schedules travel (0.500) for Action 'lightning_bolt' (188196)`,
+      `1.500 ${player} Action 'lightning_bolt' (188196) hits Enemy 'First' for 100 nature damage (hit)`,
+      `1.500 ${player} Action 'lightning_bolt' (188196) hits Enemy 'Second' for 100 nature damage (crit)`,
+      `1.750 ${player} Action 'lightning_bolt' (188196) hits Enemy 'Late' for 100 nature damage (hit)`,
+    ]));
+    expect(timeline.occurrences).toHaveLength(1);
+    expect(timeline.occurrences[0].impacts.map((impact) => [impact.ordinal, impact.target]))
+      .toEqual([[2, "First"], [3, "Second"]]);
+    expect(timeline.unmatched.map((event) => [event.time, event.target])).toEqual([[1.75, "Late"]]);
+  });
+
+  it("leaves surplus simultaneous impacts unmatched when multiple casts remain compatible", () => {
+    const timeline = buildCombatTimeline(parseCombatLog([
+      `1.000 ${player} performs Action 'lightning_bolt_overload' (45284) (275000)`,
+      `1.000 ${player} schedules travel (0.500) for Action 'lightning_bolt_overload' (45284)`,
+      `1.000 ${player} performs Action 'lightning_bolt_overload' (45284) (275000)`,
+      `1.000 ${player} schedules travel (0.500) for Action 'lightning_bolt_overload' (45284)`,
+      `1.500 ${player} Action 'lightning_bolt_overload' (45284) hits Enemy 'First' for 100 nature damage (hit)`,
+      `1.500 ${player} Action 'lightning_bolt_overload' (45284) hits Enemy 'Second' for 100 nature damage (hit)`,
+      `1.500 ${player} Action 'lightning_bolt_overload' (45284) hits Enemy 'Third' for 100 nature damage (hit)`,
+    ]));
+    expect(timeline.occurrences.map((occurrence) => occurrence.impacts.map((impact) => impact.target)))
+      .toEqual([["First"], ["Second"]]);
+    expect(timeline.unmatched.map((event) => event.target)).toEqual(["Third"]);
+  });
+
   it("does not assign a later travel to an earlier non-projectile perform", () => {
     const timeline = buildCombatTimeline(parseCombatLog([
       `1.000 ${player} performs Action 'flame_shock' (188389) (275000)`,

@@ -984,12 +984,13 @@ export function sampleNativeRibbonEdges(
     sampleNativeTrack(ribbon.enabled, timeSeconds * 1000, sequenceDurationMs, 1, globalSequenceDurationsMs, sequenceIndex) !== 0;
   for (let index = lastGridBirthIndex; index >= 1; index -= 1) {
     const birth = index / edgeRate;
+    if (birth >= emissionEndSeconds) continue;
     if (timeSeconds - birth > lifetime) break;
     if (!isEnabled(birth)) continue;
     edges.push(sampleEdge(birth));
   }
   // Zero-advance endpoint edge at the current position while emitting.
-  if (timeSeconds <= emissionEndSeconds && isEnabled(timeSeconds)) {
+  if (timeSeconds < emissionEndSeconds && isEnabled(timeSeconds)) {
     edges.unshift(sampleEdge(timeSeconds));
   }
   return edges;

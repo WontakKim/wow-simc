@@ -667,7 +667,10 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await expect(scene.locator("[data-testid='replay-precombat-status']")).toContainText("simultaneously at cursor zero; this is not a recorded setup timeline");
   await seek.fill("0.15");
   await expect(scene.locator("[data-testid='replay-precombat-status']")).toHaveCount(0);
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984.*1355634,1284864,1109885/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1284864/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1109885/);
+  await expect(canvas).not.toHaveAttribute("data-replay-native-file-data-ids", /1355634/);
   await expect(canvas).toHaveAttribute("data-replay-native-latest-source-x", "");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 
@@ -675,7 +678,7 @@ test("renders non-Elemental Blast original kits and reports Ancestral Swiftness 
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   const lavaFrame = await canvas.screenshot();
-  await seek.fill("3.85");
+  await seek.fill("1.85");
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /6211617/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await seek.fill("1.1");
@@ -741,7 +744,117 @@ test("keeps the subtle Ancestral Swiftness mesh preview-only and discloses combi
   await expect(nativeStatus).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)", { timeout: 30_000 });
 });
 
-test("renders isolated Flame Shock particles beside the dummy at its own emission time", async ({ page }, testInfo) => {
+test("binds all four unsuppressed Flame Shock components to caster and impact anchors and phases", async ({ page }, testInfo) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as { sim: { players: Array<{ collected_data: {
+      action_sequence: Array<{ id?: number }>; action_sequence_precombat: unknown[];
+    } }> } };
+    const sequence = fixture.sim.players[0].collected_data;
+    const selected = sequence.action_sequence.find((event) => event.id === 188389);
+    if (!selected) throw new Error("Flame Shock action 188389 is absent from the pinned report.");
+    sequence.action_sequence = [selected];
+    sequence.action_sequence_precombat = [];
+    keepSelectedActionLog(fixture);
+    await route.fulfill({ response, json: fixture });
+  });
+  let interceptedModules = 0;
+  await page.route("**/src/GenuineModelScene.tsx*", async (route) => {
+    const response = await route.fetch();
+    let source = await response.text();
+    const resetPoint = "let particleCount = 0;";
+    const renderPoint = "particleCount += effect.setReplayInstances(instances, camera);";
+    for (const marker of [resetPoint, renderPoint]) {
+      if (source.split(marker).length !== 2) throw new Error(`Flame Shock render hook changed: ${marker}`);
+    }
+    source = source.replace(resetPoint, `window.__flameShockRendered = [];
+      window.__flameShockRenderProbe = () => ({
+        rendered: window.__flameShockRendered,
+        caster: anchors.caster.toArray(), target: targetAnchor.toArray(),
+      });
+      ${resetPoint}`);
+    source = source.replace(renderPoint, `const renderedParticles = effect.setReplayInstances(instances, camera);
+      particleCount += renderedParticles;
+      if (instances.length) window.__flameShockRendered.push({
+        id: asset.fileDataId,
+        visible: effect.group.visible,
+        particles: renderedParticles,
+        instances: instances.map((instance, index) => {
+          const frame = instance.sourceTransformAtTime(0);
+          return {
+            sourceRowId: matching[index].component.placement?.eventId,
+            position: nativeToThreePoint([frame[12], frame[13], frame[14]]),
+            age: instance.timeSeconds,
+            emissionDuration: instance.emissionEndSeconds,
+          };
+        }),
+      });`);
+    interceptedModules += 1;
+    await route.fulfill({ response, body: source });
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByTestId("replay-effect-status")).toContainText("Original components ready", { timeout: 30_000 });
+  expect(interceptedModules).toBe(1);
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const canvas = scene.locator("canvas");
+  const observe = async (time: number) => {
+    await seek.fill(String(time));
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    await canvas.screenshot();
+    return page.evaluate(() => window.__flameShockRenderProbe());
+  };
+  expect((await observe(22.641)).rendered).toEqual([]);
+  const impactOnly = await observe(22.68);
+  expect(impactOnly.rendered.map(({ id }) => id)).toEqual([4392095, 4050773]);
+  const full = await observe(22.81);
+  expect(full.rendered.map(({ id }) => id)).toEqual([4006618, 3980244, 4392095, 4050773]);
+  expect(full.rendered.every(({ visible }) => visible)).toBe(true);
+  expect(full.rendered.filter(({ id }) => id !== 4050773).every(({ particles }) => particles > 0)).toBe(true);
+  const authoredDisabledComponent = await page.evaluate(async () => {
+    const { parseNativeM2 } = await import("/src/nativeM2.ts");
+    const source = await fetch("/model/native-effects/4050773.m2");
+    if (!source.ok) throw new Error("Pinned Flame Shock target M2 4050773 is missing.");
+    const model = parseNativeM2(await source.arrayBuffer(), 4050773);
+    return { emitterCount: model.emitters.length, meshVertices: model.vertices.length,
+      ribbons: model.ribbons.length,
+      enabledValues: model.emitters.flatMap((emitter) => emitter.enabled.sequences.flatMap((track) => track.values)) };
+  });
+  // 4050773 has an impact instance and visible group, but its pinned enabled tracks prohibit drawn particles.
+  expect(authoredDisabledComponent.emitterCount).toBe(7);
+  expect(authoredDisabledComponent.meshVertices).toBe(0);
+  expect(authoredDisabledComponent.ribbons).toBe(0);
+  expect(authoredDisabledComponent.enabledValues).toEqual(Array(7).fill(0));
+  expect(full.rendered.find(({ id }) => id === 4050773)?.particles).toBe(0);
+  for (const observation of [impactOnly, full]) {
+    for (const { id, instances } of observation.rendered) {
+      const expectedRowId = id === 4392095 || id === 4050773 ? 545994 : 545993;
+      const expectedStart = expectedRowId === 545994 ? 22.642 : 22.692;
+      const expectedAnchor = expectedRowId === 545994 ? observation.target : observation.caster;
+      for (const instance of instances) {
+        expect(instance.sourceRowId).toBe(expectedRowId);
+        expect(instance.age).toBeCloseTo((observation === full ? 22.81 : 22.68) - expectedStart, 3);
+        expect(instance.emissionDuration).toBeCloseTo(0.2, 3);
+        for (let axis = 0; axis < 3; axis += 1) {
+          expect(instance.position[axis]).toBeCloseTo(expectedAnchor[axis], 4);
+        }
+      }
+    }
+  }
+  const afterImpactEmission = await observe(22.85);
+  expect(afterImpactEmission.rendered.map(({ id }) => id)).toEqual([4006618, 3980244, 4392095, 4050773]);
+  expect(afterImpactEmission.rendered.filter(({ id }) => id === 4392095 || id === 4050773)
+    .every(({ visible, instances }) => visible
+      && instances.every(({ age, emissionDuration }) => age > emissionDuration))).toBe(true);
+  expect(afterImpactEmission.rendered.find(({ id }) => id === 4392095)?.particles).toBeGreaterThan(0);
+  expect(afterImpactEmission.rendered.find(({ id }) => id === 4050773)?.particles).toBe(0);
+  await testInfo.attach("flame-shock-natural-phases", {
+    body: JSON.stringify({ authoredDisabledComponent, impactOnly, full, afterImpactEmission }, null, 2),
+    contentType: "application/json",
+  });
+});
+
+test("renders source-colored Flame Shock impact particles in a target-only isolation", async ({ page }, testInfo) => {
   const hiddenPage = await page.context().newPage();
   let actionTime = 0;
   const interceptedModules: number[] = [];
@@ -770,7 +883,7 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
       const probePoint = "const camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.01, 100);";
       const replayVisibility = 'effect.group.visible = animationModeRef.current === "replay";';
       const modeVisibility = "effect.group.visible = isVisible;";
-      for (const marker of [probePoint, replayVisibility, modeVisibility, "const OTHER_REPLAY_EMISSION_SECONDS = 0.2;"]) {
+      for (const marker of [probePoint, replayVisibility, modeVisibility, "const PREVIEW_TRANSIENT_EMISSION_SECONDS = 0.2;"]) {
         if (source.split(marker).length !== 2) throw new Error(`Flame Shock scene hook changed: ${marker}`);
       }
       source = source.replace(probePoint, `${probePoint}
@@ -800,7 +913,11 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
             }),
           };
         };`);
-      if (index === 1) {
+      if (index === 0) {
+        source = source.replace(replayVisibility,
+          'effect.group.visible = animationModeRef.current === "replay" && (effect.model.fileDataId === 4392095 || effect.model.fileDataId === 4050773);')
+          .replace(modeVisibility, "effect.group.visible = isVisible && (effect.model.fileDataId === 4392095 || effect.model.fileDataId === 4050773);");
+      } else {
         source = source.replace(replayVisibility, "effect.group.visible = false;")
           .replace(modeVisibility, "effect.group.visible = false;");
       }
@@ -817,9 +934,10 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
   const authoredColor = await page.evaluate(async () => {
     const { parseNativeM2 } = await import("/src/nativeM2.ts");
     const { decodeNativeBlp } = await import("/src/nativeBlp.ts");
-    const source = await fetch("/model/native-effects/4006618.m2");
-    if (!source.ok) throw new Error("Pinned Flame Shock M2 is missing.");
-    const model = parseNativeM2(await source.arrayBuffer(), 4006618);
+    // Impact row 545994 displays 4392095; caster-release row 545993 is hidden in this comparison.
+    const source = await fetch("/model/native-effects/4392095.m2");
+    if (!source.ok) throw new Error("Pinned Flame Shock impact M2 is missing.");
+    const model = parseNativeM2(await source.arrayBuffer(), 4392095);
     const emitter = model.emitters[0];
     const textureId = model.textureFileDataIds[emitter.textureIndices[0]];
     const response = await fetch(`/model/native-effects/${textureId}.blp`);
@@ -838,6 +956,7 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
       opaqueTexels, maximumTextureChannelSpread };
   });
   expect(authoredColor.blendMode).toBe(2);
+  expect(authoredColor.textureId).toBe(3982249);
   expect(authoredColor.colors.every(([red, green, blue]) => red > green && green > blue)).toBe(true);
   expect(authoredColor.opaqueTexels).toBeGreaterThan(0);
   expect(authoredColor.maximumTextureChannelSpread).toBeLessThan(16);
@@ -866,11 +985,12 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
     const time = Number((actionTime + elapsed).toFixed(3));
     const visible = await capture(page, time);
     const hidden = await capture(hiddenPage, time);
+    // These are scheduled IDs, not proof that the hidden caster-release groups were drawn.
     expect(visible.ids).toBe("4006618,3980244,4392095,4050773");
     expect(hidden.ids).toBe(visible.ids);
     expect(visible.particles).toBeGreaterThan(0);
     expect(hidden.particles).toBe(visible.particles);
-    expect(visible.probe.groups.map(({ visible: isVisible }) => isVisible)).toEqual([true, true, true, true]);
+    expect(visible.probe.groups.map(({ visible: isVisible }) => isVisible)).toEqual([false, false, true, true]);
     expect(hidden.probe.groups.map(({ visible: isVisible }) => isVisible)).toEqual([false, false, false, false]);
     expect(visible.probe.calls).toBeGreaterThan(hidden.probe.calls);
     expect(hidden.probe.target).toEqual(visible.probe.target);
@@ -905,8 +1025,8 @@ test("renders isolated Flame Shock particles beside the dummy at its own emissio
           changed += 1;
           if ((x + 0.5) / on.width < region[0] || (x + 0.5) / on.width > region[2]
             || (y + 0.5) / on.height < region[1] || (y + 0.5) / on.height > region[3]) outside += 1;
-          // With source-alpha blending, ON - OFF = alpha * (source - OFF).
-          // Ordered deltas over a warm OFF pixel imply warmer source channel gaps.
+          // The displayed 4392095 impact emitter uses source-alpha blending.
+          // Ordered ON - OFF deltas over a warm OFF pixel support a warmer source.
           if (off.data[offset] >= off.data[offset + 1]
             && off.data[offset + 1] >= off.data[offset + 2]
             && red > 0 && red > green && green > blue) colored += 1;
@@ -1059,7 +1179,8 @@ test("renders and scrubs the original Lava Burst ribbon missile mid-flight", asy
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   await seek.fill("1.2");
-  await expect(canvas).toHaveAttribute("data-replay-native-components", "1");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", "4329984,4006618,4006618,3980244,3980244");
+  await expect(canvas).toHaveAttribute("data-replay-native-components", "5");
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await expect(scene.locator("[data-testid='replay-effect-limitations']")).toContainText("ribbon 0:");
   const screenshot = await canvas.screenshot({ path: testInfo.outputPath("lava-burst-midflight.png") });
@@ -1185,7 +1306,7 @@ test("renders the bundled four-way Elemental Blast component peak without a capa
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
 });
 
-test("keeps a late composite capacity failure unavailable", async ({ page }) => {
+test("derives a late composite instance capacity from its parsed source timeline", async ({ page }) => {
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
     const fixture = await response.json() as {
@@ -1225,10 +1346,12 @@ test("keeps a late composite capacity failure unavailable", async ({ page }) => 
   await scene.getByRole("slider", { name: "Seek playback" }).fill("8.5");
   releaseNativeResponse?.();
 
-  const replayAlert = scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" });
-  await expect(replayAlert).toContainText(/5 simultaneous component instances.*4-instance resource bound/, { timeout: 30_000 });
-  await expect(scene.locator("[data-testid='replay-effect-status']")).toHaveCount(0);
-  await expect(scene.locator("canvas")).toHaveAttribute("data-replay-native-particles", "0");
+  await expect(scene.locator("[data-testid='replay-effect-status']"))
+    .toContainText("Original components ready", { timeout: 30_000 });
+  await expect(scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" })).toHaveCount(0);
+  await expect(scene.locator("canvas")).toHaveAttribute("data-replay-native-file-data-ids", /613807/);
+  await expect.poll(async () => Number(await scene.locator("canvas").getAttribute("data-replay-native-particles")))
+    .toBeGreaterThan(0);
 });
 
 test("applies the latest replay cursor after original components load late", async ({ page }) => {
@@ -1412,7 +1535,8 @@ test("identifies both Stormkeeper attachment frames and the applied kit offset",
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   await seek.fill("0.15");
-  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984.*1355634,1284864,1109885/);
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1284864/);
+  await expect(canvas).not.toHaveAttribute("data-replay-native-file-data-ids", /1355634/);
   await expect.poll(async () => Number(await canvas.getAttribute("data-replay-native-particles"))).toBeGreaterThan(0);
   await page.evaluate(() => window.scrollTo(0, 0));
   const beforeSeek = await canvas.screenshot();
@@ -1422,6 +1546,64 @@ test("identifies both Stormkeeper attachment frames and the applied kit offset",
   await seek.fill("0.15");
   await page.evaluate(() => window.scrollTo(0, 0));
   expect((await canvas.screenshot()).equals(beforeSeek)).toBe(true);
+});
+
+test("renders a refreshed aura beside its previous native tail using timeline-derived capacity", async ({ page }) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as { capture: { combat_log: Array<[number, string]> } };
+    const log = fixture.capture.combat_log;
+    const gain = log.find(([, line]) => line.includes("gains Buff 'stormkeeper' (191634)"));
+    if (!gain) throw new Error("The public fixture has no Stormkeeper aura gain.");
+    const refresh = gain[1].replace(/^0\.000/, "0.300").replace("gains Buff", "refreshes Buff");
+    const insertionIndex = log.findIndex(([, line]) => Number(line.split(" ", 1)[0]) > 0.3);
+    log.splice(insertionIndex < 0 ? log.length : insertionIndex, 0, [0, refresh]);
+    fixture.capture.combat_log = log.map(([, line], ordinal) => [ordinal, line]);
+    await route.fulfill({ response, json: fixture });
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByTestId("replay-effect-status")).toContainText("Original components ready", { timeout: 30_000 });
+  await scene.getByRole("slider", { name: "Seek playback" }).fill("0.3");
+  const canvas = scene.locator("canvas");
+  await expect.poll(async () => (await canvas.getAttribute("data-replay-native-file-data-ids"))
+    ?.split(",").filter((fileDataId) => fileDataId === "1284864").length).toBe(2);
+  await expect(scene.getByRole("alert").filter({ hasText: "Original replay components unavailable" })).toHaveCount(0);
+});
+
+test("retains source-bound aura and missile tails across exact stops and backward seeks", async ({ page }, testInfo) => {
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByTestId("replay-effect-status")).toContainText("Original components ready", { timeout: 30_000 });
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const canvas = scene.locator("canvas");
+  await seek.fill("0.15");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1284864/);
+  await expect(canvas).not.toHaveAttribute("data-replay-native-file-data-ids", /1355634/);
+  const aura = await canvas.screenshot({ path: testInfo.outputPath("stormkeeper-aura-only.png") });
+  await seek.fill("2");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /6211617/);
+  await canvas.screenshot({ path: testInfo.outputPath("lightning-bolt-flight.png") });
+  await seek.fill("2.277");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /6211617/);
+  await canvas.screenshot({ path: testInfo.outputPath("lightning-bolt-impact-tail.png") });
+  await seek.fill("2.9");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621/);
+  await canvas.screenshot({ path: testInfo.outputPath("lava-burst-precast.png") });
+  await seek.fill("3.65");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4006621/);
+  await canvas.screenshot({ path: testInfo.outputPath("lava-burst-cast-stop.png") });
+  await seek.fill("3.655");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1284864/);
+  await canvas.screenshot({ path: testInfo.outputPath("stormkeeper-emission-stop.png") });
+  await seek.fill("3.95");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984/);
+  await canvas.screenshot({ path: testInfo.outputPath("lava-burst-flight.png") });
+  await seek.fill("4.25");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984/);
+  await canvas.screenshot({ path: testInfo.outputPath("lava-burst-impact-tail.png") });
+  await seek.fill("0.15");
+  expect(await canvas.screenshot()).toEqual(aura);
 });
 
 test("loads a version 274 original component with PS3 color and TXAC UV caveat", async ({ page }) => {

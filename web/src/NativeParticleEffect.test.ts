@@ -25,7 +25,7 @@ import { decodeNativeBlp } from "./nativeBlp";
 import { nativeToThreeMatrix } from "./m2/coordinates";
 import { parseNativeM2, parseNativeSkin } from "./nativeM2";
 import { applyM2Blend, fogM2BlendColor, m2BlendParams } from "./nativeM2Blend";
-import { NativeParticleEffect } from "./NativeParticleEffect";
+import { getNativeEffectTailBound, NativeParticleEffect } from "./NativeParticleEffect";
 import * as particleSampling from "./nativeParticles";
 
 function translationMatrix(x: number, y: number, z: number) {
@@ -39,6 +39,25 @@ function loadAsset(fileDataId: number, extension: "m2" | "blp" | "skin") {
 }
 
 describe("original Lava Burst ribbon rendering", () => {
+  it("renders emitted particles and ribbon edges after arrival until the pinned M2 tail bound", () => {
+    const model = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    const camera = new PerspectiveCamera();
+    const instance = { timeSeconds: 0.8, emissionEndSeconds: 0.8, modelScale: 0.38,
+      sourceTransformAtTime: () => translationMatrix(0, 0, 0) };
+    const atStop = effect.setReplayInstances([instance], camera);
+    const ribbons = effect.group.children.filter((child) => (child as Mesh<BufferGeometry>).geometry instanceof BufferGeometry
+      && !((child as Mesh).geometry instanceof InstancedBufferGeometry)) as Mesh<BufferGeometry>[];
+    expect(atStop).toBeGreaterThan(0);
+    expect(ribbons.some((mesh) => mesh.geometry.drawRange.count > 0)).toBe(true);
+    expect(effect.setReplayInstances([{ ...instance, timeSeconds: 1.801 }], camera)).toBe(0);
+    expect(ribbons.every((mesh) => mesh.geometry.drawRange.count === 0)).toBe(true);
+    effect.setReplayInstances([instance], camera);
+    expect(effect.setReplayInstances([instance], camera)).toBe(atStop);
+    effect.dispose();
+  });
+
   it("draws bounded original ribbon geometry with M2BLEND material modes and deterministic scrubbing", () => {
     const model = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
@@ -76,6 +95,36 @@ describe("original Lava Burst ribbon rendering", () => {
 });
 
 describe("authored mesh attachment frame", () => {
+  it("bounds tails by authored particle lifespan and ribbon edge age, and stops mesh at the emission boundary", () => {
+    const model = parseNativeM2(loadAsset(6211617, "m2"), 6211617);
+    expect(getNativeEffectTailBound(model)).toBeCloseTo(0.8);
+    expect(getNativeEffectTailBound({ ...model, emitters: [{ ...model.emitters[0],
+      lifespan: { ...model.emitters[0].lifespan, sequences: [] }, lifespanVariation: 0.1 }], ribbons: [] }))
+      .toBeCloseTo(0.15);
+    expect(getNativeEffectTailBound({ ...model, emitters: [{ ...model.emitters[0],
+      lifespan: { ...model.emitters[0].lifespan, sequences: [
+        { timestamps: [0], values: [0.01] }, { timestamps: [], values: [] },
+      ] }, lifespanVariation: 0.1 }], ribbons: [] })).toBeCloseTo(0.15);
+    const ribbonModel = parseNativeM2(loadAsset(4329984, "m2"), 4329984);
+    expect(getNativeEffectTailBound(ribbonModel)).toBeCloseTo(1);
+    expect(getNativeEffectTailBound({ ...ribbonModel, emitters: [],
+      ribbons: [{ ...ribbonModel.ribbons[0], edgeLifetime: 0.1 }] })).toBe(0.25);
+    const skin = parseNativeSkin(loadAsset(6212146, "skin"), 6212146, model.vertices.length);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures, 1, skin);
+    const camera = new PerspectiveCamera();
+    const instance = { timeSeconds: 0.199, emissionEndSeconds: 0.2, modelScale: 0.38,
+      sourceTransformAtTime: () => translationMatrix(0, 0, 0) };
+    effect.setReplayInstances([instance], camera);
+    const visibleMeshes = () => effect.group.children.filter((child) => child.visible
+      && (child as Mesh).geometry instanceof BufferGeometry
+      && Boolean((child as Mesh<BufferGeometry>).geometry.getAttribute("normal")));
+    expect(visibleMeshes()).toHaveLength(1);
+    effect.setReplayInstances([{ ...instance, timeSeconds: 0.2 }], camera);
+    expect(visibleMeshes()).toHaveLength(0);
+    effect.dispose();
+  });
+
   it("applies the source orientation and scale to the original missile mesh", () => {
     const model = parseNativeM2(loadAsset(6211617, "m2"), 6211617);
     const skin = parseNativeSkin(loadAsset(6212146, "skin"), 6212146, model.vertices.length);

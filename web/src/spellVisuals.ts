@@ -11,6 +11,8 @@ export interface VisualEventRow {
   TargetType: number;
   StartMinOffsetMs: number;
   StartMaxOffsetMs: number;
+  EndMinOffsetMs?: number;
+  EndMaxOffsetMs?: number;
   kit?: { DelayMin: number; DelayMax: number };
 }
 export type VisualPhase = "castStart" | "castFinish" | "missile" | "impact" | "auraGain" | "auraLoss";
@@ -46,14 +48,23 @@ function deterministicFraction(seed: string) {
 
 export function sampleKitStart(key: string, row: VisualEventRow, phaseTime: number, delay: number,
   kitDelayMin = 0, kitDelayMax = kitDelayMin) {
+  // Nonidentical ranges use a stable preview sample, not a claimed retail draw.
   const fraction = deterministicFraction(`${key}/${row.ID}`);
   const offsetMs = row.StartMinOffsetMs + (row.StartMaxOffsetMs - row.StartMinOffsetMs) * fraction;
   return Math.round((phaseTime + delay + (kitDelayMin + (kitDelayMax - kitDelayMin) * fraction) / 1000 + offsetMs / 1000) * 1e6) / 1e6;
 }
 
+function sampleKitEnd(key: string, row: VisualEventRow, phaseTime: number) {
+  const fraction = deterministicFraction(`${key}/${row.ID}`);
+  const minimum = row.EndMinOffsetMs ?? 0;
+  const maximum = row.EndMaxOffsetMs ?? minimum;
+  return Math.round((phaseTime + (minimum + (maximum - minimum) * fraction) / 1000) * 1e6) / 1e6;
+}
+
 export function scheduleVisualPhases(timeline: CombatTimeline, rows: VisualEventRow[], spellId?: number) {
   const phases: Array<{ occurrenceKey: string; phase: VisualPhase; time: number }> = [];
-  const kits: Array<{ occurrenceKey: string; sourceRowId: number; time: number; phase: VisualPhase; evidence: string }> = [];
+  const kits: Array<{ occurrenceKey: string; sourceRowId: number; time: number; endTime?: number;
+    impactOrdinal?: number; impactTarget?: string; phase: VisualPhase; evidence: string }> = [];
   const unbound = rows.filter((row) => !getPhaseBinding(row));
   for (const occurrence of timeline.occurrences) {
     if (spellId !== undefined && occurrence.spellId !== spellId) continue;
@@ -64,11 +75,19 @@ export function scheduleVisualPhases(timeline: CombatTimeline, rows: VisualEvent
     for (const row of rows) {
       const binding = getPhaseBinding(row);
       if (!binding || binding.start.startsWith("aura")) continue;
-      const timestamps = binding.start === "castStart" ? [occurrence.castStart]
-        : binding.start === "castFinish" ? [occurrence.castFinish]
-          : occurrence.impacts.map((impact) => impact.time);
-      for (const time of timestamps) if (time !== null) kits.push({ occurrenceKey: occurrence.key,
-        sourceRowId: row.ID, phase: binding.start, time: sampleKitStart(occurrence.key, row, time, 0, row.kit?.DelayMin, row.kit?.DelayMax), evidence: binding.evidence });
+      if (binding.start === "castStart" && binding.end === "castFinish"
+        && (occurrence.castStart === null || occurrence.castFinish === null)) continue;
+      const triggers = binding.start === "castStart" ? [{ time: occurrence.castStart }]
+        : binding.start === "castFinish" ? [{ time: occurrence.castFinish }]
+          : occurrence.impacts.map((impact) => ({ time: impact.time, impactOrdinal: impact.ordinal, impactTarget: impact.target }));
+      for (const trigger of triggers) if (trigger.time !== null) {
+        const key = "impactOrdinal" in trigger ? `${occurrence.key}/impact-${trigger.impactOrdinal}/${trigger.impactTarget}` : occurrence.key;
+        kits.push({ occurrenceKey: occurrence.key, sourceRowId: row.ID, phase: binding.start,
+          time: sampleKitStart(key, row, trigger.time, 0, row.kit?.DelayMin, row.kit?.DelayMax),
+          ...(binding.end === "castFinish" ? { endTime: sampleKitEnd(key, row, occurrence.castFinish!) } : {}),
+          ...("impactOrdinal" in trigger ? { impactOrdinal: trigger.impactOrdinal, impactTarget: trigger.impactTarget } : {}),
+          evidence: binding.evidence });
+      }
     }
   }
   for (const aura of timeline.auras) {
@@ -81,7 +100,12 @@ export function scheduleVisualPhases(timeline: CombatTimeline, rows: VisualEvent
     for (const row of rows) {
       const binding = getPhaseBinding(row);
       if (binding?.start !== phase) continue;
-      kits.push({ occurrenceKey, sourceRowId: row.ID, phase, time: sampleKitStart(occurrenceKey, row, aura.time, 0, row.kit?.DelayMin, row.kit?.DelayMax), evidence: binding.evidence });
+      const nextTransition = timeline.auras.find((event) => event.ordinal > aura.ordinal && event.actor === aura.actor
+        && event.spellId === aura.spellId && (event.stacks === 0 || event.transition === "gain" || event.transition === "refresh"));
+      kits.push({ occurrenceKey, sourceRowId: row.ID, phase,
+        time: sampleKitStart(occurrenceKey, row, aura.time, 0, row.kit?.DelayMin, row.kit?.DelayMax),
+        ...(binding.end === "auraLoss" && nextTransition ? { endTime: sampleKitEnd(occurrenceKey, row, nextTransition.time) } : {}),
+        evidence: binding.evidence });
     }
   }
   phases.sort((left, right) => left.time - right.time);

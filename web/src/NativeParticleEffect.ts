@@ -84,6 +84,16 @@ interface EmitterBatch {
   capacity: number;
 }
 
+export function getNativeEffectTailBound(model: NativeM2Model) {
+  // Parsed M2 tracks only support step and linear interpolation, so lifespan
+  // keys bound their samples. A missing selected sequence slot or empty track
+  // uses the sampler's 0.05s fallback; this is an upper bound, not exact expiry.
+  return Math.max(0,
+    ...model.emitters.map((emitter) => Math.max(0.001,
+      Math.max(maximumTrackValue(emitter.lifespan), 0.05) + Math.abs(emitter.lifespanVariation))),
+    ...model.ribbons.map((ribbon) => Math.max(0.25, ribbon.edgeLifetime)));
+}
+
 function maximumTrackValue(track: { sequences: Array<{ values: number[] }> }) {
   return Math.max(0, ...track.sequences.flatMap((sequence) => sequence.values));
 }
@@ -673,7 +683,8 @@ export class NativeParticleEffect {
     }
     for (const batch of this.meshBatches) {
       const instance = instances[batch.instanceIndex];
-      batch.mesh.visible = Boolean(instance && instance.timeSeconds >= 0);
+      batch.mesh.visible = Boolean(instance && instance.timeSeconds >= 0
+        && instance.timeSeconds < instance.emissionEndSeconds);
       if (!batch.mesh.visible || !instance) continue;
       const timeMs = instance.timeSeconds * 1000;
       const sequenceDurationMs = this.model.sequenceDurationsMs[this.animationSequenceIndex];
@@ -780,7 +791,8 @@ async function fetchPinnedAsset(fileDataId: number, extension: "m2" | "blp" | "s
   return source;
 }
 
-export async function loadNativeParticleEffect(asset: NativeEffectAsset, maximumInstanceCount = 1) {
+export async function loadNativeParticleEffect(asset: NativeEffectAsset,
+  maximumInstanceCount: number | ((model: NativeM2Model) => number) = 1) {
   try {
     const [modelSource, ...textureSources] = await Promise.all([
       fetchPinnedAsset(asset.fileDataId, "m2", asset.sha256),
@@ -806,7 +818,8 @@ export async function loadNativeParticleEffect(asset: NativeEffectAsset, maximum
     }
     const skinSource = skinAsset ? await fetchPinnedAsset(skinAsset.fileDataId, "skin", skinAsset.sha256) : undefined;
     const skin = skinSource ? parseNativeSkin(skinSource, skinAsset!.fileDataId, model.vertices.length) : undefined;
-    return new NativeParticleEffect(model, decodedTextures, maximumInstanceCount, skin);
+    return new NativeParticleEffect(model, decodedTextures,
+      typeof maximumInstanceCount === "number" ? maximumInstanceCount : maximumInstanceCount(model), skin);
   } catch (caught) {
     const reason = caught instanceof Error ? caught.message : "Unknown native asset failure.";
     throw new Error(`${reason} No substitute effect was rendered.`);

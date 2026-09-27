@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Matrix4, Vector3 } from "three";
 import type { CombatTimeline } from "./combatLog";
-import { composeAttachmentTransform, resolveVisualAnimation, scheduleVisualPhases, sampleKitStart } from "./spellVisuals";
+import { composeAttachmentTransform, getPreviewVisual, resolveVisualAnimation, scheduleVisualPhases, sampleKitStart } from "./spellVisuals";
 
 const occurrence: CombatTimeline["occurrences"][number] = {
   key: "caster/1", actor: "caster", actorInstance: "caster", actionName: "lava_burst", family: "lava_burst",
@@ -28,6 +28,39 @@ describe("spell visual phases", () => {
     expect(scheduled.unbound.map((row) => row.ID)).toEqual([4]);
     expect(scheduled.phases.filter((phase) => phase.phase.startsWith("aura")).map((phase) => [phase.phase, phase.time]))
       .toEqual([["auraGain", 2.5], ["auraLoss", 4]]);
+  });
+
+  it("binds the pinned Stormkeeper precast only to a complete cast and the hand aura to its logged loss", () => {
+    const rows = getPreviewVisual(191634)!.events.filter((row) => row.ID === 115368 || row.ID === 115369);
+    const timeline: CombatTimeline = { occurrences: [
+      { ...occurrence, key: "precombat", actionName: "stormkeeper", spellId: 191634, castStart: null, castFinish: 0 },
+      { ...occurrence, key: "later", actionName: "stormkeeper", spellId: 191634, castStart: 8, castFinish: 9 },
+    ], auras: [
+      { time: 0, ordinal: 1, actor: "caster", name: "stormkeeper", spellId: 191634, stacks: 2, transition: "gain" },
+      { time: 3.655, ordinal: 2, actor: "caster", name: "stormkeeper", spellId: 191634, stacks: 0, transition: "loss" },
+    ], unmatched: [] };
+    const kits = scheduleVisualPhases(timeline, rows, 191634).kits;
+    expect(kits.filter((kit) => kit.sourceRowId === 115368)).toMatchObject([
+      { occurrenceKey: "later", time: 8, endTime: 9 },
+    ]);
+    expect(kits.filter((kit) => kit.sourceRowId === 115369)).toMatchObject([
+      { occurrenceKey: "aura-1", time: 0, endTime: 3.655 },
+    ]);
+  });
+
+  it("keeps each impact's ordinal and target separate and applies signed end offsets only to verified ends", () => {
+    const repeated = { ...occurrence, impacts: [
+      { time: 3.7, ordinal: 4, target: "A", result: "hit" },
+      { time: 3.7, ordinal: 5, target: "B", result: "hit" },
+    ] };
+    const bounded = { ...event(8, 1, 2, 1), EndMinOffsetMs: 50, EndMaxOffsetMs: 50 };
+    const schedule = scheduleVisualPhases({ occurrences: [repeated], auras: [], unmatched: [] },
+      [bounded, event(9, 6, 13, 4)]).kits;
+    expect(schedule.find((kit) => kit.sourceRowId === 8)).toMatchObject({ time: 2, endTime: 3.05 });
+    expect(schedule.filter((kit) => kit.sourceRowId === 9)).toMatchObject([
+      { impactOrdinal: 4, impactTarget: "A", time: 3.7 },
+      { impactOrdinal: 5, impactTarget: "B", time: 3.7 },
+    ]);
   });
 
   it("samples delays deterministically and preserves signed event offsets", () => {

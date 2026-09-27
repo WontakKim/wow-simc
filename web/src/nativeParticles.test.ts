@@ -314,6 +314,15 @@ describe("reference semantics (M0b)", () => {
     expect(sampleNativeRibbonEdges(ribbon, undefined, 667, 0.2).map((edge) => edge.age)).toEqual([0]);
   });
 
+  it("treats the emission stop as exclusive while retaining earlier edges", () => {
+    const ribbon = makeRibbon({ edgesPerSecond: 4, edgeLifetime: 0.6 });
+    const atStop = sampleNativeRibbonEdges(ribbon, undefined, 667, 0.5, { emissionEndSeconds: 0.5 });
+    expect(atStop.map((edge) => edge.age)).toEqual([0.25]);
+    expect(sampleNativeRibbonEdges(ribbon, undefined, 667, 0.75, { emissionEndSeconds: 0.5 })
+      .map((edge) => edge.age)).toEqual([0.5]);
+    expect(sampleNativeRibbonEdges(ribbon, undefined, 667, 0.86, { emissionEndSeconds: 0.5 })).toEqual([]);
+  });
+
   it("keeps aging ribbon edges after emission stops and scrolls their UV cells", () => {
     const ribbon = makeRibbon({ textureSlot: constantTrack(2) });
     const aging = sampleNativeRibbonEdges(ribbon, undefined, 667, 0.4, { emissionEndSeconds: 0.3 });

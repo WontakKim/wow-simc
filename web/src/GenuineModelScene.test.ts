@@ -9,6 +9,8 @@ import {
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import officialFixture from "../public/fixture/elemental-shaman-replay.json";
 import {
   REPLAY_SOURCE_ATTACHMENTS,
@@ -17,6 +19,7 @@ import {
   frameModels,
   getPreparedComponentPlacements,
   getReplayEffectAnchors,
+  getReplayComponentPeak,
   getReplayEffectSourceAnchor,
   isReplayClipMissing,
   resolveLoggedEffectOccurrences,
@@ -25,8 +28,12 @@ import {
   getLoggedPlaybackEndTime,
 } from "./GenuineModelScene";
 import { parseReplayReport, type ReplayEvent } from "./replay";
-import type { CombatTimeline } from "./combatLog";
+import { buildCombatTimeline, parseCombatLog, type CombatTimeline } from "./combatLog";
 import { NATIVE_EFFECT_ASSETS } from "./nativeEffectAssets";
+import { decodeNativeBlp } from "./nativeBlp";
+import { parseNativeM2, parseNativeSkin } from "./nativeM2";
+import { sampleNativeEmitter } from "./nativeParticles";
+import { getNativeEffectTailBound, NativeParticleEffect } from "./NativeParticleEffect";
 import { blendBoneMatrices } from "./m2/sampler";
 
 function createModel(width: number, height: number, depth: number) {
@@ -121,6 +128,93 @@ describe("ranged scene layout", () => {
 
 describe("logged native replay scheduling", () => {
   const timeline = parseReplayReport(officialFixture).combatTimeline!;
+  const tailBoundFor = (fileDataId: number) => {
+    const source = readFileSync(resolve(process.cwd(), `public/model/native-effects/${fileDataId}.m2`));
+    const model = parseNativeM2(source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength), fileDataId);
+    return getNativeEffectTailBound(model);
+  };
+  const tailBounds = new Map([1355634, 1284864, 4006621, 4329984, 6211617, 6211618, 1571475]
+    .map((fileDataId) => [fileDataId, tailBoundFor(fileDataId)]));
+  const componentsAt = (time: number) => resolveLoggedEffectOccurrences(timeline, time, tailBounds)
+    .flatMap((effect) => effect.components.map((component) => ({ effect, component })));
+
+  it("retains a sampled particle when the selected lifespan sequence slot is absent", () => {
+    const source = readFileSync(resolve(process.cwd(), "public/model/native-effects/6211617.m2"));
+    const original = parseNativeM2(source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength), 6211617);
+    const emitter = { ...original.emitters[0], lifespanVariation: 0,
+      lifespan: { ...original.emitters[0].lifespan, globalSequence: -1, sequences: [
+        { timestamps: [0], values: [0.01] }, { timestamps: [0], values: [0.01] },
+      ] },
+      emissionRate: { ...original.emitters[0].emissionRate, sequences: [{ timestamps: [0], values: [100] }] },
+      enabled: { ...original.emitters[0].enabled, sequences: [{ timestamps: [0], values: [1] }] },
+    };
+    const originalColor = original.colors[0];
+    const model = { ...original, emitters: [emitter], colors: [{ ...originalColor,
+      alpha: { ...originalColor.alpha, sequences: [
+        { timestamps: [0], values: [0] }, { timestamps: [0], values: [0] },
+        { timestamps: [0], values: [1] },
+      ] },
+    }] };
+    const skinBytes = readFileSync(resolve(process.cwd(), "public/model/native-effects/6212146.skin"));
+    const skin = parseNativeSkin(skinBytes.buffer.slice(skinBytes.byteOffset, skinBytes.byteOffset + skinBytes.byteLength),
+      6212146, model.vertices.length);
+    const textures = model.textureFileDataIds.map((id) => {
+      const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${id}.blp`));
+      return decodeNativeBlp(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), id);
+    });
+    const effect = new NativeParticleEffect(model, textures, 1, skin);
+    expect(effect.animationSequenceIndex).toBe(2);
+    const samples = sampleNativeEmitter(emitter, model.bones[emitter.boneIndex], model.sequenceDurationMs, 0.22,
+      { sequenceIndex: effect.animationSequenceIndex, bones: model.bones,
+        globalSequenceDurationsMs: model.globalSequenceDurationsMs, emissionEndSeconds: 0.2 });
+    expect(samples.some((sample) => Math.abs(sample.age - 0.03) < 1e-9)).toBe(true);
+    const bound = getNativeEffectTailBound(model);
+    expect(bound).toBeCloseTo(0.05);
+    const lightningBolt = timeline.occurrences.find((occurrence) => occurrence.spellId === 188196
+      && occurrence.travelStart !== null)!;
+    const isolated = { ...timeline, occurrences: [{ ...lightningBolt, castFinish: 0, travelStart: 0,
+      travelDuration: 0.2, impacts: [{ ...lightningBolt.impacts[0], time: 0.2 }] }], auras: [], unmatched: [] };
+    const scheduled = resolveLoggedEffectOccurrences(isolated, 0.22, new Map([[6211617, bound]]));
+    expect(scheduled.filter((occurrence) => occurrence.components[0].fileDataId === 6211617)
+      .map((occurrence) => [occurrence.emissionStopTime, occurrence.renderEndTime])).toEqual([[0.2, 0.25]]);
+    effect.dispose();
+  });
+
+  it("does not fabricate an opening Stormkeeper precast but binds its aura hand component to gain and loss", () => {
+    const atGain = componentsAt(0).filter(({ effect }) => effect.spellId === 191634);
+    expect(atGain.map(({ component }) => component.fileDataId)).toEqual([1284864]);
+    expect(atGain[0].effect).toMatchObject({ startTime: 0, emissionStopTime: 3.655,
+      renderEndTime: expect.closeTo(3.655 + tailBounds.get(1284864)!) });
+    expect(componentsAt(3.655).filter(({ effect }) => effect.spellId === 191634)
+      .every(({ effect }) => effect.componentTimeSeconds >= effect.emissionDuration!)).toBe(true);
+    expect(componentsAt(3.655 + tailBounds.get(1284864)! + 0.001)
+      .some(({ effect }) => effect.spellId === 191634)).toBe(false);
+  });
+
+  it("omits a zero-length source-bound precast without failing the rest of the replay", () => {
+    const cast = timeline.occurrences.find((occurrence) => occurrence.spellId === 51505 && occurrence.castStart === 2.574)!;
+    const isolated: CombatTimeline = { occurrences: [{ ...cast, castFinish: 2.574, travelStart: null, impacts: [] }],
+      auras: [], unmatched: [] };
+    expect(resolveLoggedEffectOccurrences(isolated, 2.574, tailBounds)
+      .flatMap((effect) => effect.components).filter((component) => component.fileDataId === 4006621)).toEqual([]);
+  });
+
+  it("keeps the real Lava precast through its finish and retains release and missile tails independently", () => {
+    const precast = (time: number) => componentsAt(time).filter(({ effect, component }) =>
+      effect.spellId === 51505 && component.fileDataId === 4006621);
+    expect(precast(2.573)).toHaveLength(0);
+    expect(precast(2.574)).toHaveLength(2);
+    expect(precast(3.65)).toHaveLength(2);
+    expect(precast(3.65).every(({ effect }) => effect.emissionStopTime === 3.65)).toBe(true);
+    expect(precast(3.65 + tailBounds.get(4006621)! + 0.001)).toHaveLength(0);
+    const missile = componentsAt(4.25).filter(({ component }) => component.fileDataId === 4329984);
+    expect(missile.some(({ effect }) => effect.emissionStopTime === 4.25
+      && effect.renderEndTime > effect.emissionStopTime)).toBe(true);
+    expect(componentsAt(4.25 + tailBounds.get(4329984)! + 0.001)
+      .some(({ effect, component }) => effect.spellId === 51505 && component.fileDataId === 4329984
+        && effect.eventTime === 3.65)).toBe(false);
+  });
+
   it("holds precast until the logged finish and leaves overloads out of the foreground pose", () => {
     expect(resolveLoggedAnimation(timeline, 3).kind).toBe("motion");
     expect(resolveLoggedAnimation(timeline, 3).eventLabel).toBe("Lava Burst");
@@ -130,13 +224,13 @@ describe("logged native replay scheduling", () => {
   it("releases at finish, flies until hit, then shows impact only after hit", () => {
     const before = resolveLoggedEffectOccurrences(timeline, 3.649).filter((effect) => effect.spellId === 51505 && effect.eventTime === 3.65);
     expect(before.some((effect) => effect.components.some((component) => component.anchor === "projectile"))).toBe(false);
-    const flight = resolveLoggedEffectOccurrences(timeline, 3.95).find((effect) => effect.spellId === 51505 && effect.eventTime === 3.65)!;
-    expect(flight.components.some((component) => component.anchor === "projectile")).toBe(true);
-    expect(flight.components.some((component) => component.anchor === "target")).toBe(false);
-    expect(flight.componentTimeSeconds).toBeCloseTo(0.3);
-    const impact = resolveLoggedEffectOccurrences(timeline, 4.25).find((effect) => effect.spellId === 51505 && effect.eventTime === 3.65)!;
-    expect(impact.components.some((component) => component.anchor === "target")).toBe(true);
-    expect(impact.components.some((component) => component.anchor === "projectile")).toBe(false);
+    const flight = resolveLoggedEffectOccurrences(timeline, 3.95).filter((effect) => effect.spellId === 51505 && effect.eventTime === 3.65);
+    expect(flight.some((effect) => effect.components.some((component) => component.anchor === "projectile"))).toBe(true);
+    expect(flight.some((effect) => effect.components.some((component) => component.anchor === "target"))).toBe(false);
+    expect(flight.find((effect) => effect.components[0].anchor === "projectile")!.componentTimeSeconds).toBeCloseTo(0.3);
+    const impact = resolveLoggedEffectOccurrences(timeline, 4.25).filter((effect) => effect.spellId === 51505 && effect.eventTime === 3.65);
+    expect(impact.some((effect) => effect.components.some((component) => component.anchor === "projectile"))).toBe(true);
+    expect(impact.every((effect) => effect.emissionStopTime <= 4.25)).toBe(true);
   });
   it("keeps source-linked hand rows, authored offset, and Base missile attachment distinct", () => {
     const precast = getPreparedComponentPlacements(51505, { fileDataId: 4006621, anchor: "caster" });
@@ -152,6 +246,44 @@ describe("logged native replay scheduling", () => {
       .map((placement) => placement.positionerId)).toEqual([24, 23]);
     expect(resolveLoggedEffectOccurrences(timeline, 1.7).flatMap((effect) => effect.components)
       .filter((component) => component.fileDataId === 1598036)).toHaveLength(1);
+  });
+
+  it("renders two independently keyed impacts parsed from one raw logged cast", () => {
+    const actor = "Player 'MID2_Shaman_Elemental_Farseer'";
+    const parsed = buildCombatTimeline(parseCombatLog([
+      `1.000 ${actor} performs Action 'lightning_bolt' (188196) (275000)`,
+      `1.000 ${actor} schedules travel (0.500) for Action 'lightning_bolt' (188196)`,
+      `1.500 ${actor} Action 'lightning_bolt' (188196) hits Enemy 'First' for 100 nature damage (hit)`,
+      `1.500 ${actor} Action 'lightning_bolt' (188196) hits Enemy 'Second' for 100 nature damage (crit)`,
+    ]));
+    const impactsAt = (time: number) => resolveLoggedEffectOccurrences(parsed, time, tailBounds)
+      .filter((effect) => effect.components[0].fileDataId === 1571475);
+    expect(parsed.unmatched).toEqual([]);
+    expect(impactsAt(1.5).map((effect) => effect.eventKey)).toEqual([
+      `${parsed.occurrences[0].key}/impact-2/First`, `${parsed.occurrences[0].key}/impact-3/Second`,
+    ]);
+    impactsAt(1.499);
+    expect(impactsAt(1.5)).toHaveLength(2);
+  });
+
+  it("keeps impact identities independent even at identical timestamps and replays them after backwards seek", () => {
+    const original = timeline.occurrences.find((occurrence) => occurrence.spellId === 188196 && occurrence.impacts.length)!;
+    const impacts = [
+      { ...original.impacts[0], ordinal: 9001, target: "A" },
+      { ...original.impacts[0], ordinal: 9002, target: "B" },
+    ];
+    const isolated: CombatTimeline = { occurrences: [{ ...original, impacts }], auras: [], unmatched: [] };
+    const hitTime = impacts[0].time;
+    const active = () => resolveLoggedEffectOccurrences(isolated, hitTime, tailBounds)
+      .filter((effect) => effect.components.some((component) => component.fileDataId === 1571475));
+    expect(active().map((effect) => effect.eventKey)).toEqual([
+      `${original.key}/impact-9001/A`, `${original.key}/impact-9002/B`,
+    ]);
+    resolveLoggedEffectOccurrences(isolated, hitTime + tailBounds.get(1571475)!, tailBounds);
+    resolveLoggedEffectOccurrences(isolated, hitTime - 0.001, tailBounds);
+    expect(active().map((effect) => effect.eventKey)).toEqual([
+      `${original.key}/impact-9001/A`, `${original.key}/impact-9002/B`,
+    ]);
   });
 
   it("starts the delayed Lightning Bolt cast effect after the release kit delay", () => {
@@ -172,9 +304,26 @@ describe("logged native replay scheduling", () => {
 
   it("preserves aura visibility until loss and uses the final logged hit for playback bounds", () => {
     expect(resolveLoggedEffectOccurrences(timeline, 3.6).some((effect) => effect.spellId === 191634)).toBe(true);
-    expect(resolveLoggedEffectOccurrences(timeline, 3.655).some((effect) => effect.spellId === 191634)).toBe(false);
+    const residual = resolveLoggedEffectOccurrences(timeline, 3.655, tailBounds)
+      .filter((effect) => effect.spellId === 191634);
+    expect(residual).not.toHaveLength(0);
+    expect(residual.every((effect) => effect.emissionStopTime === 3.655)).toBe(true);
+    expect(resolveLoggedEffectOccurrences(timeline, 3.655 + tailBounds.get(1284864)! + 0.001, tailBounds)
+      .some((effect) => effect.spellId === 191634)).toBe(false);
     expect(getLoggedPlaybackEndTime(timeline)).toBeGreaterThan(45);
   });
+  it("keeps the seek range open for a final aura loss and its surviving native tail", () => {
+    const gain = timeline.auras.find((aura) => aura.spellId === 191634 && aura.transition === "gain")!;
+    const isolated: CombatTimeline = { occurrences: [], unmatched: [], auras: [
+      { ...gain, ordinal: 9000, time: 0 },
+      { ...gain, ordinal: 9001, time: 0.3, transition: "loss", stacks: 0 },
+    ] };
+    const tailEnd = 0.3 + tailBounds.get(1284864)!;
+    expect(resolveLoggedEffectOccurrences(isolated, tailEnd - 0.001, tailBounds)
+      .some((effect) => effect.components[0].fileDataId === 1284864)).toBe(true);
+    expect(getLoggedPlaybackEndTime(isolated)).toBeGreaterThanOrEqual(tailEnd);
+  });
+
   it("keeps unmatched events seekable without inventing an execution", () => {
     expect(getLoggedPlaybackEndTime({ ...timeline, unmatched: [
       ...timeline.unmatched, { ordinal: 9999, time: 50, actor: "Enemy", kind: "impact" },
@@ -279,26 +428,41 @@ describe("logged native replay scheduling", () => {
     expect(resolveLoggedEffectOccurrences(noMappedCast, 4)).toEqual([]);
   });
 
+  it("counts aura refresh tails alongside newly emitting instances", () => {
+    const gain = timeline.auras.find((aura) => aura.spellId === 191634 && aura.transition === "gain")!;
+    const isolated: CombatTimeline = { occurrences: [], unmatched: [], auras: [
+      { ...gain, ordinal: 9000, time: 0 },
+      { ...gain, ordinal: 9001, time: 0.3, transition: "refresh" },
+      { ...gain, ordinal: 9002, time: 0.6, transition: "loss", stacks: 0 },
+    ] };
+    const active = resolveLoggedEffectOccurrences(isolated, 0.3, tailBounds)
+      .filter((effect) => effect.components[0].fileDataId === 1284864);
+    expect(active.map((effect) => [effect.eventKey, effect.emissionStopTime])).toEqual([
+      ["aura-9000", 0.3], ["aura-9001", 0.6],
+    ]);
+    expect(getReplayComponentPeak(isolated, 1284864, tailBounds.get(1284864)!)).toBe(2);
+    expect(getReplayComponentPeak({ ...isolated, auras: [
+      { ...gain, ordinal: 9000, time: 0 },
+      { ...gain, ordinal: 9001, time: 0.1, transition: "refresh" },
+      { ...gain, ordinal: 9002, time: 0.2, transition: "refresh" },
+      { ...gain, ordinal: 9003, time: 0.3, transition: "loss", stacks: 0 },
+    ] }, 1284864, tailBounds.get(1284864)!)).toBe(3);
+    expect(resolveLoggedEffectOccurrences(isolated, 0.3 + tailBounds.get(1284864)! + 0.001, tailBounds)
+      .filter((effect) => effect.components[0].fileDataId === 1284864)
+      .map((effect) => effect.eventKey)).toEqual(["aura-9001"]);
+  });
+
   it("bounds simultaneous original components using the new trace, including overloads", () => {
-    const moments = timeline.occurrences.flatMap((occurrence) => [
-      occurrence.castStart, occurrence.castFinish, occurrence.travelStart,
-      ...occurrence.impacts.flatMap((impact) => [impact.time, impact.time + 0.1]),
-    ]).filter((time): time is number => time !== null).concat(timeline.auras.map((aura) => aura.time));
-    const peaks = new Map<number, number>();
-    for (const time of moments) {
-      const counts = new Map<number, number>();
-      for (const effect of resolveLoggedEffectOccurrences(timeline, time)) {
-        for (const component of effect.components) counts.set(component.fileDataId, (counts.get(component.fileDataId) ?? 0) + 1);
-      }
-      for (const [fileDataId, count] of counts) peaks.set(fileDataId, Math.max(peaks.get(fileDataId) ?? 0, count));
-    }
-    expect(moments.find((time) => resolveLoggedEffectOccurrences(timeline, time)
-      .flatMap((effect) => effect.components).filter((component) => component.fileDataId === 794788).length === 4)).toBe(8.651);
-    expect(peaks.get(4329984)).toBe(7);
-    expect(peaks.get(6211617)).toBe(4);
-    expect(peaks.get(794788)).toBe(4);
-    expect([...peaks].sort(([left], [right]) => left - right))
-      .toEqual([...REPLAY_COMPONENT_INSTANCE_LIMITS].sort(([left], [right]) => left - right));
+    const authoredBounds = new Map(NATIVE_EFFECT_ASSETS.map(({ fileDataId }) => [fileDataId, tailBoundFor(fileDataId)]));
+    const peaks = new Map([...authoredBounds].map(([fileDataId, bound]) =>
+      [fileDataId, getReplayComponentPeak(timeline, fileDataId, bound)]));
+    expect([...authoredBounds.values()].every((bound) => bound <= 1.5)).toBe(true);
+    expect(authoredBounds.get(1284864)).toBeCloseTo(0.45);
+    expect(authoredBounds.get(4329984)).toBeCloseTo(1);
+    expect(peaks.get(4329984)).toBe(11);
+    expect(peaks.get(6211617)).toBe(7);
+    expect(peaks.get(6211618)).toBe(7);
+    expect([...peaks].every(([fileDataId, count]) => count <= (REPLAY_COMPONENT_INSTANCE_LIMITS.get(fileDataId) ?? 0))).toBe(true);
   });
 
   it("shares the original missile across Lava Burst, Elemental Blast and overloads without blocked body 3980281", () => {
@@ -308,7 +472,9 @@ describe("logged native replay scheduling", () => {
       .find((effect) => effect.eventKey === blast.key && effect.components.some((component) => component.anchor === "projectile"))!;
     const overload = resolveLoggedEffectOccurrences(timeline, 0.65).filter((effect) => effect.spellId === 285466);
     expect(lava.flatMap((effect) => effect.components.map((component) => component.fileDataId))).toContain(4329984);
-    expect(blastFlight.components.map((component) => component.fileDataId)).toEqual([4329984, 794788, 613807]);
+    expect(resolveLoggedEffectOccurrences(timeline, blast.travelStart! + 0.1)
+      .filter((effect) => effect.eventKey === blast.key && effect.components[0].anchor === "projectile")
+      .map((effect) => effect.components[0].fileDataId)).toEqual([4329984, 794788, 613807]);
     expect(overload.length).toBeGreaterThan(0);
     expect(overload.flatMap((effect) => effect.components.map((component) => component.fileDataId))).toContain(4329984);
     expect([...lava, blastFlight, ...overload].flatMap((effect) => effect.components.map((component) => component.fileDataId))).not.toContain(3980281);
@@ -330,9 +496,12 @@ describe("logged native replay scheduling", () => {
       ["precombat", 0, "trinket_2_special"], ["precombat", 0, "stormkeeper"],
     ]);
     const atZero = resolveLoggedEffectOccurrences(timeline, 0);
-    expect(atZero.some((effect) => effect.spellId === 192106)).toBe(true);
-    expect(atZero.some((effect) => effect.spellId === 191634)).toBe(true);
+    expect(atZero.some((effect) => effect.spellId === 192106)).toBe(false);
+    expect(resolveLoggedEffectOccurrences(timeline, 0.25).some((effect) => effect.spellId === 192106)).toBe(true);
+    expect(atZero.filter((effect) => effect.spellId === 191634)
+      .flatMap((effect) => effect.components.map((component) => component.fileDataId))).toEqual([1284864]);
     expect(atZero.some((effect) => effect.spellId === 318038)).toBe(false);
+    expect(resolveLoggedEffectOccurrences(timeline, 0.15).some((effect) => effect.spellId === 318038)).toBe(true);
     expect(atZero.filter((effect) => effect.spellId === 51505)).not.toHaveLength(0);
     expect(atZero.filter((effect) => effect.spellId === 51505).every((effect) =>
       effect.eventKey === timeline.occurrences.find((occurrence) => occurrence.actionName === "lava_burst_asc"
