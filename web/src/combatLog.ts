@@ -9,6 +9,7 @@ export interface CombatLogEvent {
   duration?: number;
   target?: string;
   result?: string;
+  damage?: number | null;
   name?: string;
   stacks?: number;
   transition?: "gain" | "loss" | "decrement" | "refresh";
@@ -26,7 +27,7 @@ export interface CombatOccurrence {
   castFinish: number | null;
   travelStart: number | null;
   travelDuration: number | null;
-  impacts: Array<{ time: number; ordinal: number; target: string; result: string }>;
+  impacts: Array<{ time: number; ordinal: number; target: string; result: string; damage: number | null }>;
   ordinal: number;
 }
 export interface CombatTimeline {
@@ -60,7 +61,13 @@ export function parseCombatLog(lines: Array<string | [number, string]>): CombatL
       if (body.startsWith("schedules execute")) parsed.push({ ...attributes, kind: "schedule" });
       else if (body.startsWith("performs")) parsed.push({ ...attributes, kind: "perform" });
       else if (body.startsWith("schedules travel")) parsed.push({ ...attributes, kind: "travel", duration: Number(/travel \((\d+\.\d+)\)/.exec(body)?.[1]) });
-      else if (/\b(?:hits|misses|ticks(?: \([^)]*\) on)?) Enemy '/.test(body)) parsed.push({ ...attributes, kind: "impact", target: /Enemy '([^']+)'/.exec(body)?.[1] ?? "", result: /\((crit|hit|miss|dodge|parry)\)/.exec(body)?.[1] ?? "unknown" });
+      else if (/\b(?:hits|misses|ticks(?: \([^)]*\) on)?) Enemy '/.test(body)) {
+        const rawDamage = /\bfor (\d+(?:\.\d+)?(?:[eE][+-]?\d+)?) [^\n]*? damage\b/.exec(body)?.[1];
+        const damage = rawDamage === undefined ? null : Number(rawDamage);
+        parsed.push({ ...attributes, kind: "impact", target: /Enemy '([^']+)'/.exec(body)?.[1] ?? "",
+          result: /\((crit|hit|miss|dodge|parry)\)/.exec(body)?.[1] ?? "unknown",
+          damage: damage !== null && Number.isFinite(damage) ? damage : null });
+      }
     }
   });
   return parsed;
@@ -135,7 +142,8 @@ export function buildCombatTimeline(events: CombatLogEvent[]): CombatTimeline {
       const occurrence = compatible.find((candidate) => candidate.impacts.length === 0)
         ?? (compatible.length === 1 ? compatible[0] : undefined);
       if (!occurrence) { unmatched.push(event); continue; }
-      occurrence.impacts.push({ time: event.time, ordinal: event.ordinal, target: event.target ?? "", result: event.result ?? "unknown" });
+      occurrence.impacts.push({ time: event.time, ordinal: event.ordinal, target: event.target ?? "",
+        result: event.result ?? "unknown", damage: event.damage ?? null });
     }
   }
   return { occurrences, auras, unmatched };

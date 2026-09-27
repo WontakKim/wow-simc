@@ -61,6 +61,19 @@ describe("combat log timing", () => {
       occurrence.isBackground && occurrence.castStart === null && occurrence.impacts[0]?.time === 1)).toBe(true);
   });
 
+  it("preserves explicit positive, zero and missing impact damage without guessing from result", () => {
+    const timeline = buildCombatTimeline(parseCombatLog([
+      `1.000 ${player} performs Action 'flame_shock' (188389) (275000)`,
+      `1.000 ${player} Action 'flame_shock' (188389) hits Enemy 'Fluffy_Pillow' for 123.5 fire damage (crit)`,
+      `2.000 ${player} performs Action 'flame_shock' (188389) (275000)`,
+      `2.000 ${player} Action 'flame_shock' (188389) hits Enemy 'Fluffy_Pillow' for 0.000000 fire damage (hit)`,
+      `3.000 ${player} performs Action 'flame_shock' (188389) (275000)`,
+      `3.000 ${player} Action 'flame_shock' (188389) hits Enemy 'Fluffy_Pillow' (hit)`,
+    ]));
+    expect(timeline.occurrences.flatMap((occurrence) => occurrence.impacts.map((impact) => impact.damage)))
+      .toEqual([123.5, 0, null]);
+  });
+
   it("retains separate targets on one uniquely timed cast without borrowing a different cast", () => {
     const timeline = buildCombatTimeline(parseCombatLog([
       `1.000 ${player} performs Action 'lightning_bolt' (188196) (275000)`,

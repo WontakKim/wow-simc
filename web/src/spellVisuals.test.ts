@@ -6,7 +6,7 @@ import { composeAttachmentTransform, getPreviewVisual, resolveVisualAnimation, s
 const occurrence: CombatTimeline["occurrences"][number] = {
   key: "caster/1", actor: "caster", actorInstance: "caster", actionName: "lava_burst", family: "lava_burst",
   spellId: 51505, isBackground: false, castStart: 2, castFinish: 3, travelStart: 3,
-  travelDuration: 0.7, impacts: [{ time: 3.7, ordinal: 4, target: "dummy", result: "hit" }], ordinal: 1,
+  travelDuration: 0.7, impacts: [{ time: 3.7, ordinal: 4, target: "dummy", result: "hit", damage: 100 }], ordinal: 1,
 };
 
 const event = (id: number, start: number, end: number, target: number) => ({
@@ -50,8 +50,8 @@ describe("spell visual phases", () => {
 
   it("keeps each impact's ordinal and target separate and applies signed end offsets only to verified ends", () => {
     const repeated = { ...occurrence, impacts: [
-      { time: 3.7, ordinal: 4, target: "A", result: "hit" },
-      { time: 3.7, ordinal: 5, target: "B", result: "hit" },
+      { time: 3.7, ordinal: 4, target: "A", result: "hit", damage: 100 },
+      { time: 3.7, ordinal: 5, target: "B", result: "hit", damage: 100 },
     ] };
     const bounded = { ...event(8, 1, 2, 1), EndMinOffsetMs: 50, EndMaxOffsetMs: 50 };
     const schedule = scheduleVisualPhases({ occurrences: [repeated], auras: [], unmatched: [] },

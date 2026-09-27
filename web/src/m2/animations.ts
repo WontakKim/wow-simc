@@ -9,6 +9,8 @@ export const M2_ANIMATION_NAMES: Record<number, string> = {
   0: "Stand",
   4: "Walk",
   5: "Run",
+  9: "Wound",
+  10: "WoundCritical",
   51: "SpellCastStand",
   52: "SpellCastDeath",
   53: "SpellCastDirected",

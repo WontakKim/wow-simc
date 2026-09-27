@@ -9,6 +9,8 @@ import {
 describe("animation labels", () => {
   it("labels replay-relevant native animations in the exported clip-name format", () => {
     expect(animationOptionLabel(0, 0)).toBe("Stand (ID 0 variation 0)");
+    expect(animationOptionLabel(9, 0)).toBe("Wound (ID 9 variation 0)");
+    expect(animationOptionLabel(10, 0)).toBe("WoundCritical (ID 10 variation 0)");
     expect(animationOptionLabel(830, 0)).toBe("ShaSpellCastBothFront (ID 830 variation 0)");
     expect(animationOptionLabel(862, 0)).toBe("ShaSpellPrecastBothChannel (ID 862 variation 0)");
     expect(animationOptionLabel(1148, 0)).toBe("CastStrongUpRight (ID 1148 variation 0)");

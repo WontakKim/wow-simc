@@ -829,7 +829,10 @@ test("binds all four unsuppressed Flame Shock components to caster and impact an
     source = source.replace(resetPoint, `window.__flameShockRendered = [];
       window.__flameShockRenderProbe = () => ({
         rendered: window.__flameShockRendered,
-        caster: anchors.caster.toArray(), target: targetAnchor.toArray(),
+        caster: anchors.caster.toArray(), target: (() => {
+          const frame = sampleHistoricalAttachment(34, 22.642, "target");
+          return frame ? [frame[12], frame[14], -frame[13]] : anchors.target.toArray();
+        })(),
       });
       ${resetPoint}`);
     source = source.replace(renderPoint, `const renderedParticles = effect.setReplayInstances(instances, camera);
@@ -947,9 +950,10 @@ test("renders source-colored Flame Shock impact particles in a target-only isola
       }
       source = source.replace(probePoint, `${probePoint}
         window.__flameShockProbe = () => {
-          const target = dummyActor && dummyMount
-            ? sampleAttachmentWorldPosition(dummyActor, dummyMount, 34) : null;
-          if (!target) throw new Error("Dummy chest attachment 34 is unavailable.");
+          const nativeChest = dummyActor?.sampleAttachment(34);
+          if (!nativeChest || !dummyActor || !dummyMount) throw new Error("Dummy chest attachment 34 is unavailable.");
+          dummyActor.root.updateWorldMatrix(true, false);
+          const target = dummyActor.root.localToWorld(new Vector3(nativeChest[12], nativeChest[13], nativeChest[14]));
           const projected = target.project(camera);
           const bounds = new Box3().setFromObject(dummyMount);
           const screenBounds = new Box3();
@@ -1172,6 +1176,68 @@ for (const [spellName, spellId, expectedTiming] of [
   });
 }
 
+test("plays the native dummy Wound only across an actual positive logged hit and reconstructs its pose on seek", async ({ page }, testInfo) => {
+  await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
+    const response = await route.fetch();
+    const fixture = await response.json() as { capture: { combat_log: Array<[number, string]> }; sim: {
+      players: Array<{ collected_data: { action_sequence: Array<{ id?: number }>; action_sequence_precombat: unknown[] } }> } };
+    fixture.capture.combat_log = fixture.capture.combat_log.filter(([, line]) =>
+      line.startsWith("4.045 ") && line.includes("Action 'stormfury_aoe' (269005)"));
+    fixture.sim.players[0].collected_data.action_sequence =
+      [fixture.sim.players[0].collected_data.action_sequence[0]];
+    fixture.sim.players[0].collected_data.action_sequence_precombat = [];
+    await route.fulfill({ response, json: fixture });
+  });
+  await page.route("**/src/GenuineModelScene.tsx*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const marker = "dummyActor.updateAnimatedTracks(dummyPose.resolution, dummyPose.timeMs);";
+    if (source.split(marker).length !== 2) throw new Error("Dummy pose probe hook changed.");
+    await route.fulfill({ response, body: source.replace(marker, `${marker}
+      window.__replayDummyPoseProbe = { matrices: dummyPose.matrices,
+        chest: dummyActor.sampleAttachment(34), durationMs: dummyWound.sequence.durationMs };`) });
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByRole("status").filter({ hasText: "Both genuine models ready" })).toBeVisible();
+  const canvas = scene.locator("canvas");
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const probe = () => page.evaluate(() => (window as Window & { __replayDummyPoseProbe: {
+    matrices: number[][]; chest: number[]; durationMs: number;
+  } }).__replayDummyPoseProbe);
+  await seek.fill("4.044");
+  await expect(canvas).toHaveAttribute("data-replay-dummy-animation-id", "0");
+  const before = await probe();
+  const beforeFrame = await canvas.screenshot({ path: testInfo.outputPath("dummy-before-hit.png") });
+  await seek.fill("4.045");
+  await expect(canvas).toHaveAttribute("data-replay-dummy-animation-id", "9");
+  await expect(canvas).toHaveAttribute("data-replay-dummy-clip-time-ms", "0.000");
+  const boundary = await probe();
+  await canvas.screenshot({ path: testInfo.outputPath("dummy-hit-boundary.png") });
+  const midpoint = 4.045 + boundary.durationMs / 2000;
+  await seek.fill(String(midpoint));
+  await expect(canvas).toHaveAttribute("data-replay-dummy-animation-id", "9");
+  const during = await probe();
+  const duringFrame = await canvas.screenshot({ path: testInfo.outputPath("dummy-during-wound.png") });
+  expect(during.matrices).not.toEqual(before.matrices);
+  expect(during.chest).not.toEqual(before.chest);
+  expect(duringFrame.equals(beforeFrame)).toBe(false);
+  expect(4.045 + boundary.durationMs / 1000).toBeLessThan(4.4);
+  await seek.fill("4.4");
+  await expect(canvas).toHaveAttribute("data-replay-dummy-animation-id", "0");
+  const after = await probe();
+  expect(after.matrices).toEqual(before.matrices);
+  const afterFrame = await canvas.screenshot({ path: testInfo.outputPath("dummy-after-wound.png") });
+  expect(afterFrame.equals(beforeFrame)).toBe(true);
+  await seek.fill(String(midpoint));
+  await expect(canvas).toHaveAttribute("data-replay-dummy-animation-id", "9");
+  expect(await probe()).toEqual(during);
+  expect(await canvas.screenshot({ path: testInfo.outputPath("dummy-seek-return.png") })).toEqual(duringFrame);
+  const evidencePath = testInfo.outputPath("dummy-wound-pose-probes.json");
+  await writeFile(evidencePath, JSON.stringify({ before, boundary, during, after }, null, 2));
+  await testInfo.attach("dummy-wound-pose-probes", { path: evidencePath, contentType: "application/json" });
+});
+
 test("renders the original Lightning Bolt missile between caster and dummy with deterministic seeks", async ({ page }, testInfo) => {
   await page.route("**/fixture/elemental-shaman-replay.json", async (route) => {
     const response = await route.fetch();
@@ -1192,7 +1258,7 @@ test("renders the original Lightning Bolt missile between caster and dummy with 
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("Lightning Bolt: 5 of 5 original emitters", { timeout: 30_000 });
   await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("Placement: 1 of 3 components use native caster attachment origins");
   await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("FileDataID 6211617: native caster attachment 19 (Base) origin for launch");
-  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("dummy attachment 34 (Chest) translation for arrival");
+  await expect(scene.locator("[data-testid='replay-anchor-status']")).toContainText("dummy attachment 34 (Chest) translation sampled at logged arrival");
   await expect(scene.locator("[data-testid='replay-effect-status']")).toContainText("two original texture units combined (shader 0x14, UV0/UV0; shared BLP)");
   await seek.fill("2");
   await expect(canvas).toHaveAttribute("data-replay-native-components", "2");
@@ -1330,8 +1396,10 @@ test("samples a fixed historical missile release across pose changes and backwar
         const displayedBefore = vulperaActor.sampleAttachment(21);
         const launch = instance.sourceTransformAtTime(0);
         const current = instance.sourceTransformAtTime(instance.timeSeconds);
+        const arrival = instance.sourceTransformAtTime(matching[inspectedIndex].occurrence.travelDuration);
         window.__replaySpatialProbe = {
-          launch, current, displayedBefore, displayedAfter: vulperaActor.sampleAttachment(21),
+          launch, current, arrival, displayedBefore, displayedAfter: vulperaActor.sampleAttachment(21),
+          displayedDummy: dummyActor?.sampleAttachment(34),
           duration: matching[inspectedIndex].occurrence.travelDuration,
         };
       }
@@ -1343,7 +1411,8 @@ test("samples a fixed historical missile release across pose changes and backwar
   const seek = scene.getByRole("slider", { name: "Seek playback" });
   const canvas = scene.locator("canvas");
   const probe = () => page.evaluate(() => (window as Window & { __replaySpatialProbe: {
-    launch: number[]; current: number[]; displayedBefore: number[]; displayedAfter: number[]; duration: number;
+    launch: number[]; current: number[]; arrival: number[]; displayedBefore: number[];
+    displayedAfter: number[]; displayedDummy: number[]; duration: number;
   } }).__replaySpatialProbe);
   await seek.fill("20.55");
   await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
@@ -1356,6 +1425,8 @@ test("samples a fixed historical missile release across pose changes and backwar
   expect(later.displayedBefore).toEqual(later.displayedAfter);
   expect(early.displayedBefore).not.toEqual(later.displayedBefore);
   expect(later.launch).toEqual(early.launch);
+  expect(later.displayedDummy).not.toEqual(early.displayedDummy);
+  expect(later.arrival).toEqual(early.arrival);
   expect(later.current[12]).toBeGreaterThan(early.current[12]);
   expect(later.current.slice(0, 12)).toEqual(later.launch.slice(0, 12));
   expect(await canvas.screenshot({ path: testInfo.outputPath("historical-missile-later.png") })).not.toEqual(pixels);

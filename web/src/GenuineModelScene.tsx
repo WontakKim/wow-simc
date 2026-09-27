@@ -69,6 +69,8 @@ export const ACTOR_BASE_YAW = 0;
 const WEBGL_ERROR =
   "WebGL is unavailable. Use a browser with WebGL 2 enabled and turn on hardware acceleration, then reload. No placeholder model was substituted.";
 const STAND_CLIP_NAME = animationOptionLabel(STAND_ANIMATION_ID, 0);
+const DUMMY_TARGET_NAME = "Fluffy_Pillow";
+const DUMMY_WOUND_ANIMATION_ID = 9;
 const CAMERA_FOV = 32; // fixed vertical FOV for both default framing and reset
 const REPLAY_POSE_BLEND_SECONDS = 0.15;
 const PREVIEW_TRANSIENT_EMISSION_SECONDS = 0.2;
@@ -468,6 +470,28 @@ export function resolveLoggedMotionBlend(timeline: CombatTimeline, cursor: numbe
       / REPLAY_POSE_BLEND_SECONDS };
 }
 
+export function resolveLoggedDummyReaction(timeline: CombatTimeline, cursor: number, woundDurationMs: number) {
+  const latest = timeline.occurrences.flatMap((occurrence) => occurrence.impacts)
+    .filter((impact) => impact.target === DUMMY_TARGET_NAME && (impact.result === "hit" || impact.result === "crit")
+      && impact.damage !== null && Number.isFinite(impact.damage) && impact.damage > 0 && impact.time <= cursor
+      && cursor < impact.time + woundDurationMs / 1000)
+    .sort((left, right) => right.time - left.time || right.ordinal - left.ordinal)[0];
+  return latest ? { impactOrdinal: latest.ordinal, animationId: DUMMY_WOUND_ANIMATION_ID,
+    clipTimeMs: (cursor - latest.time) * 1000 } : null;
+}
+
+export function sampleReplayDummyPose(model: M2Model, timeline: CombatTimeline, cursor: number) {
+  const stand = resolveSequence(model, STAND_ANIMATION_ID, { variationIndex: 0 });
+  const wound = resolveSequence(model, DUMMY_WOUND_ANIMATION_ID, { variationIndex: 0 });
+  if (!stand || !wound || wound.sequence.durationMs <= 0) {
+    throw new Error(`FileDataID ${model.fileDataId}: native Stand or Wound (ID 9 variation 0) sequence is unavailable for replay.`);
+  }
+  const reaction = resolveLoggedDummyReaction(timeline, cursor, wound.sequence.durationMs);
+  const resolution = reaction ? wound : stand;
+  const timeMs = reaction ? reaction.clipTimeMs : 0;
+  return { resolution, timeMs, matrices: sampleBoneMatrices(model, resolution, timeMs) };
+}
+
 export function sampleReplayActorPose(model: M2Model, blend: ReplayMotionBlend) {
   const samplePoseFor = (animation: ReplayAnimationResolution) => {
     const isMotion = animation.kind === "motion";
@@ -503,7 +527,9 @@ export function getReplaySourceTransform(
     }
     return frame && placement
       ? composeAttachmentTransform(frame, placement.offset, placement.angles, placement.scale)
-      : frame ?? (component.anchor === "target" ? targetFrame : casterFallbackFrame);
+      : frame ?? (component.anchor === "target"
+        ? sampleAttachmentAtTime(34, occurrence.startTime + timeSeconds, "target") ?? targetFrame
+        : casterFallbackFrame);
   };
   if (component.anchor !== "projectile") return sourceAt;
 
@@ -567,14 +593,14 @@ function describeReplayComponentAnchor(spellId: number, component: ReplayCompone
     return `native caster attachment ${attachmentId} (${attachmentName}) frame sampled at the replay time${detail}${component.fileDataId === 1284864 ? "; attachment-local kit offset (0, 0.15, 0) applied" : ""}`;
   }
   if (attachmentId !== undefined) {
-    return `native caster attachment ${attachmentId} (${attachmentName}) origin for launch · dummy attachment 34 (Chest) translation for arrival${spellId === 117014 ? "; impact positioner 712 unresolved" : ""}`;
+    return `native caster attachment ${attachmentId} (${attachmentName}) origin for launch · dummy attachment 34 (Chest) translation sampled at logged arrival${spellId === 117014 ? "; impact positioner 712 unresolved" : ""}`;
   }
   if (component.anchor === "projectile") {
-    return "60%-bounds anchored launch (missile source attachment unresolved) · dummy attachment 34 (Chest) translation for arrival";
+    return "60%-bounds anchored launch (missile source attachment unresolved) · dummy attachment 34 (Chest) translation sampled at logged arrival";
   }
   if (component.anchor === "target") {
     const positioners = [...new Set(placements.map((placement) => placement.positionerId).filter(Boolean))];
-    return `native dummy attachment 34 (Chest) from its static Stand pose; logged hit reaction not reconstructed${positioners.length ? `; source positioner ${positioners.join("/")} unresolved` : ""}`;
+    return `native dummy attachment 34 (Chest) sampled at particle birth from the logged reaction pose${positioners.length ? `; source positioner ${positioners.join("/")} unresolved` : ""}`;
   }
   const positioners = [...new Set(placements.map((placement) => placement.positionerId).filter(Boolean))];
   return `60%-bounds anchored at caster${positioners.length ? `; source positioner ${positioners.join("/")} unresolved` : "; source attachment not established"}`;
@@ -600,13 +626,6 @@ function mountNativeActor(actor: NativeM2Actor) {
   actor.root.quaternion.setFromRotationMatrix(orientation);
   mount.add(actor.root);
   return mount;
-}
-
-function sampleAttachmentWorldPosition(actor: NativeM2Actor, mount: Group, attachmentId: number) {
-  const nativeMatrix = actor.sampleAttachment(attachmentId);
-  if (!nativeMatrix) return null;
-  actor.root.updateWorldMatrix(true, false);
-  return actor.root.localToWorld(new Vector3(nativeMatrix[12], nativeMatrix[13], nativeMatrix[14]));
 }
 
 function sampleAttachmentEffectTransform(actor: NativeM2Actor, attachmentId: number, matrices?: number[][]) {
@@ -803,6 +822,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
     let dummyMount: Group | null = null;
     let replayClipDurations = new Map<number, number>();
     let dummyStandPose: number[][] | null = null;
+    let dummyStand: SequenceResolution | null = null;
     let nativeEffect: NativeParticleEffect | null = null;
     let nativeEffectGeneration = 0;
     let replayEffectGeneration = 0;
@@ -956,22 +976,21 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       if (!vulperaActor || !vulperaMount || !dummyActor || !dummyMount) {
         throw new Error("Replay caster model is unavailable.");
       }
-      // Target endpoint from the dummy's authored chest attachment; the bounds
-      // anchor remains the fallback.
-      const targetAnchor = sampleAttachmentWorldPosition(dummyActor, dummyMount, 34) ?? anchors.target;
-      const targetTransform = sampleAttachmentEffectTransform(dummyActor, 34)
-        ?? effectTranslationMatrix(targetAnchor);
-      const historicalPoses = new Map<number, number[][]>();
+      const historicalCasterPoses = new Map<number, number[][]>();
+      const historicalDummyPoses = new Map<number, number[][]>();
       const sampleHistoricalAttachment = (attachmentId: number, absoluteTime: number, anchor: ReplayEffectAnchor) => {
-        if (anchor === "target") return sampleAttachmentEffectTransform(dummyActor!, attachmentId, dummyStandPose ?? undefined);
+        const isTarget = anchor === "target";
+        const historicalPoses = isTarget ? historicalDummyPoses : historicalCasterPoses;
         let matrices = historicalPoses.get(absoluteTime);
         if (!matrices) {
-          matrices = sampleReplayActorPose(vulperaActor!.model,
-            resolveLoggedMotionBlend(replayState.timeline!, absoluteTime, undefined, replayClipDurations)).matrices;
+          matrices = isTarget
+            ? sampleReplayDummyPose(dummyActor!.model, replayState.timeline!, absoluteTime).matrices
+            : sampleReplayActorPose(vulperaActor!.model,
+              resolveLoggedMotionBlend(replayState.timeline!, absoluteTime, undefined, replayClipDurations)).matrices;
           if (historicalPoses.size >= 256) historicalPoses.clear();
           historicalPoses.set(absoluteTime, matrices);
         }
-        return sampleAttachmentEffectTransform(vulperaActor!, attachmentId, matrices);
+        return sampleAttachmentEffectTransform(isTarget ? dummyActor! : vulperaActor!, attachmentId, matrices);
       };
       const occurrences = replayState.timeline
         ? resolveLoggedEffectOccurrences(replayState.timeline, replayState.cursor,
@@ -991,7 +1010,10 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
             modelScale: [4329984, 794788, 613807].includes(asset.fileDataId)
               ? asset.effectNameScale : NATIVE_REPLAY_BASE_SCALE * asset.effectNameScale,
             occurrenceSeed: `${occurrence.eventKey}/${component.placement?.sourceRowId ?? component.fileDataId}`,
-            sourceTransformAtTime: getReplaySourceTransform(occurrence, component, targetTransform,
+            sourceTransformAtTime: getReplaySourceTransform(occurrence, component,
+              (component.anchor === "projectile"
+                ? sampleHistoricalAttachment(34, occurrence.emissionStopTime, "target") : null)
+                ?? effectTranslationMatrix(anchors.target),
               effectTranslationMatrix(anchors.caster), sampleHistoricalAttachment),
           }));
           particleCount += effect.setReplayInstances(instances, camera);
@@ -1019,7 +1041,9 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       const latestProjectile = occurrences.filter((occurrence) => occurrence.spellId === 117014
         && occurrence.components[0].fileDataId === 4329984).at(-1);
       const latestFrame = latestProjectile && getReplaySourceTransform(latestProjectile,
-        latestProjectile.components[0], targetTransform, effectTranslationMatrix(anchors.caster),
+        latestProjectile.components[0],
+        sampleHistoricalAttachment(34, latestProjectile.emissionStopTime, "target")
+          ?? effectTranslationMatrix(anchors.target), effectTranslationMatrix(anchors.caster),
         sampleHistoricalAttachment)(latestProjectile.componentTimeSeconds);
       canvas.dataset.replayNativeLatestSourceX = latestFrame ? latestFrame[12].toFixed(6) : "";
       return true;
@@ -1164,19 +1188,32 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         animationOptionLabel(sequence.animationId, sequence.variationIndex));
       const defaultClipIndex = Math.max(0, animationClipNames.indexOf(STAND_CLIP_NAME));
 
-      const dummyStand = resolveSequence(dummyActor.model, STAND_ANIMATION_ID, { variationIndex: 0 });
-      if (dummyStand) {
-        dummyStandPose = sampleBoneMatrices(dummyActor.model, dummyStand, 0);
-        dummyActor.setPose(dummyStandPose);
-        dummyActor.updateAnimatedTracks(dummyStand, 0);
+      dummyStand = resolveSequence(dummyActor.model, STAND_ANIMATION_ID, { variationIndex: 0 });
+      const dummyWound = resolveSequence(dummyActor.model, DUMMY_WOUND_ANIMATION_ID, { variationIndex: 0 });
+      if (!dummyStand || !dummyWound || dummyWound.sequence.durationMs <= 0) {
+        const fileDataId = dummyActor.model.fileDataId;
+        stop();
+        setStatus("error");
+        setError(`FileDataID ${fileDataId}: native Stand or Wound (ID 9 variation 0) sequence is unavailable for replay.`);
+        return;
       }
+      dummyStandPose = sampleBoneMatrices(dummyActor.model, dummyStand, 0);
+      dummyActor.setPose(dummyStandPose);
+      dummyActor.updateAnimatedTracks(dummyStand, 0);
 
       replayClipDurations = new Map(sequences.map((sequence) => [sequence.animationId, sequence.durationMs]));
       const applyReplayAnimation = (blend: ReplayMotionBlend) => {
-        if (!vulperaActor) return;
+        if (!vulperaActor || !dummyActor) return;
         const pose = sampleReplayActorPose(vulperaActor.model, blend);
         vulperaActor.setPose(pose.matrices);
         vulperaActor.updateAnimatedTracks(pose.resolution, pose.timeMs);
+        const state = replayStateRef.current;
+        const dummyPose = sampleReplayDummyPose(dummyActor.model,
+          state?.timeline ?? { occurrences: [], auras: [], unmatched: [] }, state?.cursor ?? 0);
+        dummyActor.setPose(dummyPose.matrices);
+        dummyActor.updateAnimatedTracks(dummyPose.resolution, dummyPose.timeMs);
+        canvas.dataset.replayDummyAnimationId = String(dummyPose.resolution.sequence.animationId);
+        canvas.dataset.replayDummyClipTimeMs = dummyPose.timeMs.toFixed(3);
       };
       const playManualClip = (index: number, shouldPlay: boolean) => {
         if (!vulperaActor) return;
@@ -1267,7 +1304,13 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
         setReplayVisible: (isVisible) => {
           for (const { effect } of replayEffects) effect.group.visible = isVisible;
           if (isVisible) updateReplayEffects();
-          else clearReplayEffects();
+          else {
+            clearReplayEffects();
+            if (dummyActor && dummyStand && dummyStandPose) {
+              dummyActor.setPose(dummyStandPose);
+              dummyActor.updateAnimatedTracks(dummyStand, 0);
+            }
+          }
         },
         resetCamera,
       };
@@ -1708,7 +1751,7 @@ export function GenuineModelScene({ replay }: GenuineModelSceneProps) {
       {animationMode === "replay" && !replay?.timeline && <p>No combat-log timing in this report; native replay remains idle rather than estimating casts or hits.</p>}
       <p className="model-disclaimer">
         {animationMode === "replay"
-          ? "Cast, missile release, flight, impact and mapped aura lifetimes use timestamps from the bundled SimC combat log. Native M2 pose and original partial VFX are presentation, not complete spell visuals; projectile positions interpolate between the presented actors, not recorded coordinates. Ancestor casts are listed in the logged event table but their missiles are intentionally omitted: no native ancestor model or unambiguous pet identity is available. No inferred GCD, recorded actor world motion, authoritative historical attachment coordinates, hit reaction, sound or complete VFX parity is claimed."
+          ? "Cast, missile release, flight, impact and mapped aura lifetimes use timestamps from the bundled SimC combat log. Native M2 pose and original partial VFX are presentation, not complete spell visuals; projectile positions interpolate between the presented actors, not recorded coordinates. Ancestor casts are listed in the logged event table but their missiles are intentionally omitted: no native ancestor model or unambiguous pet identity is available. Dummy Wound (ID 9 variation 0) is a viewer policy for matched positive-damage hit/crit records naming Fluffy_Pillow, not a retail hit/crit animation mapping. No inferred GCD, recorded actor world motion, authoritative historical attachment coordinates, sound or complete VFX parity is claimed."
           : animationMode === "manual"
             ? "Manual preview is separate from replay time. It does not show spell impact timing, damage, VFX, hit reactions, or optimal play."
             : `Native preview time is an isolated, stationary component-viewer clock, not missile travel, a cast, an impact, or a simulation event. It renders only the selected original M2 component, its original BLP textures, and its pinned SKIN where applicable; it is not ${selectedNativeFileDataId === 794788 || selectedNativeFileDataId === 613807 ? "the complete Elemental Blast composite" : "a complete spell"}.`}

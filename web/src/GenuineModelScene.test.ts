@@ -24,6 +24,8 @@ import {
   getReplayEffectSourceAnchor,
   getReplaySourceTransform,
   sampleReplayActorPose,
+  resolveLoggedDummyReaction,
+  sampleReplayDummyPose,
   isReplayClipMissing,
   resolveLoggedEffectOccurrences,
   resolveLoggedMotionBlend,
@@ -514,6 +516,99 @@ describe("logged native replay scheduling", () => {
         && occurrence.travelStart === 0)?.key)).toBe(true);
     expect(atZero.some((effect) => effect.eventTime === 1.777)).toBe(false);
     expect(resolveLoggedEffectOccurrences(timeline, 0)).toEqual(atZero);
+  });
+});
+
+describe("logged training dummy reaction", () => {
+  const modelBytes = readFileSync(resolve(process.cwd(), "public/model/native-models/125259.m2"));
+  const model = parseM2File(modelBytes.buffer.slice(modelBytes.byteOffset, modelBytes.byteOffset + modelBytes.byteLength), 125259);
+  const timeline = parseReplayReport(officialFixture).combatTimeline!;
+  const wound = resolveSequence(model, 9, { variationIndex: 0 })!;
+  const stand = resolveSequence(model, 0, { variationIndex: 0 })!;
+
+  it("samples the pinned native Wound rather than a stand pose during its real clip duration", () => {
+    expect(wound).not.toBeNull();
+    expect(stand).not.toBeNull();
+    expect(wound.sequence.durationMs).toBeGreaterThan(0);
+    const hit = timeline.occurrences.flatMap((occurrence) => occurrence.impacts)
+      .find((impact) => impact.time === 4.25 && impact.target === "Fluffy_Pillow")!;
+    expect(hit).toBeDefined();
+    const source = timeline.occurrences.find((occurrence) => occurrence.impacts.includes(hit))!;
+    const isolated: CombatTimeline = { occurrences: [{ ...source, impacts: [hit] }], auras: [], unmatched: [] };
+    const before = sampleReplayDummyPose(model, isolated, hit.time - 0.001);
+    const during = sampleReplayDummyPose(model, isolated, hit.time + wound.sequence.durationMs / 2000);
+    const after = sampleReplayDummyPose(model, isolated, hit.time + wound.sequence.durationMs / 1000);
+    expect(before.resolution.sequence.animationId).toBe(0);
+    expect(during.resolution.sequence.animationId).toBe(9);
+    expect(during.timeMs).toBeCloseTo(wound.sequence.durationMs / 2);
+    expect(during.matrices).not.toEqual(sampleBoneMatrices(model, stand, 0));
+    expect(after.resolution.sequence.animationId).toBe(0);
+    expect(after.matrices).toEqual(sampleBoneMatrices(model, stand, 0));
+  });
+
+  it("starts exactly on a logged hit, restarts on later hits and breaks same-time ties by source ordinal", () => {
+    const source = timeline.occurrences.find((occurrence) => occurrence.impacts.some((impact) => impact.time === 4.25))!;
+    const hit = source.impacts.find((impact) => impact.time === 4.25)!;
+    const isolated: CombatTimeline = { occurrences: [{ ...source, impacts: [
+      { ...hit, time: 1, ordinal: 10, result: "hit" },
+      { ...hit, time: 1, ordinal: 11, result: "crit" },
+      { ...hit, time: 1.1, ordinal: 12, result: "hit" },
+    ] }], auras: [], unmatched: [] };
+    expect(resolveLoggedDummyReaction(isolated, 0.999, wound.sequence.durationMs)).toBeNull();
+    expect(resolveLoggedDummyReaction(isolated, 1, wound.sequence.durationMs)).toMatchObject({
+      impactOrdinal: 11, animationId: 9, clipTimeMs: 0,
+    });
+    expect(resolveLoggedDummyReaction(isolated, 1.1, wound.sequence.durationMs)).toMatchObject({
+      impactOrdinal: 12, animationId: 9, clipTimeMs: 0,
+    });
+    const mid = sampleReplayDummyPose(model, isolated, 1.15);
+    sampleReplayDummyPose(model, isolated, 1.1 + wound.sequence.durationMs / 1000);
+    sampleReplayDummyPose(model, isolated, 0.8);
+    expect(sampleReplayDummyPose(model, isolated, 1.15)).toEqual(mid);
+    expect(resolveLoggedDummyReaction(isolated, 1.1 + wound.sequence.durationMs / 1000,
+      wound.sequence.durationMs)).toBeNull();
+  });
+
+  it("ignores unrelated targets and miss/dodge/parry/unknown results, including background hits only when target matches", () => {
+    const source = timeline.occurrences.find((occurrence) => occurrence.impacts.some((impact) => impact.time === 4.25))!;
+    const hit = source.impacts.find((impact) => impact.time === 4.25)!;
+    const isolated: CombatTimeline = { occurrences: [{ ...source, actor: "Player_ancestor", impacts: [
+      { ...hit, time: 1, ordinal: 1, target: "Other" },
+      ...["miss", "dodge", "parry", "unknown"].map((result, index) => ({
+        ...hit, time: 1.01 + index * 0.01, ordinal: index + 2, result,
+      })),
+      { ...hit, time: 1.06, ordinal: 6, damage: 0, result: "crit" },
+      { ...hit, time: 1.07, ordinal: 7, damage: null, result: "hit" },
+      { ...hit, time: 1.1, ordinal: 8, result: "crit" },
+    ] }], auras: [], unmatched: [] };
+    expect(resolveLoggedDummyReaction(isolated, 1.07, wound.sequence.durationMs)).toBeNull();
+    expect(resolveLoggedDummyReaction(isolated, 1.1, wound.sequence.durationMs)).toMatchObject({ impactOrdinal: 8 });
+  });
+
+  it("uses absolute birth time for target attachment pose and locks missile destination at logged arrival", () => {
+    const source = timeline.occurrences.find((occurrence) => occurrence.spellId === 51505
+      && occurrence.travelStart !== null && occurrence.impacts.some((impact) => impact.time === 4.25))!;
+    const targetEffect = resolveLoggedEffectOccurrences(timeline, 1.2)
+      .find((effect) => effect.components[0].anchor === "target")!;
+    const projectile = resolveLoggedEffectOccurrences({ occurrences: [source], auras: [], unmatched: [] }, 4.0)
+      .find((effect) => effect.components[0].anchor === "projectile")!;
+    const target = new Matrix4().makeTranslation(9, 2, 0).toArray();
+    const calls: Array<[number, "caster" | "target" | "projectile"]> = [];
+    const sample = (_attachmentId: number, time: number, anchor: "caster" | "target" | "projectile") => {
+      calls.push([time, anchor]);
+      return new Matrix4().makeTranslation(time, 2, 0).toArray();
+    };
+    const impactSource = getReplaySourceTransform(targetEffect, targetEffect.components[0], target, target, sample);
+    impactSource(0);
+    impactSource(0.05);
+    expect(calls.filter(([, anchor]) => anchor === "target").map(([time]) => time))
+      .toEqual([targetEffect.startTime, expect.closeTo(targetEffect.startTime + 0.05)]);
+    const flight = getReplaySourceTransform(projectile, projectile.components[0], target, target, sample);
+    const first = flight(0.1);
+    const repeat = flight(0.1);
+    expect(first).toEqual(repeat);
+    expect(calls.filter(([, anchor]) => anchor === "projectile").map(([time]) => time))
+      .toEqual([projectile.startTime]);
   });
 });
 
