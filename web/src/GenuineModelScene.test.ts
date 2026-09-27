@@ -2,6 +2,7 @@ import {
   Box3,
   BoxGeometry,
   Group,
+  Matrix4,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
@@ -21,6 +22,8 @@ import {
   getReplayEffectAnchors,
   getReplayComponentPeak,
   getReplayEffectSourceAnchor,
+  getReplaySourceTransform,
+  sampleReplayActorPose,
   isReplayClipMissing,
   resolveLoggedEffectOccurrences,
   resolveLoggedMotionBlend,
@@ -34,7 +37,10 @@ import { decodeNativeBlp } from "./nativeBlp";
 import { parseNativeM2, parseNativeSkin } from "./nativeM2";
 import { sampleNativeEmitter } from "./nativeParticles";
 import { getNativeEffectTailBound, NativeParticleEffect } from "./NativeParticleEffect";
-import { blendBoneMatrices } from "./m2/sampler";
+import { attachmentMatrix, blendBoneMatrices, resolveSequence, sampleBoneMatrices } from "./m2/sampler";
+import { buildM2ModelFixture } from "./m2/fixtures";
+import { parseM2File } from "./m2/model";
+import { composeAttachmentTransform } from "./spellVisuals";
 
 function createModel(width: number, height: number, depth: number) {
   const model = new Group();
@@ -566,9 +572,111 @@ describe("published replay attachment placement", () => {
     expect(() => getReplayEffectSourceAnchor(117014, 4329984, noAttachments, boundsAnchor))
       .toThrow(/FileDataID 4329984.*attachment 21/);
   });
+
+  it("samples caster attachment rotation and authored placement at each historical birth time", () => {
+    const timeline = parseReplayReport(officialFixture).combatTimeline!;
+    const occurrence = resolveLoggedEffectOccurrences(timeline, 3.2).find((effect) =>
+      effect.spellId === 51505 && effect.components[0].fileDataId === 4006621
+      && effect.components[0].placement?.attachmentId === 22)!;
+    const component = occurrence.components[0];
+    const target = new Matrix4().makeTranslation(9, 2, 0).toArray();
+    const calls: number[] = [];
+    const frameAt = (attachmentId: number, absoluteTime: number) => {
+      expect(attachmentId).toBe(22);
+      calls.push(absoluteTime);
+      return new Matrix4().makeRotationZ((absoluteTime - occurrence.startTime) * Math.PI * 5)
+        .setPosition(absoluteTime, 2, 0).toArray();
+    };
+    const source = getReplaySourceTransform(occurrence, component, target, target, frameAt);
+    const birth = source(0);
+    const later = source(0.1);
+    expect(calls).toEqual([occurrence.startTime, expect.closeTo(occurrence.startTime + 0.1)]);
+    expect(birth).toEqual(composeAttachmentTransform(frameAt(22, occurrence.startTime),
+      component.placement!.offset, component.placement!.angles, component.placement!.scale));
+    expect(later[12]).not.toBeCloseTo(birth[12]);
+    expect(later[0]).not.toBeCloseTo(birth[0]);
+    expect(source(0)).toEqual(birth);
+  });
+
+  it("applies native Z-up attachment offset, angles, and scale exactly once at missile release", () => {
+    const timeline = parseReplayReport(officialFixture).combatTimeline!;
+    const occurrence = resolveLoggedEffectOccurrences(timeline, 3.95).find((effect) =>
+      effect.spellId === 51505 && effect.components[0].fileDataId === 4329984)!;
+    const component = { ...occurrence.components[0], placement: {
+      ...occurrence.components[0].placement!, offset: [0, 1, 0] as [number, number, number],
+      angles: [Math.PI / 2, 0, 0] as [number, number, number], scale: 2,
+    } };
+    const attachment = new Matrix4().makeRotationZ(Math.PI / 2).setPosition(1, 2, 3).toArray();
+    const target = new Matrix4().makeTranslation(9, 4, 5).toArray();
+    const source = getReplaySourceTransform(occurrence, component, target, target, () => attachment);
+    const expected = composeAttachmentTransform(attachment,
+      component.placement.offset, component.placement.angles, component.placement.scale);
+    expect(source(0)).toEqual(expected);
+    expect(source(0)[12]).toBeCloseTo(0);
+    expect(source(0)[13]).toBeCloseTo(2);
+    expect(source(0)[14]).toBeCloseTo(3);
+    expect(source(occurrence.travelDuration! / 2).slice(0, 12)).toEqual(expected.slice(0, 12));
+    expect(source(occurrence.travelDuration! / 2)[14]).toBeCloseTo(4);
+  });
+
+  it("freezes the logged missile launch and orientation while advancing only its clamped source-to-target position", () => {
+    const timeline = parseReplayReport(officialFixture).combatTimeline!;
+    const occurrence = resolveLoggedEffectOccurrences(timeline, 3.95).find((effect) =>
+      effect.spellId === 51505 && effect.components[0].fileDataId === 4329984)!;
+    const component = occurrence.components[0];
+    const target = new Matrix4().makeTranslation(9, 2, 0).toArray();
+    const calls: number[] = [];
+    const frameAt = (_attachmentId: number, absoluteTime: number) => {
+      calls.push(absoluteTime);
+      return new Matrix4().makeRotationZ(Math.PI / 2).setPosition(1 + (absoluteTime - occurrence.startTime) * 100, 2, 0).toArray();
+    };
+    const source = getReplaySourceTransform(occurrence, component, target, target, frameAt);
+    const launch = source(0);
+    const midpoint = source(occurrence.travelDuration! / 2);
+    const end = source(occurrence.travelDuration!);
+    expect(calls).toEqual([occurrence.startTime]);
+    expect(midpoint[12]).toBeCloseTo((launch[12] + target[12]) / 2);
+    expect(end[12]).toBeCloseTo(target[12]);
+    expect(source(occurrence.travelDuration! + 0.2)[12]).toBeCloseTo(target[12]);
+    expect(midpoint.slice(0, 12)).toEqual(launch.slice(0, 12));
+    expect(launch[0]).toBeCloseTo(0);
+    expect(launch[1]).toBeCloseTo(1);
+    expect(source(0)).toEqual(launch);
+  });
 });
 
 describe("native pose blending", () => {
+  it("samples a historical native attachment without replacing the displayed pose, including clip time and blend", () => {
+    const identity = [32767, 32767, 32767, 65535];
+    const quarterTurn = [32767, 32767, Math.round(32767 + Math.SQRT1_2 * 32768),
+      Math.round(32767 + Math.SQRT1_2 * 32768)];
+    const model = parseM2File(buildM2ModelFixture({
+      sequences: [{ animationId: 0, durationMs: 1000, flags: 0x20 },
+        { animationId: 51, durationMs: 1000, flags: 0x20 }],
+      bones: [{ translation: { interpolation: 1, sequences: [{ timestamps: [0], values: [[0, 0, 0]] },
+        { timestamps: [0, 1000], values: [[0, 0, 0], [2, 0, 0]] }] },
+      rotation: { interpolation: 1, sequences: [{ timestamps: [0], values: [identity] },
+        { timestamps: [0, 1000], values: [identity, quarterTurn] }] } }],
+      attachments: [{ id: 21, bone: 0, position: [1, 0, 0] }],
+    }), 8012);
+    const displayed = sampleBoneMatrices(model, resolveSequence(model, 51, { variationIndex: 0 })!, 750);
+    const displayedBefore = displayed.map((matrix) => [...matrix]);
+    const stand = { kind: "settled" as const, eventLabel: "idle", clipName: "Stand", animationId: 0,
+      clipTime: 0, status: "idle" };
+    const motion = { ...stand, kind: "motion" as const, animationId: 51, clipTime: 0.5 };
+    const historical = sampleReplayActorPose(model, { incoming: motion, outgoing: stand, incomingWeight: 0.5 });
+    const attachment = attachmentMatrix(model, historical.matrices, 21)!;
+    expect(attachment[12]).toBeGreaterThan(1);
+    expect(attachment[12]).toBeLessThan(2);
+    expect(attachment[1]).toBeGreaterThan(0);
+    expect(historical.resolution.sequence.animationId).toBe(51);
+    expect(historical.timeMs).toBe(500);
+    expect(displayed).toEqual(displayedBefore);
+    expect(attachmentMatrix(model, displayed, 21)![12]).not.toBeCloseTo(attachment[12]);
+    expect(sampleReplayActorPose(model, { incoming: motion, outgoing: stand, incomingWeight: 0.5 }).matrices)
+      .toEqual(historical.matrices);
+  });
+
   it("blends two native poses deterministically from the resolved pair alone", () => {
     const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     const raised = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 2, 0, 1];

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getReplaySourceTransform, type ReplayEffectOccurrence } from "./GenuineModelScene";
 import type {
   NativeBone,
   NativeParticleEmitter,
@@ -462,6 +463,31 @@ describe("native particle sampling", () => {
     expect(sampleNativeEmitter(makeEmitter({ ...base, flags: 0x20021 }), undefined, 667, 0.75, {
       sourceTransformAtTime: () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
     })).toEqual(sampleNativeEmitter(makeEmitter({ ...base, flags: 0x20021 }), undefined, 667, 0.75));
+  });
+
+  it("uses the absolute replay attachment frame for world births while local particles follow the current frame", () => {
+    const occurrence: ReplayEffectOccurrence = {
+      eventKey: "test", eventTime: 10, startTime: 10, emissionStopTime: 12, renderEndTime: 13,
+      elapsedSeconds: 0.75, componentTimeSeconds: 0.75, spellId: 191634,
+      components: [], emissionDuration: 2,
+    };
+    const sourceTransformAtTime = getReplaySourceTransform(occurrence,
+      { fileDataId: 1355634, anchor: "caster" },
+      [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 20, 0, 0, 1],
+      [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      (_attachmentId, absoluteTime) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        (absoluteTime - occurrence.startTime) * 10, 0, 0, 1]);
+    const emitter = makeEmitter({ emissionSpeed: constantTrack(0),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]), emissionRate: constantTrack(2) });
+    const world = (elapsed: number) => sampleNativeEmitter(emitter, undefined, 667, elapsed, { sourceTransformAtTime });
+    const local = (elapsed: number) => sampleNativeEmitter({ ...emitter, flags: 0x20031 }, undefined, 667,
+      elapsed, { sourceTransformAtTime });
+    const earlierWorld = world(0.75);
+    expect(earlierWorld[0].position[0]).toBeCloseTo(5);
+    expect(world(1.25)[0].position[0]).toBeCloseTo(5);
+    expect(local(0.75)[0].position[0]).toBeCloseTo(7.5);
+    expect(local(1.25)[0].position[0]).toBeCloseTo(12.5);
+    expect(world(0.75)).toEqual(earlierWorld);
   });
 
   it("stops births at visual arrival while already emitted particles finish their lifespans", () => {

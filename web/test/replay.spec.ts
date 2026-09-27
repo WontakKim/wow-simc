@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 interface ModelRegionAnalysis {
   leftPixels: number;
   rightPixels: number;
@@ -463,6 +464,64 @@ test("applies the latest replay pose when the Vulpera finishes loading late", as
   expect(earlierPose.equals(replayPose)).toBe(false);
 });
 
+test("resamples the paused displayed attachment after a delayed caster load with test-shortened clips", async ({ page }) => {
+  let releaseModel!: () => void;
+  const modelGate = new Promise<void>((resolve) => { releaseModel = resolve; });
+  await page.route("**/model/native-models/1890761.m2", async (route) => {
+    await modelGate;
+    await route.continue();
+  });
+  await page.route("**/src/GenuineModelScene.tsx*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const sequenceMarker = "const sequences = vulperaActor.model.sequences;";
+    const probeMarker = "const occurrences = replayState.timeline";
+    if (source.split(sequenceMarker).length !== 2 || source.split(probeMarker).length !== 2) {
+      throw new Error("Replay late-pose probe hook changed.");
+    }
+    // The pinned clip does not loop by 3.3s; test-only durations force the authored loop branch.
+    const shortenedClips = source.replace(sequenceMarker, `${sequenceMarker}
+      for (const sequence of sequences) {
+        const duration = { 828: 200, 862: 300, 830: 150 }[sequence.animationId];
+        if (duration) sequence.durationMs = duration;
+      }`);
+    await route.fulfill({ response, body: shortenedClips.replace(probeMarker, `
+      if (Math.abs(replayState.cursor - 3.3) < 0.0001 && vulperaActor) {
+        const historical = sampleHistoricalAttachment(21, replayState.cursor, "caster");
+        window.__replayLatePoseProbe = {
+          displayed: sampleAttachmentEffectTransform(vulperaActor, 21), historical,
+          selectedAnimationId: resolveLoggedMotionBlend(replayState.timeline, replayState.cursor,
+            undefined, replayClipDurations).incoming.animationId,
+          staleAnimationId: resolveLoggedMotionBlend(replayState.timeline, replayState.cursor).incoming.animationId,
+          durations: Object.fromEntries(replayClipDurations),
+        };
+      }
+      ${probeMarker}`) });
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  await seek.fill("3.3");
+  await expect(scene.locator(".replay-motion-status")).toContainText("Logged cast 2.574–3.650s");
+  releaseModel();
+  await expect(scene.getByRole("status")).toContainText("Both genuine models ready", { timeout: 30_000 });
+  await expect(scene.getByTestId("replay-effect-status")).toContainText("Original components ready", { timeout: 30_000 });
+  const readProbe = () => page.evaluate(() => (window as Window & { __replayLatePoseProbe?: {
+    displayed: number[]; historical: number[]; durations: Record<string, number>;
+    selectedAnimationId: number; staleAnimationId: number;
+  } }).__replayLatePoseProbe);
+  await expect.poll(readProbe).toBeDefined();
+  const latePose = await readProbe();
+  expect(latePose?.durations[828]).toBe(200);
+  expect(latePose?.selectedAnimationId).toBe(862);
+  expect(latePose?.staleAnimationId).toBe(828);
+  expect(latePose?.displayed).toEqual(latePose?.historical);
+  await seek.fill("2.6");
+  await seek.fill("3.3");
+  await expect.poll(readProbe).toMatchObject({ historical: latePose?.historical });
+  expect((await readProbe())?.displayed).toEqual(latePose?.historical);
+});
+
 test("orbits, zooms, and resets the genuine model camera", async ({ page }) => {
   await page.goto("/");
   const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
@@ -783,7 +842,7 @@ test("binds all four unsuppressed Flame Shock components to caster and impact an
           const frame = instance.sourceTransformAtTime(0);
           return {
             sourceRowId: matching[index].component.placement?.eventId,
-            position: nativeToThreePoint([frame[12], frame[13], frame[14]]),
+            position: [frame[12], frame[14], -frame[13]],
             age: instance.timeSeconds,
             emissionDuration: instance.emissionEndSeconds,
           };
@@ -1251,6 +1310,74 @@ test("moves three coherent original components and discloses the blocked fourth 
   }
   expect(runtimeRequests.every((url) => new URL(url).origin === "http://127.0.0.1:4173")).toBe(true);
   expect(pageErrors).toEqual([]);
+});
+
+test("samples a fixed historical missile release across pose changes and backward seeks", async ({ page }, testInfo) => {
+  await page.route("**/src/GenuineModelScene.tsx*", async (route) => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const marker = "particleCount += effect.setReplayInstances(instances, camera);";
+    if (source.split(marker).length !== 2) throw new Error("Replay spatial probe hook changed.");
+    await route.fulfill({ response, body: source.replace(marker, `
+      if (asset.fileDataId === 1284864 && instances.length && vulperaActor) {
+        window.__replayHistoricalAuraProbe = {
+          birth: instances[0].sourceTransformAtTime(0.15), displayed: vulperaActor.sampleAttachment(22),
+        };
+      }
+      const inspectedIndex = matching.findIndex(({ occurrence }) => Math.abs(occurrence.startTime - 20.428) < 0.001);
+      if (asset.fileDataId === 4329984 && inspectedIndex >= 0 && vulperaActor) {
+        const instance = instances[inspectedIndex];
+        const displayedBefore = vulperaActor.sampleAttachment(21);
+        const launch = instance.sourceTransformAtTime(0);
+        const current = instance.sourceTransformAtTime(instance.timeSeconds);
+        window.__replaySpatialProbe = {
+          launch, current, displayedBefore, displayedAfter: vulperaActor.sampleAttachment(21),
+          duration: matching[inspectedIndex].occurrence.travelDuration,
+        };
+      }
+      ${marker}`) });
+  });
+  await page.goto("/");
+  const scene = page.getByRole("region", { name: "Genuine WoW model scene" });
+  await expect(scene.getByTestId("replay-effect-status")).toContainText("Original components ready", { timeout: 30_000 });
+  const seek = scene.getByRole("slider", { name: "Seek playback" });
+  const canvas = scene.locator("canvas");
+  const probe = () => page.evaluate(() => (window as Window & { __replaySpatialProbe: {
+    launch: number[]; current: number[]; displayedBefore: number[]; displayedAfter: number[]; duration: number;
+  } }).__replaySpatialProbe);
+  await seek.fill("20.55");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
+  const early = await probe();
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const pixels = await canvas.screenshot({ path: testInfo.outputPath("historical-missile-early.png") });
+  await seek.fill("20.7");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
+  const later = await probe();
+  expect(later.displayedBefore).toEqual(later.displayedAfter);
+  expect(early.displayedBefore).not.toEqual(later.displayedBefore);
+  expect(later.launch).toEqual(early.launch);
+  expect(later.current[12]).toBeGreaterThan(early.current[12]);
+  expect(later.current.slice(0, 12)).toEqual(later.launch.slice(0, 12));
+  expect(await canvas.screenshot({ path: testInfo.outputPath("historical-missile-later.png") })).not.toEqual(pixels);
+  await seek.fill("0.2");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1284864/);
+  const auraProbe = () => page.evaluate(() => (window as Window & { __replayHistoricalAuraProbe: {
+    birth: number[]; displayed: number[];
+  } }).__replayHistoricalAuraProbe);
+  const auraEarly = await auraProbe();
+  await seek.fill("3.2");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /1284864/);
+  const auraLater = await auraProbe();
+  expect(auraEarly.displayed).not.toEqual(auraLater.displayed);
+  expect(auraLater.birth).toEqual(auraEarly.birth);
+  await seek.fill("20.55");
+  await expect(canvas).toHaveAttribute("data-replay-native-file-data-ids", /4329984,794788,613807/);
+  expect((await probe()).launch).toEqual(early.launch);
+  expect(await canvas.screenshot({ path: testInfo.outputPath("historical-missile-return.png") })).toEqual(pixels);
+  const probePath = testInfo.outputPath("historical-spatial-probes.json");
+  await writeFile(probePath, JSON.stringify({ missile: { early, later },
+    aura: { early: auraEarly, later: auraLater } }, null, 2));
+  await testInfo.attach("historical-spatial-probes", { path: probePath, contentType: "application/json" });
 });
 
 test("clears rendered replay particles when actor selection becomes empty", async ({ page }) => {
