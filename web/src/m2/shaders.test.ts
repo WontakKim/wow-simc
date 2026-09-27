@@ -19,6 +19,7 @@ describe("pinned outdoor LightData preview", () => {
   });
 });
 import {
+  M2_ALPHA_KEY,
   M2_INDEXED_SHADER_PAIRS,
   M2_PIXEL_SHADER_NAMES,
   M2_VERTEX_SHADER_NAMES,
@@ -170,18 +171,25 @@ describe("computeM2FinalOpacity", () => {
       .toEqual({ opacity: 0.5, discard: false });
   });
 
-  it("uses combiner alpha for the transparent blend modes", () => {
-    expect(computeM2FinalOpacity(2, { discardAlpha: 0.4, canDiscard: true }, 0.5))
-      .toEqual({ opacity: 0.2, discard: false });
-    expect(computeM2FinalOpacity(7, { discardAlpha: 0.4, canDiscard: true }, 0.5))
-      .toEqual({ opacity: 0.2, discard: false });
+  it.each([
+    [0, 0.5, false], // Opaque
+    [1, 0.5, true], // AlphaKey
+    [2, 0.125, false], // Alpha
+    [3, 0.125, false], // NoAlphaAdd
+    [4, 0.125, false], // Add
+    [5, 0.125, true], // Mod
+    [6, 0.125, true], // Mod2x
+    [7, 0.125, false], // BlendAdd
+  ])("uses raw blend %i for low-alpha opacity and discard", (blendMode, opacity, discard) => {
+    expect(computeM2FinalOpacity(blendMode, { discardAlpha: 0.25, canDiscard: true }, 0.5))
+      .toEqual({ opacity, discard });
   });
 
-  it("discards low-alpha MOD/MOD2X pixels to protect the destination", () => {
-    expect(computeM2FinalOpacity(4, { discardAlpha: 0.2, canDiscard: true }, 1))
-      .toEqual({ opacity: 0.2, discard: true });
-    expect(computeM2FinalOpacity(5, { discardAlpha: 0.9, canDiscard: true }, 1))
-      .toEqual({ opacity: 0.9, discard: false });
+  it.each([1, 5, 6])("keeps raw blend %i at the alpha key and when the combiner cannot discard", (blendMode) => {
+    expect(computeM2FinalOpacity(blendMode, { discardAlpha: M2_ALPHA_KEY, canDiscard: true }, 0.5).discard)
+      .toBe(false);
+    expect(computeM2FinalOpacity(blendMode, { discardAlpha: 0.25, canDiscard: false }, 0.5).discard)
+      .toBe(false);
   });
 });
 

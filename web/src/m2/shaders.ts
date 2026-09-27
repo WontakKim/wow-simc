@@ -346,7 +346,7 @@ export function computeM2FinalOpacity(
     return { opacity: meshOpacity, discard: combiner.canDiscard && combiner.discardAlpha < M2_ALPHA_KEY };
   }
   const opacity = combiner.discardAlpha * meshOpacity;
-  if (blendMode === 4 || blendMode === 5) {
+  if (blendMode === 5 || blendMode === 6) {
     return { opacity, discard: combiner.canDiscard && combiner.discardAlpha < M2_ALPHA_KEY };
   }
   return { opacity, discard: false };

@@ -397,7 +397,7 @@ void main() {
   } else if (u_blend_mode == 1) {
     finalOpacity = meshOpacity;
     if (canDiscard && discardAlpha < u_alpha_test) doDiscard = true;
-  } else if (u_blend_mode == 4 || u_blend_mode == 5) {
+  } else if (u_blend_mode == 5 || u_blend_mode == 6) {
     finalOpacity = discardAlpha * meshOpacity;
     if (canDiscard && discardAlpha < u_alpha_test) doDiscard = true;
   } else {
