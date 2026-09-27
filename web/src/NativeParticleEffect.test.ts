@@ -24,7 +24,7 @@ import { describe, expect, it } from "vitest";
 import { decodeNativeBlp } from "./nativeBlp";
 import { nativeToThreeMatrix } from "./m2/coordinates";
 import { parseNativeM2, parseNativeSkin } from "./nativeM2";
-import { m2BlendParams } from "./nativeM2Blend";
+import { applyM2Blend, fogM2BlendColor, m2BlendParams } from "./nativeM2Blend";
 import { NativeParticleEffect } from "./NativeParticleEffect";
 import * as particleSampling from "./nativeParticles";
 
@@ -95,8 +95,8 @@ describe("authored mesh attachment frame", () => {
   });
 });
 
-describe("original Lightning Bolt cast artifact", () => {
-  it("premultiplies blend-7 cast billboards before the ONE/ONE_MINUS_SRC_ALPHA blend", () => {
+describe("original particle texture alpha", () => {
+  it("tests blend-7 texture alpha without changing the authored color equation", () => {
     const model = parseNativeM2(loadAsset(6211618, "m2"), 6211618);
     const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
     const texture = textures[3];
@@ -107,7 +107,33 @@ describe("original Lightning Bolt cast artifact", () => {
     const blendAdd = (effect.group.children as Mesh<InstancedBufferGeometry, ShaderMaterial>[])
       .find((mesh) => mesh.material.uniforms.uFogBlendMode.value === 7)!;
     expect(blendAdd.material.blendSrc).toBe(OneFactor);
-    expect(blendAdd.material.fragmentShader).toContain("combined.rgb * uColorMult * alpha");
+    const shader = blendAdd.material.fragmentShader;
+    expect(blendAdd.material.uniforms.uAlphaTest.value).toBe(Math.fround(1 / 255));
+    expect(shader.indexOf("if (tex1.a < uAlphaTest) discard;")).toBeLessThan(shader.indexOf("vec4 combined ="));
+    expect(shader).toContain("if (combined.a < uAlphaTest) discard;");
+    expect(shader).toContain("if (combined.a < particleAlphaCutoff) discard;");
+    expect(shader).toContain("applyEffectFog(combined.rgb * uColorMult, alpha)");
+    effect.dispose();
+  });
+
+  it("identifies the Stormkeeper square's opaque BC1 glow and additive emitter", () => {
+    const model = parseNativeM2(loadAsset(1355634, "m2"), 1355634);
+    expect(model.textureFileDataIds[model.emitters[1].textureIndices[0]]).toBe(167007);
+    expect(model.emitters[1].blendingType).toBe(4);
+    const glow = decodeNativeBlp(loadAsset(167007, "blp"), 167007);
+    expect(glow).toMatchObject({ width: 128, height: 128, compression: "BC1" });
+    expect(Array.from(glow.pixels.slice(0, 4))).toEqual([0, 0, 0, 255]);
+    expect(Array.from(glow.pixels.slice((64 * glow.width + 64) * 4, (64 * glow.width + 64) * 4 + 4)))
+      .toEqual([247, 251, 255, 255]);
+    const background: [number, number, number, number] = [0.53, 0.48, 0.37, 1];
+    const foggedBorder = fogM2BlendColor(4, [0, 0, 0], [0.65, 0.72, 0.78], 1);
+    expect(applyM2Blend(4, [...foggedBorder, 1], background)).toEqual(background);
+    const textures = model.textureFileDataIds.map((id) => decodeNativeBlp(loadAsset(id, "blp"), id));
+    const effect = new NativeParticleEffect(model, textures);
+    const glowMaterial = (effect.group.children[1] as Mesh<InstancedBufferGeometry, ShaderMaterial>).material;
+    expect([glowMaterial.blendSrc, glowMaterial.blendDst]).toEqual([SrcAlphaFactor, OneFactor]);
+    expect(glowMaterial.uniforms.uFogBlendMode.value).toBe(4);
+    expect(glowMaterial.fragmentShader).toContain("(uFogBlendMode == 3 || uFogBlendMode == 4) ? vec3(0.0)");
     effect.dispose();
   });
 });

@@ -2,7 +2,7 @@ export interface DecodedBlp {
   width: number;
   height: number;
   pixels: Uint8Array;
-  compression: "BC1" | "BC3";
+  compression: "BC1" | "BC2" | "BC3";
 }
 
 function assetLabel(fileDataId?: number) {
@@ -38,18 +38,19 @@ function interpolateColor(
 function decodeColorBlock(
   source: DataView,
   blockOffset: number,
+  isBc1: boolean,
   hasBc1Transparency: boolean,
 ): Array<[number, number, number, number]> {
   const firstEndpoint = source.getUint16(blockOffset, true);
   const secondEndpoint = source.getUint16(blockOffset + 2, true);
   const first: [number, number, number, number] = [...expandRgb565(firstEndpoint), 255];
   const second: [number, number, number, number] = [...expandRgb565(secondEndpoint), 255];
-  if (hasBc1Transparency && firstEndpoint <= secondEndpoint) {
+  if (isBc1 && firstEndpoint <= secondEndpoint) {
     return [
       first,
       second,
       interpolateColor(first, second, 1, 1, 2),
-      [0, 0, 0, 0],
+      [0, 0, 0, hasBc1Transparency ? 0 : 255],
     ];
   }
   return [
@@ -98,7 +99,7 @@ export function decodeNativeBlp(sourceBuffer: ArrayBuffer, fileDataId?: number):
   const alphaDepth = source.getUint8(9);
   const alphaEncoding = source.getUint8(10);
   if (encoding !== 2) {
-    throw new Error(`${label}: BLP encoding ${encoding} is unsupported; this proof requires original BC1/BC3 texture data.`);
+    throw new Error(`${label}: BLP encoding ${encoding} is unsupported; this proof requires original BC1/BC2/BC3 texture data.`);
   }
 
   let compression: DecodedBlp["compression"];
@@ -106,6 +107,9 @@ export function decodeNativeBlp(sourceBuffer: ArrayBuffer, fileDataId?: number):
   if (alphaEncoding === 0 && (alphaDepth === 0 || alphaDepth === 1)) {
     compression = "BC1";
     bytesPerBlock = 8;
+  } else if (alphaEncoding === 1 && alphaDepth === 8) {
+    compression = "BC2";
+    bytesPerBlock = 16;
   } else if (alphaEncoding === 7 && alphaDepth === 8) {
     compression = "BC3";
     bytesPerBlock = 16;
@@ -135,8 +139,8 @@ export function decodeNativeBlp(sourceBuffer: ArrayBuffer, fileDataId?: number):
     for (let blockX = 0; blockX < blockColumns; blockX += 1) {
       const blockIndex = blockY * blockColumns + blockX;
       const blockOffset = mipOffset + blockIndex * bytesPerBlock;
-      const colorOffset = compression === "BC3" ? blockOffset + 8 : blockOffset;
-      const colors = decodeColorBlock(source, colorOffset, compression === "BC1" && alphaDepth === 1);
+      const colorOffset = compression === "BC1" ? blockOffset : blockOffset + 8;
+      const colors = decodeColorBlock(source, colorOffset, compression === "BC1", alphaDepth === 1);
       const colorSelectors = source.getUint32(colorOffset + 4, true);
       const alphaValues = compression === "BC3" ? decodeBc3Alpha(source, blockOffset) : null;
       let alphaSelectors = 0n;
@@ -159,7 +163,8 @@ export function decodeNativeBlp(sourceBuffer: ArrayBuffer, fileDataId?: number):
           pixels[destination + 2] = color[2];
           pixels[destination + 3] = alphaValues
             ? alphaValues[Number((alphaSelectors >> BigInt(pixelInBlock * 3)) & 0x7n)]
-            : color[3];
+            : compression === "BC2" ? ((source.getUint8(blockOffset + (pixelInBlock >> 1)) >> ((pixelInBlock & 1) * 4)) & 0xf) * 17
+              : color[3];
         }
       }
     }

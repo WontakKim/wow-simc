@@ -43,6 +43,39 @@ describe("decodeNativeBlp", () => {
     ]);
   });
 
+  it.each([0, 1])("uses the BC1 three-color palette for alpha depth %i", (alphaDepth) => {
+    const block = new Uint8Array(8);
+    const view = new DataView(block.buffer);
+    view.setUint16(0, 0x0000, true);
+    view.setUint16(2, 0xffff, true);
+    view.setUint32(4, selectors(0, 1, 2, 3), true);
+    const image = decodeNativeBlp(makeBlp(alphaDepth, 0, block));
+    expect(Array.from(image.pixels.slice(0, 16))).toEqual([
+      0, 0, 0, 255,
+      255, 255, 255, 255,
+      127, 127, 127, 255,
+      0, 0, 0, alphaDepth === 1 ? 0 : 255,
+    ]);
+  });
+
+  it("selects BC2 from its header format and decodes the explicit alpha nibbles", () => {
+    const block = new Uint8Array(16);
+    block[0] = 0xf0;
+    const view = new DataView(block.buffer);
+    view.setUint16(8, 0xf800, true);
+    view.setUint16(10, 0x07e0, true);
+    view.setUint32(12, selectors(0, 1), true);
+    const image = decodeNativeBlp(makeBlp(8, 1, block));
+    expect(image.compression).toBe("BC2");
+    expect(Array.from(image.pixels.slice(0, 8))).toEqual([255, 0, 0, 0, 0, 255, 0, 255]);
+
+    view.setUint16(8, 0x0000, true);
+    view.setUint16(10, 0xffff, true);
+    view.setUint32(12, selectors(3), true);
+    expect(Array.from(decodeNativeBlp(makeBlp(8, 1, block)).pixels.slice(0, 4)))
+      .toEqual([170, 170, 170, 0]);
+  });
+
   it("decodes BC3 alpha endpoints and three-bit selectors", () => {
     const block = new Uint8Array(16);
     block[0] = 255;
@@ -72,6 +105,10 @@ describe("decodeNativeBlp", () => {
 
     const partial = makeBlp(8, 7, new Uint8Array(15));
     expect(() => decodeNativeBlp(partial, 21)).toThrow(/FileDataID 21.*mip.*16 bytes.*15/i);
+    expect(() => decodeNativeBlp(makeBlp(8, 9, new Uint8Array(16)), 23))
+      .toThrow(/FileDataID 23.*unsupported BLP alpha layout depth 8, encoding 9/i);
+    expect(() => decodeNativeBlp(makeBlp(8, 0, new Uint8Array(8)), 24))
+      .toThrow(/FileDataID 24.*unsupported BLP alpha layout depth 8, encoding 0/i);
 
     const invalidDimensions = makeBlp(0, 0, new Uint8Array(8));
     new DataView(invalidDimensions).setUint32(12, 0, true);
@@ -115,7 +152,7 @@ describe("new original preview BLP assets", () => {
     const { readFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");
     expect(textureIds).toHaveLength(54);
-    const compressionCounts = { BC1: 0, BC3: 0 };
+    const compressionCounts = { BC1: 0, BC2: 0, BC3: 0 };
     for (const fileDataId of textureIds) {
       const bytes = readFileSync(resolve(process.cwd(), `public/model/native-effects/${fileDataId}.blp`));
       const source = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -123,7 +160,7 @@ describe("new original preview BLP assets", () => {
       expect(image.width * image.height * 4).toBe(image.pixels.length);
       compressionCounts[image.compression] += 1;
     }
-    expect(compressionCounts).toEqual({ BC1: 6, BC3: 48 });
+    expect(compressionCounts).toEqual({ BC1: 6, BC2: 0, BC3: 48 });
   });
 
   it("decodes the seven newly pinned original mesh textures without replacing the shared eighth", async () => {

@@ -257,7 +257,7 @@ function createEmitterBatch(
         if (combined.a < uAlphaTest) discard;
         if (combined.a < particleAlphaCutoff) discard;
         float alpha = combined.a * uAlphaMult;
-        gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult ${emitter.blendingType === 7 ? "* alpha" : ""}, alpha), alpha);
+        gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult, alpha), alpha);
         #include <colorspace_fragment>
       }
     `,
