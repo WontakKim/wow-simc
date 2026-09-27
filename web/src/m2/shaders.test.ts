@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import previewStageJson from "../previewStage.json";
 import { parsePreviewStage } from "./previewStage";
+import { M2_VERTEX_SHADER_SOURCE } from "./shaderSource";
 
 describe("pinned outdoor LightData preview", () => {
   it("decodes BGRA daylight and records the source row/time without inventing missing ambient channels", () => {
@@ -33,6 +34,12 @@ import {
   type M2CombinerInputs,
   type M2LightPreset,
 } from "./shaders";
+
+describe("environment-coordinate pole", () => {
+  it("maps a zero projection denominator to the finite texture center", () => {
+    expect(M2_VERTEX_SHADER_SOURCE).toMatch(/if \(m == 0\.0\) return vec2\(0\.5\);/);
+  });
+});
 
 describe("selectM2Shaders", () => {
   // Indexed table, research/rendering/m2-format-and-rendering.md section 7:

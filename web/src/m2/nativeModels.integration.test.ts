@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Box3, Matrix4, Vector3 } from "three";
 import { ACTOR_BASE_YAW, NATIVE_BASIS } from "../GenuineModelScene";
+import appearanceJson from "../vulperaAppearance.json";
+import { compileGeosetVisibility } from "./appearance";
 import { parseM2File, parseSkinFile } from "./model";
 import { createNativeM2Actor } from "./renderer";
 import type { Vec3 } from "./model";
@@ -155,6 +157,20 @@ describe.skipIf(!assetsAvailable)("prepared native models", () => {
     expect(pixelShaders.has(34)).toBe(false);
     console.log("[native-models] vulpera batch vertex shaders:", [...vertexShaders].sort((a, b) => a - b).join(","),
       "pixel shaders:", [...pixelShaders].sort((a, b) => a - b).join(","));
+  });
+
+  it("uses the environment-coordinate shader on visible Vulpera skin batches", () => {
+    const model = parseM2File(readPreparedFile(1890761, "m2")!, 1890761);
+    const skin = parseSkinFile(readPreparedFile(1893903, "skin")!, 1893903);
+    const geosetVisibility = compileGeosetVisibility(
+      skin.sections.map((section) => section.meshPartId), appearanceJson,
+    );
+    const actor = createNativeM2Actor({ model, skin, label: "vulpera-env", textures: new Map(), geosetVisibility });
+    const environmentBatches = actor.batches.filter(({ batch, mesh, material }) =>
+      batch.shaderId === 0x90 && mesh.visible && material.uniforms.u_vertex_shader.value === 1);
+    expect(environmentBatches.length).toBeGreaterThan(0);
+    expect(environmentBatches.every(({ material }) => material.uniforms.u_pixel_shader.value === 1)).toBe(true);
+    actor.dispose();
   });
 
   it("orients the native actors upright and facing each other (N2-FIX)", () => {

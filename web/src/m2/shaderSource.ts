@@ -35,9 +35,11 @@ mat4 boneMatrix(int index) {
 }
 
 vec2 calcEnvCoord(vec3 posView, vec3 normalView) {
+  // WWV posToTexCoord uses the negative projection sign; wow.export uses the opposite sign.
   vec3 r = reflect(normalize(posView), normalize(normalView));
   float m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
-  return vec2(r.x / m + 0.5, r.y / m + 0.5);
+  if (m == 0.0) return vec2(0.5);
+  return vec2(0.5 - r.x / m, 0.5 - r.y / m);
 }
 
 float calcEdgeFade(vec3 posView, vec3 normalView) {
