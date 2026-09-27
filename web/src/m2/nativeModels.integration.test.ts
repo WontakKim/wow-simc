@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { Box3, Matrix4, Vector3 } from "three";
 import { ACTOR_BASE_YAW, NATIVE_BASIS } from "../GenuineModelScene";
 import { parseM2File, parseSkinFile } from "./model";
+import { createNativeM2Actor } from "./renderer";
 import type { Vec3 } from "./model";
 import {
   attachmentMatrix,
@@ -45,6 +46,21 @@ describe.skipIf(!assetsAvailable)("prepared native models", () => {
   if (!assetsAvailable) {
     console.warn("Skipping native model integration tests: run node script/prepare-native-models.mjs to fetch the pinned assets.");
   }
+
+  it("preserves every primary batch when real skins also contain shadow batches", () => {
+    for (const { modelFileDataId, skinFileDataId, primaryCount, shadowCount } of [
+      { modelFileDataId: 1890761, skinFileDataId: 1893903, primaryCount: 76, shadowCount: 68 },
+      { modelFileDataId: 125259, skinFileDataId: 478820, primaryCount: 1, shadowCount: 1 },
+    ]) {
+      const model = parseM2File(readPreparedFile(modelFileDataId, "m2")!, modelFileDataId);
+      const skin = parseSkinFile(readPreparedFile(skinFileDataId, "skin")!, skinFileDataId);
+      expect(skin.batches).toHaveLength(primaryCount);
+      expect(skin.shadowBatchCount).toBe(shadowCount);
+      const actor = createNativeM2Actor({ model, skin, label: `actor-${modelFileDataId}`, textures: new Map() });
+      expect(actor.batches.map(({ batch }) => batch.index)).toEqual(Array.from({ length: primaryCount }, (_, index) => index));
+      actor.dispose();
+    }
+  });
 
   it("parses the Vulpera male LOD0 model, skin and every replay animation", () => {
     const model = parseM2File(readPreparedFile(1890761, "m2")!, 1890761);

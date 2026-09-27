@@ -190,8 +190,7 @@ export function createNativeM2Actor(options: NativeM2ActorOptions): NativeM2Acto
   const root = new Group();
   root.name = `${label}-m2-actor`;
 
-  const drawableBatches = skin.batches.slice(0, skin.batches.length - skin.shadowBatchCount);
-  const order = drawableBatches
+  const order = skin.batches
     .map((batch, index) => ({ batch, index }))
     .sort((a, b) =>
       a.batch.priorityPlane - b.batch.priorityPlane
@@ -203,8 +202,8 @@ export function createNativeM2Actor(options: NativeM2ActorOptions): NativeM2Acto
 
   const batches: NativeM2Batch[] = [];
   const unsupported: string[] = [];
-  for (let index = 0; index < drawableBatches.length; index += 1) {
-    const batch = drawableBatches[index];
+  for (let index = 0; index < skin.batches.length; index += 1) {
+    const batch = skin.batches[index];
     const section = skin.sections[batch.sectionIndex];
     if (!section) continue;
     const selection = selectM2Shaders(batch.shaderId, batch.textureCount);

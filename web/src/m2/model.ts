@@ -720,7 +720,7 @@ export function parseSkinFile(source: ArrayBuffer, fileDataId: number): M2Skin {
   const bonesDescriptor = reader.arrayDescriptor(20, 4, "bone remap");
   const sectionsDescriptor = reader.arrayDescriptor(28, 0x30, "sections");
   const batchesDescriptor = reader.arrayDescriptor(36, 0x18, "batches");
-  const shadowBatchesDescriptor = reader.arrayDescriptor(44, 12, "shadow batches");
+  const shadowBatchesDescriptor = reader.arrayDescriptor(48, 12, "shadow batches");
 
   const vertexLookup = readU16Lookup(reader, vertexLookupDescriptor, "vertex lookup");
   const indices = readU16Lookup(reader, indicesDescriptor, "triangle index");
@@ -785,11 +785,8 @@ export function parseSkinFile(source: ArrayBuffer, fileDataId: number): M2Skin {
     }
   }
   for (const section of sections) {
-    // Validate the on-disk ranges; the level-extended indexStart may legitimately
-    // point beyond this file's index array (multi-level addressing).
-    const rawIndexStart = section.indexStart - section.level * 65536;
     if (section.vertexStart + section.vertexCount > vertexLookup.length
-      || rawIndexStart + section.indexCount > indices.length) {
+      || section.indexStart + section.indexCount > indices.length) {
       throw new Error(`${label}: section ${section.index} vertex or triangle range is outside the skin arrays.`);
     }
   }

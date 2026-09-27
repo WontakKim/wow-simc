@@ -276,6 +276,7 @@ describe("parseSkinFile", () => {
         textureWeightComboIndex: 2,
         textureTransformComboIndex: 3,
       }],
+      boneCountMax: 4,
       shadowBatchCount: 1,
     });
 
@@ -317,10 +318,12 @@ describe("parseSkinFile", () => {
     expect(skin.shadowBatchCount).toBe(1);
   });
 
-  it("extends only the triangle index start by the section level", () => {
+  it("extends only the triangle index start by the section level when the full range exists", () => {
+    const indices = Array<number>(65539).fill(0);
+    indices.splice(65536, 3, 1, 2, 1);
     const source = buildSkinFixture({
       vertexLookup: [0, 1, 2],
-      indices: [0, 1, 2],
+      indices,
       bones: [[0, 0, 0, 0]],
       sections: [{ vertexStart: 1, vertexCount: 2, indexStart: 0, indexCount: 3, level: 1 }],
       batches: [{}],
@@ -334,6 +337,29 @@ describe("parseSkinFile", () => {
       indexStart: 65536,
       indexCount: 3,
     });
+    expect(skin.indices.slice(skin.sections[0].indexStart, 65539)).toEqual([1, 2, 1]);
+  });
+
+  it("rejects a level-extended section whose full index range is absent", () => {
+    const source = buildSkinFixture({
+      vertexLookup: [0, 1, 2],
+      indices: [0, 1, 2],
+      sections: [{ vertexCount: 3, indexStart: 0, indexCount: 3, level: 1 }],
+      batches: [{}],
+    });
+
+    expect(() => parseSkinFile(source, 8024)).toThrow(/FileDataID 8024.*section 0.*range.*outside/i);
+  });
+
+  it("requires only the complete extended descriptors and bounds the shadow array", () => {
+    const header = new ArrayBuffer(0x38);
+    new Uint8Array(header).set(new TextEncoder().encode("SKIN"));
+    expect(parseSkinFile(header, 8025).shadowBatchCount).toBe(0);
+    expect(() => parseSkinFile(header.slice(0, 0x37), 8025)).toThrow(/FileDataID 8025.*SKIN.*truncated/i);
+
+    const source = buildSkinFixture({ shadowBatchCount: 1 });
+    new DataView(source).setUint32(0x34, source.byteLength, true);
+    expect(() => parseSkinFile(source, 8026)).toThrow(/FileDataID 8026.*shadow batches.*outside/i);
   });
 
   it("rejects out-of-range triangle indices with FileDataID context", () => {

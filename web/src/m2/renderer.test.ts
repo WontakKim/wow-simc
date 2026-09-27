@@ -6,7 +6,7 @@ import { createNativeM2Actor } from "./renderer";
 import { resolveSequence } from "./sampler";
 import type { M2Model, M2Skin } from "./model";
 
-function buildActorFixture() {
+function buildActorFixture(shadowBatchCount = 0) {
   const model: M2Model = parseM2File(buildM2ModelFixture({
     fileDataId: 9001,
     name: "renderer-fixture.m2",
@@ -43,6 +43,7 @@ function buildActorFixture() {
   const skin: M2Skin = parseSkinFile(buildSkinFixture({
     fileDataId: 9002,
     vertexLookup: [0, 1, 2, 3, 4, 5, 6, 7],
+    shadowBatchCount,
     indices: [0, 1, 2, 1, 3, 2, 4, 5, 6, 5, 7, 6],
     sections: [
       { meshPartId: 0, vertexStart: 0, vertexCount: 4, indexStart: 0, indexCount: 6 },
@@ -69,6 +70,16 @@ function makeTexture(fill: number) {
 }
 
 describe("createNativeM2Actor", () => {
+  it("renders every primary batch even when a separate shadow array is present", () => {
+    const { model, skin } = buildActorFixture(1);
+    const actor = createNativeM2Actor({ model, skin, label: "shadow-fixture", textures: new Map() });
+
+    expect(skin.shadowBatchCount).toBe(1);
+    expect(actor.batches.map(({ batch }) => batch.index)).toEqual([0, 1, 2]);
+    expect(actor.root.children).toHaveLength(3);
+    actor.dispose();
+  });
+
   it("builds one mesh per batch over section-scoped geometry", () => {
     const { model, skin } = buildActorFixture();
     const actor = createNativeM2Actor({

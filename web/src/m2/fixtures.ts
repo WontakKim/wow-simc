@@ -378,6 +378,7 @@ export interface SkinFixtureOptions {
   bones?: number[][];
   sections?: FixtureSection[];
   batches?: FixtureBatch[];
+  boneCountMax?: number;
   shadowBatchCount?: number;
 }
 
@@ -437,10 +438,9 @@ export function buildSkinFixture(options: SkinFixtureOptions = {}): ArrayBuffer 
     view.setUint16(record + 20, batch.textureWeightComboIndex ?? 0, true);
     view.setUint16(record + 22, batch.textureTransformComboIndex ?? 0, true);
   }));
-  // Shadow-batch count lives at 0x2c with its array offset at 0x30 (the SKIN
-  // header's last descriptor), matching the corrected parseSkinFile reader.
-  view.setUint32(0x2c, shadowBatchCount, true);
-  view.setUint32(0x30, cursor, true);
+  view.setUint32(0x2c, options.boneCountMax ?? 0, true);
+  view.setUint32(0x30, shadowBatchCount, true);
+  view.setUint32(0x34, cursor, true);
   return buffer;
 }
 
