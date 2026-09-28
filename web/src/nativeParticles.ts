@@ -368,6 +368,14 @@ const IDENTITY_MATRIX: NativeMatrix = [
   0, 0, 0, 1,
 ];
 
+// WWV's particleCoordinatesFix rotates generator-local XY after the emitter offset.
+const PARTICLE_GENERATOR_BASIS: NativeMatrix = [
+  0, 1, 0, 0,
+  -1, 0, 0, 0,
+  0, 0, 1, 0,
+  0, 0, 0, 1,
+];
+
 function multiplyMatrices(first: NativeMatrix, second: NativeMatrix): NativeMatrix {
   const result = new Array<number>(16).fill(0);
   for (let column = 0; column < 4; column += 1) {
@@ -462,7 +470,7 @@ function boneMatrixAt(
     : local;
 }
 
-/** Emitter transform at a time: source transform * bone * T(emitter.position). */
+/** Emitter transform at a time: source * bone * T(emitter.position) * generator basis. */
 function emitterMatrixAt(
   emitter: NativeParticleEmitter,
   bones: NativeBone[] | undefined,
@@ -478,7 +486,7 @@ function emitterMatrixAt(
       sourceTransformAtTime(timeSeconds),
       boneMatrixAt(bones?.[emitter.boneIndex], bones, timeMs, sequenceDurationMs, globalSequenceDurationsMs, sequenceIndex),
     ),
-    translationMatrix(emitter.position),
+    multiplyMatrices(translationMatrix(emitter.position), PARTICLE_GENERATOR_BASIS),
   );
 }
 

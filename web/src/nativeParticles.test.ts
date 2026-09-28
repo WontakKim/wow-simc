@@ -120,6 +120,79 @@ function makeRibbon(overrides: Partial<NativeRibbonEmitter> = {}): NativeRibbonE
 }
 
 describe("reference semantics (M0b)", () => {
+  it("rotates a non-square plane and its z-source launch direction in native generator space", () => {
+    const emitter = makeEmitter({
+      position: [2, 3, 4],
+      emissionAreaLength: constantTrack(4),
+      emissionAreaWidth: constantTrack(2),
+      emissionRate: constantTrack(24),
+      lifespan: constantTrack(3),
+      emissionSpeed: constantTrack(3),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+      zSource: constantTrack(2),
+    });
+    const samples = sampleNativeEmitter(emitter, undefined, 667, 1.005, { occurrenceSeed: "plane-basis" });
+    expect(samples).toHaveLength(24);
+    expect(samples.some(({ position, velocity, age }) => Math.abs(position[1] - 3 - velocity[1] * age) > 1)).toBe(true);
+    for (const { position, velocity, age } of samples) {
+      const offsetX = position[0] - 2 - velocity[0] * age;
+      const offsetY = position[1] - 3 - velocity[1] * age;
+      expect(Math.abs(offsetX)).toBeLessThanOrEqual(1);
+      expect(Math.abs(offsetY)).toBeLessThanOrEqual(2);
+      const length = Math.hypot(offsetX, offsetY, 2);
+      expect(velocity[0]).toBeCloseTo(3 * offsetX / length, 5);
+      expect(velocity[1]).toBeCloseTo(3 * offsetY / length, 5);
+      expect(velocity[2]).toBeCloseTo(-6 / length, 5);
+    }
+  });
+
+  it.each([0x20021, 0x20031])("composes the sphere generator basis after source, bone and emitter offset for flags %i", (flags) => {
+    const quarterTurn = Math.SQRT1_2;
+    const bone: NativeBone = {
+      ...makeBone(),
+      translation: constantTrack<Vector3Tuple>([0, 0, 0]),
+      rotation: constantTrack<QuaternionTuple>([0, 0, quarterTurn, quarterTurn]),
+    };
+    const sourceTransformAtTime = (): NativeMatrix => [
+      0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 10, 20, 30, 1,
+    ];
+    const emitter = makeEmitter({
+      emitterType: 2,
+      flags,
+      position: [1, 2, 3],
+      emissionAreaLength: constantTrack(1),
+      emissionAreaWidth: constantTrack(1),
+      emissionSpeed: constantTrack(2),
+      emissionRate: constantTrack(1),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+    });
+    const particle = sampleNativeEmitter(emitter, bone, 667, 1.005, { sourceTransformAtTime })[0];
+    expect(particle.position[0]).toBeCloseTo(9, 5);
+    expect(particle.position[1]).toBeCloseTo(17 - 2 * particle.age, 5);
+    expect(particle.position[2]).toBeCloseTo(33, 5);
+    expect(particle.velocity[0]).toBeCloseTo(0, 5);
+    expect(particle.velocity[1]).toBeCloseTo(-2, 5);
+    expect(particle.velocity[2]).toBeCloseTo(0, 5);
+    expect(Math.hypot(...particle.velocity)).toBeCloseTo(2, 5);
+  });
+
+  it("keeps the sphere's axial emission on native +Y with an identity source and bone", () => {
+    const emitter = makeEmitter({
+      emitterType: 2,
+      emissionAreaLength: constantTrack(1),
+      emissionAreaWidth: constantTrack(1),
+      emissionSpeed: constantTrack(2),
+      emissionRate: constantTrack(1),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+    });
+    const particle = sampleNativeEmitter(emitter, undefined, 667, 1.005)[0];
+    expect(particle.position[0]).toBeCloseTo(0, 5);
+    expect(particle.position[1]).toBeCloseTo(1 + 2 * particle.age, 5);
+    expect(particle.position[2]).toBeCloseTo(0, 5);
+    expect(particle.velocity[0]).toBeCloseTo(0, 5);
+    expect(particle.velocity[1]).toBeCloseTo(2, 5);
+    expect(particle.velocity[2]).toBeCloseTo(0, 5);
+  });
   it("keeps world particles on their birth transform while local particles follow a moving and rotating source", () => {
     // Source translates along +X at 10/s and rotates about native Y a quarter turn per second.
     const sourceTransformAtTime = (timeSeconds: number): NativeMatrix => {
@@ -298,7 +371,9 @@ describe("reference semantics (M0b)", () => {
     const sampleAt = (time: number) => sampleNativeEmitter(emitter, undefined, 667, time, { occurrenceSeed: "plane-channels" });
     const samples = sampleAt(1.005);
     expect(samples).toHaveLength(24);
-    expect(samples.some((sample) => Math.abs(sample.position[1] - Math.asin(sample.velocity[0])) > 0.1)).toBe(true);
+    const offsets = samples.map((sample) => sample.position[0] - sample.velocity[0] * sample.age);
+    expect(offsets.some((offset) => Math.abs(offset) > 0.1)).toBe(true);
+    expect(samples.some((sample, index) => Math.abs(offsets[index] - Math.asin(sample.velocity[1])) > 0.1)).toBe(true);
     sampleAt(1.5);
     expect(sampleAt(1.005)).toEqual(samples);
   });
@@ -320,7 +395,7 @@ describe("reference semantics (M0b)", () => {
     });
     const samples = sampleNativeEmitter(emitter, undefined, 667, 1.005, { occurrenceSeed: "sphere-channels" });
     expect(samples).toHaveLength(24);
-    expect(samples.some((sample) => Math.abs(Math.atan2(sample.position[1], sample.position[0]) - (sample.size[0] - 1)) > 0.1)).toBe(true);
+    expect(samples.some((sample) => Math.abs(Math.atan2(-sample.position[0], sample.position[1]) - (sample.size[0] - 1)) > 0.1)).toBe(true);
   });
 
   it("does not reuse draws between the alternate plane and sphere generators", () => {
@@ -340,13 +415,13 @@ describe("reference semantics (M0b)", () => {
     }), undefined, 667, 1.005, options);
     expect(plane).toHaveLength(24);
     expect(sphere).toHaveLength(24);
-    expect(plane.some((sample, index) => Math.abs(sample.position[0] - (2 * Math.hypot(...sphere[index].position) - 1)) > 0.1)).toBe(true);
-    expect(plane.some((sample, index) => Math.abs(sample.position[1] - Math.asin(sphere[index].position[2]
+    expect(plane.some((sample, index) => Math.abs(sample.position[1] - (2 * Math.hypot(...sphere[index].position) - 1)) > 0.1)).toBe(true);
+    expect(plane.some((sample, index) => Math.abs(-sample.position[0] - Math.asin(sphere[index].position[2]
       / Math.hypot(...sphere[index].position))) > 0.1)).toBe(true);
     const planeWithDirection = sampleNativeEmitter(makeEmitter({ ...base,
       emissionSpeed: constantTrack(1), verticalRange: constantTrack(1),
     }), undefined, 667, 1.005, options);
-    expect(planeWithDirection.some((sample, index) => Math.abs(Math.asin(sample.velocity[0])
+    expect(planeWithDirection.some((sample, index) => Math.abs(Math.asin(sample.velocity[1])
       - Math.asin(sphere[index].position[2] / Math.hypot(...sphere[index].position))) > 0.1)).toBe(true);
   });
 
@@ -607,7 +682,7 @@ describe("native particle sampling", () => {
     });
     const positions = sampleNativeEmitter(sphere, undefined, 667, 1);
     expect(positions.every((sample) => Math.abs(sample.position[2]) < 0.000001)).toBe(true);
-    expect(positions.every((sample) => Math.abs(Math.atan2(sample.position[1], sample.position[0])) <= Math.PI / 2)).toBe(true);
+    expect(positions.every((sample) => Math.abs(Math.atan2(-sample.position[0], sample.position[1])) <= Math.PI / 2)).toBe(true);
 
     const radial = sampleNativeEmitter({
       ...sphere,
@@ -658,7 +733,7 @@ describe("native particle sampling", () => {
     expect(samples.length).toBeGreaterThan(2);
     expect(samples).toEqual(sampleNativeEmitter(varied, undefined, 667, 1.9));
     expect(new Set(samples.map((sample) => sample.uvFrame)).size).toBeGreaterThan(1);
-    expect(samples.some((sample) => Math.abs(sample.position[0]) > 0.01)).toBe(true);
+    expect(samples.some((sample) => Math.abs(sample.position[1]) > 0.01)).toBe(true);
   });
 });
 
