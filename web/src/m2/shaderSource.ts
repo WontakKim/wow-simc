@@ -221,7 +221,8 @@ void main() {
   vec4 tex2 = texture2D(u_texture2, uv2);
   vec4 tex3 = texture2D(u_texture3, uv3);
 
-  vec3 meshColor = u_mesh_color.rgb;
+  // WWV fades the full mesh RGBA before the combiner; wow.export fades only alpha.
+  vec3 meshColor = u_mesh_color.rgb * v_edge_fade;
   float meshOpacity = u_mesh_color.a * v_edge_fade;
   float w1 = u_tex_sample_alpha.r;
   float w2 = u_tex_sample_alpha.g;

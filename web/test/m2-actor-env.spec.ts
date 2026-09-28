@@ -202,3 +202,97 @@ test("native actor uses transformed surface normals for environment UVs and ligh
     }
   }
 });
+
+test("native actor edge fade scales mesh RGBA once before the PS7 combiner", async ({ page }, testInfo) => {
+  await page.route("**/m2-actor-edge-fade-fixture", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><html><body></body></html>" }));
+  await page.goto("/m2-actor-edge-fade-fixture");
+
+  const samples = await page.evaluate(async () => {
+    const three = await import("/node_modules/.vite/deps/three.js");
+    const { buildM2ModelFixture, buildSkinFixture } = await import("/src/m2/fixtures.ts");
+    const { parseM2File, parseSkinFile } = await import("/src/m2/model.ts");
+    const { createNativeM2Actor } = await import("/src/m2/renderer.ts");
+    const { DataTexture, NoBlending, OrthographicCamera, RGBAFormat, Scene,
+      UnsignedByteType, WebGLRenderer } = three;
+    const normals = [[1, 0, 0], [Math.sqrt(2 / 3), 0, Math.sqrt(1 / 3)], [0, 0, 1]];
+    const vertices = [[-0.8, -0.8, 0], [0.8, -0.8, 0], [0.8, 0.8, 0], [-0.8, 0.8, 0]];
+    const model = parseM2File(buildM2ModelFixture({
+      vertices: vertices.map((position) => ({ position, normal: normals[0] as [number, number, number],
+        uvs: [[0.5, 0.5], [0.5, 0.5]], boneIndices: [0, 0, 0, 0], boneWeights: [255, 0, 0, 0] })),
+      bones: [{ pivot: [0, 0, 0] }], textures: [{ type: 0 }, { type: 0 }], textureLookup: [0, 1],
+      materials: [{ flags: 3, blendMode: 2 }],
+    }), 9034);
+    const skin = parseSkinFile(buildSkinFixture({
+      vertexLookup: [0, 1, 2, 3], indices: [0, 1, 2, 0, 2, 3],
+      sections: [{ meshPartId: 0, vertexStart: 0, vertexCount: 4, indexStart: 0, indexCount: 6 }],
+      batches: [
+        { shaderId: 0x8021, textureCount: 2, sectionIndex: 0, materialIndex: 0 }, // VS12/PS7
+        { shaderId: 0x4014, textureCount: 2, sectionIndex: 0, materialIndex: 0 }, // VS2/PS7
+      ],
+    }), 9035);
+    const textures = [
+      new DataTexture(new Uint8Array([128, 192, 64, 192]), 1, 1, RGBAFormat, UnsignedByteType),
+      new DataTexture(new Uint8Array([96, 128, 128, 128]), 1, 1, RGBAFormat, UnsignedByteType),
+    ];
+    textures.forEach((texture) => { texture.needsUpdate = true; });
+    const actor = createNativeM2Actor({ model, skin, label: "edge-fade-fixture",
+      textures: new Map(textures.map((texture, index) => [index, texture])) });
+    actor.batches.forEach(({ material }) => {
+      material.blending = NoBlending;
+      material.uniforms.u_mesh_color.value.set(0.75, 0.5, 0.625, 0.625);
+    });
+    const renderer = new WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+    renderer.setSize(65, 65);
+    renderer.setClearColor(0x000000, 1);
+    const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    camera.position.z = 3;
+    camera.lookAt(0, 0, 0);
+    const scene = new Scene();
+    scene.add(actor.root);
+    const pixel = new Uint8Array(4);
+    const samples = [];
+    for (const [batchIndex, { material, mesh }] of actor.batches.entries()) {
+      actor.batches.forEach((batch, index) => { batch.mesh.visible = index === batchIndex; });
+      for (const normal of normals) {
+        const attribute = mesh.geometry.getAttribute("normal");
+        for (let vertex = 0; vertex < 4; vertex += 1) attribute.setXYZ(vertex, ...normal);
+        attribute.needsUpdate = true;
+        renderer.render(scene, camera);
+        renderer.getContext().readPixels(32, 32, 1, 1, renderer.getContext().RGBA,
+          renderer.getContext().UNSIGNED_BYTE, pixel);
+        samples.push({ vertexShader: material.uniforms.u_vertex_shader.value,
+          pixelShader: material.uniforms.u_pixel_shader.value, normal, pixel: Array.from(pixel) });
+      }
+    }
+    actor.dispose();
+    textures.forEach((texture) => texture.dispose());
+    renderer.dispose();
+    return samples;
+  });
+
+  await testInfo.attach("actor-edge-fade-gpu-samples", { body: JSON.stringify(samples, null, 2), contentType: "application/json" });
+  // WWV forward m2Shader.frag.slang:103-125 multiplies vMeshColorAlpha by edgeFade before
+  // calcM2FragMaterial. At the centered pixel the view direction is +Z, so the WWV
+  // edgeScan curve gives 0, 0.5, 1 for these three normals. The exporter instead
+  // fades only opacity; this test explicitly selects WWV's RGBA profile.
+  const ps7 = [
+    0.75 * (128 / 255) * (96 / 255) * 2,
+    0.5 * (192 / 255) * (128 / 255) * 2,
+    0.625 * (64 / 255) * (128 / 255) * 2,
+    0.625 * (192 / 255) * (128 / 255) * 2,
+  ];
+  const fades = [0, 0.5, 1];
+  expect(samples.map(({ vertexShader, pixelShader }) => [vertexShader, pixelShader])).toEqual([
+    [12, 7], [12, 7], [12, 7], [2, 7], [2, 7], [2, 7],
+  ]);
+  samples.forEach(({ vertexShader, normal, pixel }, index) => {
+    const fade = vertexShader === 12 ? fades[index % 3] : 1;
+    ps7.forEach((channel, component) => {
+      expect.soft(pixel[component], `VS${vertexShader}, normal ${normal.join(",")}, channel ${component}`)
+        .toBeGreaterThanOrEqual(Math.round(channel * fade * 255) - 2);
+      expect.soft(pixel[component], `VS${vertexShader}, normal ${normal.join(",")}, channel ${component}`)
+        .toBeLessThanOrEqual(Math.round(channel * fade * 255) + 2);
+    });
+  });
+});
