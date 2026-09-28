@@ -162,8 +162,11 @@ describe("original particle texture alpha", () => {
     const shader = blendAdd.material.fragmentShader;
     expect(blendAdd.material.uniforms.uAlphaTest.value).toBe(Math.fround(1 / 255));
     expect(shader.indexOf("if (tex1.a < uAlphaTest) discard;")).toBeLessThan(shader.indexOf("vec4 combined ="));
-    expect(shader).toContain("if (combined.a < uAlphaTest) discard;");
-    expect(shader).toContain("if (combined.a < particleAlphaCutoff) discard;");
+    expect(shader).toContain("float alpha = combined.a * uAlphaMult;");
+    expect(shader).toContain("if (alpha < uAlphaTest) discard;");
+    expect(shader).toContain("if (alpha < particleAlphaCutoff) discard;");
+    expect(shader.indexOf("float alpha = combined.a * uAlphaMult;")).toBeLessThan(shader.indexOf("if (alpha < uAlphaTest) discard;"));
+    expect(shader.indexOf("if (alpha < uAlphaTest) discard;")).toBeLessThan(shader.indexOf("if (alpha < particleAlphaCutoff) discard;"));
     expect(shader).toContain("applyEffectFog(combined.rgb * uColorMult, alpha)");
     effect.dispose();
   });

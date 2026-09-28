@@ -264,9 +264,9 @@ function createEmitterBatch(
         ${usesMultiTexture ? "vec4 tex2 = texture2D(map2, particleUv2);\n        vec4 tex3 = texture2D(map3, particleUv3);" : ""}
         if (tex1.a < uAlphaTest) discard;
         ${combiner}
-        if (combined.a < uAlphaTest) discard;
-        if (combined.a < particleAlphaCutoff) discard;
         float alpha = combined.a * uAlphaMult;
+        if (alpha < uAlphaTest) discard;
+        if (alpha < particleAlphaCutoff) discard;
         gl_FragColor = vec4(applyEffectFog(combined.rgb * uColorMult, alpha), alpha);
       }
     `,

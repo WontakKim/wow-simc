@@ -115,3 +115,112 @@ test("native particle, ribbon, and mesh shaders preserve display-domain color", 
     expect.soft(actual, `${kind} GPU output at ${color} with ${toneMapping}; reference ${reference}`).toEqual(reference);
   }
 });
+
+test("native particles alpha-test the EXP2-scaled result without premultiplying blend-7 RGB", async ({ page }, testInfo) => {
+  await page.route("**/native-effect-alpha-fixture", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><html><body></body></html>" }));
+  await page.goto("/native-effect-alpha-fixture");
+
+  const observations = await page.evaluate(async () => {
+    const three = await import("/node_modules/.vite/deps/three.js");
+    const { NativeParticleEffect } = await import("/src/NativeParticleEffect.ts");
+    const { parseNativeM2, parseNativeSkin } = await import("/src/nativeM2.ts");
+    const {
+      Mesh, NoBlending, NoToneMapping, OneFactor, OrthographicCamera, Scene, SRGBColorSpace, WebGLRenderer,
+    } = three;
+    const loadBytes = async (id, extension) => {
+      const response = await fetch(`/model/native-effects/${id}.${extension}`);
+      if (!response.ok) throw new Error(`Missing fixture ${id}.${extension}: ${response.status}`);
+      return response.arrayBuffer();
+    };
+    const singleSource = parseNativeM2(await loadBytes(794788, "m2"), 794788);
+    const multiSource = parseNativeM2(await loadBytes(6211617, "m2"), 6211617);
+    const multiSkin = parseNativeSkin(await loadBytes(6212146, "skin"), 6212146, multiSource.vertices.length);
+    const singleModel = { ...singleSource, ribbons: [], emitters: [{ ...singleSource.emitters[0],
+      flags: (singleSource.emitters[0].flags | 0x20000) & ~0x10100000, blendingType: 7,
+      exp2: { zSource: 0, colorMultiplier: 0.5, alphaMultiplier: 0.5 },
+    }] };
+    const multiModel = { ...multiSource, emitters: [multiSource.emitters[0]] };
+    const renderer = new WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+    renderer.setSize(32, 32);
+    renderer.outputColorSpace = SRGBColorSpace;
+    renderer.toneMapping = NoToneMapping;
+    renderer.setClearColor(0x000000, 1);
+    const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    camera.position.z = 3;
+    camera.lookAt(0, 0, 0);
+    const scene = new Scene();
+    const pixel = new Uint8Array(4);
+    const results = [];
+    for (const [kind, model, skin] of [["single", singleModel, undefined], ["multi", multiModel, multiSkin]]) {
+      const textures = model.textureFileDataIds.map(() => ({ pixels: new Uint8Array([255, 255, 255, 255]), width: 1, height: 1 }));
+      const effect = new NativeParticleEffect(model, textures, 1, skin);
+      const source = effect.group.children[0];
+      const { geometry, material } = source;
+      const pixelShader = material.uniforms.uPixelShader.value;
+      if (pixelShader !== (kind === "single" ? 0 : 2)) throw new Error(`Unexpected ${kind} pixel shader ${pixelShader}`);
+      if (kind === "single" && (material.blendSrc !== OneFactor || material.uniforms.uAlphaMult.value !== 0.5
+        || material.uniforms.uColorMult.value !== 0.5)) throw new Error("Blend-7 EXP2 fixture did not bind authored values");
+      if (material.uniforms.uAlphaTest.value !== Math.fround(1 / 255)) throw new Error("Authored alpha threshold changed");
+      material.blending = NoBlending;
+      geometry.instanceCount = 1;
+      geometry.getAttribute("instanceSize").setXY(0, 0.8, 0.8);
+      geometry.getAttribute("instanceUvRect").setXYZW(0, 0, 0, 1, 1);
+      const primary = material.uniforms.map.value;
+      primary.image.data.set([200, 100, 50, 255]);
+      primary.needsUpdate = true;
+      if (kind === "multi") {
+        material.uniforms.uColorMult.value = 0.5;
+        material.uniforms.map2.value.image.data.set([255, 255, 255, 204]);
+        material.uniforms.map2.value.needsUpdate = true;
+        material.uniforms.map3.value.image.data.set([255, 255, 255, 191]);
+        material.uniforms.map3.value.needsUpdate = true;
+      }
+      const mesh = new Mesh(geometry, material);
+      scene.add(mesh);
+      const cases = kind === "single" ? [
+        { name: "scaled cutoff", alpha: 0.6, multiplier: 0.5, cutoff: 0.4, primaryAlpha: 255 },
+        { name: "scaled alpha test", alpha: 0.6, multiplier: 0.005, cutoff: 0, primaryAlpha: 255 },
+        { name: "cutoff equality", alpha: 0.5, multiplier: 0.5, cutoff: 0.25, primaryAlpha: 255 },
+        { name: "identity multiplier", alpha: 0.5, multiplier: 1, cutoff: 0.25, primaryAlpha: 255 },
+        { name: "primary alpha rejection", alpha: 1, multiplier: 4, cutoff: 0, primaryAlpha: 0 },
+        { name: "primary threshold equality", alpha: 1, multiplier: 1, cutoff: 0, primaryAlpha: 1 },
+      ] : [
+        { name: "scaled multi-texture cutoff", alpha: 1, multiplier: 0.5, cutoff: 0.4, primaryAlpha: 255 },
+      ];
+      for (const { name, alpha, multiplier, cutoff, primaryAlpha } of cases) {
+        primary.image.data[3] = primaryAlpha;
+        primary.needsUpdate = true;
+        geometry.getAttribute("instanceColor").setXYZW(0, 1, 1, 1, alpha);
+        geometry.getAttribute("instanceColor").needsUpdate = true;
+        geometry.getAttribute("instanceAlphaCutoff").setX(0, cutoff);
+        geometry.getAttribute("instanceAlphaCutoff").needsUpdate = true;
+        material.uniforms.uAlphaMult.value = multiplier;
+        renderer.render(scene, camera);
+        renderer.getContext().readPixels(16, 16, 1, 1, renderer.getContext().RGBA,
+          renderer.getContext().UNSIGNED_BYTE, pixel);
+        results.push({ kind, name, pixel: Array.from(pixel) });
+      }
+      scene.remove(mesh);
+      effect.dispose();
+    }
+    renderer.dispose();
+    return results;
+  });
+
+  await testInfo.attach("particle-alpha-gpu-samples", {
+    body: JSON.stringify(observations, null, 2), contentType: "application/json",
+  });
+  const expected = {
+    "scaled cutoff": [0, 0, 0, 255],
+    "scaled alpha test": [0, 0, 0, 255],
+    "cutoff equality": [100, 50, 25, 64],
+    "identity multiplier": [100, 50, 25, 128],
+    "primary alpha rejection": [0, 0, 0, 255],
+    "primary threshold equality": [100, 50, 25, 1],
+    "scaled multi-texture cutoff": [0, 0, 0, 255],
+  };
+  for (const { name, pixel } of observations) {
+    expect(pixel, name).toEqual(expected[name]);
+  }
+});
