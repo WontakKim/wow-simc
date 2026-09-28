@@ -286,6 +286,70 @@ describe("reference semantics (M0b)", () => {
     expect(sampleWith("cast-1")).toEqual(firstCast);
   });
 
+  it("draws plane position Y independently of its polar direction", () => {
+    const emitter = makeEmitter({
+      emissionRate: constantTrack(24),
+      lifespan: constantTrack(3),
+      emissionAreaWidth: constantTrack(2),
+      verticalRange: constantTrack(1),
+      emissionSpeed: constantTrack(1),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+    });
+    const sampleAt = (time: number) => sampleNativeEmitter(emitter, undefined, 667, time, { occurrenceSeed: "plane-channels" });
+    const samples = sampleAt(1.005);
+    expect(samples).toHaveLength(24);
+    expect(samples.some((sample) => Math.abs(sample.position[1] - Math.asin(sample.velocity[0])) > 0.1)).toBe(true);
+    sampleAt(1.5);
+    expect(sampleAt(1.005)).toEqual(samples);
+  });
+
+  it("draws sphere azimuth independently of the X size variation", () => {
+    const emitter = makeEmitter({
+      emitterType: 2,
+      flags: 0x20021 | 0x80000,
+      emissionRate: constantTrack(24),
+      lifespan: constantTrack(3),
+      emissionAreaWidth: constantTrack(1),
+      emissionAreaLength: constantTrack(1),
+      horizontalRange: constantTrack(1),
+      emissionSpeed: constantTrack(0),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+      scale: particleTrack<Vector2Tuple>([0], [[1, 1]]),
+      scaleVariation: [1, 0.5],
+      twinkleScale: [1, 1],
+    });
+    const samples = sampleNativeEmitter(emitter, undefined, 667, 1.005, { occurrenceSeed: "sphere-channels" });
+    expect(samples).toHaveLength(24);
+    expect(samples.some((sample) => Math.abs(Math.atan2(sample.position[1], sample.position[0]) - (sample.size[0] - 1)) > 0.1)).toBe(true);
+  });
+
+  it("does not reuse draws between the alternate plane and sphere generators", () => {
+    const base = {
+      emissionRate: constantTrack(24),
+      lifespan: constantTrack(3),
+      emissionSpeed: constantTrack(0),
+      gravity: constantTrack<Vector3Tuple>([0, 0, 0]),
+    };
+    const options = { occurrenceSeed: "generator-channels" };
+    const plane = sampleNativeEmitter(makeEmitter({ ...base,
+      emissionAreaLength: constantTrack(2), emissionAreaWidth: constantTrack(2),
+    }), undefined, 667, 1.005, options);
+    const sphere = sampleNativeEmitter(makeEmitter({ ...base, emitterType: 2,
+      emissionAreaLength: constantTrack(0), emissionAreaWidth: constantTrack(1),
+      verticalRange: constantTrack(1),
+    }), undefined, 667, 1.005, options);
+    expect(plane).toHaveLength(24);
+    expect(sphere).toHaveLength(24);
+    expect(plane.some((sample, index) => Math.abs(sample.position[0] - (2 * Math.hypot(...sphere[index].position) - 1)) > 0.1)).toBe(true);
+    expect(plane.some((sample, index) => Math.abs(sample.position[1] - Math.asin(sphere[index].position[2]
+      / Math.hypot(...sphere[index].position))) > 0.1)).toBe(true);
+    const planeWithDirection = sampleNativeEmitter(makeEmitter({ ...base,
+      emissionSpeed: constantTrack(1), verticalRange: constantTrack(1),
+    }), undefined, 667, 1.005, options);
+    expect(planeWithDirection.some((sample, index) => Math.abs(Math.asin(sample.velocity[0])
+      - Math.asin(sphere[index].position[2] / Math.hypot(...sphere[index].position))) > 0.1)).toBe(true);
+  });
+
   it("adds flag 0x40 burst velocity only when the emitter was empty", () => {
     const sourceTransformAtTime = (timeSeconds: number): NativeMatrix =>
       [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, timeSeconds * 10, 0, 0, 1];

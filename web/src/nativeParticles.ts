@@ -326,19 +326,20 @@ function randomSigned(occurrenceSeed: number, emitterIndex: number, spawnIndex: 
   return randomUnit(occurrenceSeed, emitterIndex, spawnIndex, channel) * 2 - 1;
 }
 
-// Draw-channel allocation; stable numbering keeps sampled values independent
-// of code paths taken.
+// Unique draw keys: 0–16 for emission/appearance, 20–25 for multi-texture
+// velocity and initial UVs, and 90 for the occurrence-wide flipbook offset.
+const CHANNEL_PARTICLE_SEED = 0;
 const CHANNEL_RATE = 1;
 const CHANNEL_LIFESPAN = 2;
-const CHANNEL_SPHERE_RADIUS = 3;
+const CHANNEL_SPHERE_RADIUS = 12;
 const CHANNEL_SPHERE_POLAR = 4;
 const CHANNEL_PLANE_X = 3;
-const CHANNEL_PLANE_Y = 4;
-const CHANNEL_PLANE_POLAR = 4;
+const CHANNEL_PLANE_Y = 14;
+const CHANNEL_PLANE_POLAR = 15;
 const CHANNEL_PLANE_AZIMUTH = 6;
 const CHANNEL_SPEED = 5;
 const CHANNEL_SPHERE_AZIMUTH = 7;
-const CHANNEL_SCALE_X = 7;
+const CHANNEL_SCALE_X = 16;
 const CHANNEL_SCALE_Y = 8;
 const CHANNEL_BASE_SPIN = 9;
 const CHANNEL_SPIN_SPEED = 10;
@@ -767,7 +768,7 @@ export function sampleNativeEmitter(
       if (hasBurstVelocity) deathTimes.push(spawn.time + lifespan);
       continue;
     }
-    const particleSeed = Math.floor(randomUnit(occurrenceSeed, emitter.index, spawn.spawnIndex, 0) * 65536);
+    const particleSeed = Math.floor(randomUnit(occurrenceSeed, emitter.index, spawn.spawnIndex, CHANNEL_PARTICLE_SEED) * 65536);
 
     // A static EXP2 z-source replaces the legacy per-emitter track when the chunk exists.
     const authoredZSource = emitter.exp2
