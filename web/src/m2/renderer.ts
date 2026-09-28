@@ -326,7 +326,9 @@ export function createNativeM2Actor(options: NativeM2ActorOptions): NativeM2Acto
 
       for (const { batch, material } of batches) {
         for (let unit = 0; unit < 2; unit += 1) {
-          const lookupValue = model.textureTransformLookup[batch.textureTransformComboIndex + unit];
+          // VS11's second matrix transforms texture stage 2; stage 1 is the environment map.
+          const textureStage = unit === 1 && material.uniforms.u_vertex_shader.value === 11 ? 2 : unit;
+          const lookupValue = model.textureTransformLookup[batch.textureTransformComboIndex + textureStage];
           const transformIndex = lookupValue === undefined || lookupValue === 65535 ? -1 : lookupValue;
           const target = unit === 0 ? material.uniforms.u_tex_matrix1 : material.uniforms.u_tex_matrix2;
           (target.value as Matrix4).fromArray(transformMatrix(transformIndex));

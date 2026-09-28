@@ -250,6 +250,38 @@ describe("createNativeM2Actor", () => {
     emptyLookupActor.dispose();
   });
 
+  it("binds the third texture's animated transform to VS11's second matrix, leaving VS2 on stage 1", () => {
+    const model = parseM2File(buildM2ModelFixture({
+      sequences: [{ animationId: 0, durationMs: 1000, flags: 0x20 }],
+      sequenceLookup: [0],
+      bones: [{ pivot: [0, 0, 0] }],
+      vertices: Array.from({ length: 3 }, () => ({ boneWeights: [255, 0, 0, 0] as [number, number, number, number] })),
+      textureTransforms: [0.125, 0.25, -0.25].map((offset) => ({
+        translation: { sequences: [{ timestamps: [0, 1000], values: [[0, 0, 0], [offset, 0, 0]] }] },
+      })),
+      textureTransformLookup: [0, 1, 2],
+    }), 9040);
+    const skin = parseSkinFile(buildSkinFixture({
+      vertexLookup: [0, 1, 2], indices: [0, 1, 2],
+      sections: [{ meshPartId: 0, vertexStart: 0, vertexCount: 3, indexStart: 0, indexCount: 3 }],
+      batches: [
+        { shaderId: 0x8014, textureCount: 3, textureTransformComboIndex: 0 },
+        { shaderId: 0x8016, textureCount: 4, textureTransformComboIndex: 0 },
+      ],
+    }), 9041);
+    const actor = createNativeM2Actor({ model, skin, label: "stage-fixture", textures: new Map() });
+    const resolution = resolveSequence(model, 0)!;
+    expect(actor.batches.map(({ material }) => material.uniforms.u_vertex_shader.value)).toEqual([11, 2]);
+    actor.updateAnimatedTracks(resolution, 1000);
+    const [vs11, vs2] = actor.batches.map(({ material }) => [
+      (material.uniforms.u_tex_matrix1.value as Matrix4).elements[12],
+      (material.uniforms.u_tex_matrix2.value as Matrix4).elements[12],
+    ]);
+    expect(vs11).toEqual([0.125, -0.25]);
+    expect(vs2).toEqual([0.125, 0.25]);
+    actor.dispose();
+  });
+
   it("samples animated UV transform matrices per texture unit", () => {
     const { model, skin } = buildActorFixture();
     const actor = createNativeM2Actor({

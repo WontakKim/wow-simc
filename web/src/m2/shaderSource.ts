@@ -211,8 +211,8 @@ void main() {
   vec2 uv1 = v_texcoord;
   vec2 uv2 = v_texcoord2;
   vec2 uv3 = v_texcoord3;
-  // Shaders 26-28 sample every texture at uv1.
-  if (u_pixel_shader == 26 || u_pixel_shader == 27 || u_pixel_shader == 28) {
+  // Crossfade shaders 26 and 28 sample their first three textures at uv1.
+  if (u_pixel_shader == 26 || u_pixel_shader == 28) {
     uv2 = uv1;
     uv3 = uv1;
   }
@@ -364,7 +364,7 @@ void main() {
     case 28: {
       vec4 mixed = mix(mix(tex1, tex2, vec4(clamp(w2, 0.0, 1.0))), tex3, vec4(clamp(w3, 0.0, 1.0)));
       matDiffuse = meshColor * mixed.rgb;
-      discardAlpha = mixed.a * texture2D(u_texture4, uv1).a;
+      discardAlpha = mixed.a * texture2D(u_texture4, v_texcoord2).a;
       canDiscard = true;
       break;
     }
